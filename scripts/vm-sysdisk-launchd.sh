@@ -4,7 +4,7 @@
 set -euo pipefail
 IMG=${IMG:-/var/tmp/sys.img}
 sudo fsck.hfsplus -fy $IMG 2>&1 | tail -1
-sudo mkdir -p /mnt/sys; sudo mount -o loop,rw -t hfsplus $IMG /mnt/sys
+sudo mkdir -p /mnt/sys; sudo mount -o loop,rw,force -t hfsplus $IMG /mnt/sys
 if [ "${MODE:-launchd}" = launchd ]; then
   # FULL=1: a full userland disk (scripts/mk-fulldisk.sh) already has launchd and every daemon; /private/var comes
   # from Apple's pristine data-volume template, the root symlinks are made here

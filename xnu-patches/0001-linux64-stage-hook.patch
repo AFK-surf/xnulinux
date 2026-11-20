@@ -200,6 +200,32 @@ index d24535d..5c2aafb 100644
  
  	/* make sure (base, size) is a valid range and will not overflow */
  	assert(*size < (UINT64_MAX - *base));
+diff --git a/bsd/dev/unix_startup.c b/bsd/dev/unix_startup.c
+index ec19ee7..6baf626 100644
+--- a/bsd/dev/unix_startup.c
++++ b/bsd/dev/unix_startup.c
+@@ -186,6 +186,21 @@ bsd_startupearly(void)
+ 			}
+ #endif
+ 		}
++		{
++			/* LINUX64 (xnulinux): hosted, size the vnode table from the DRAM xnu.ko gave us (sane_size may not be set yet) */
++			extern uintptr_t linux64_hook;
++			extern uint64_t max_mem;
++			if (linux64_hook) {
++				kprintf("linux64: desiredvnodes %d (sane_size 0x%llx max_mem 0x%llx)\n", desiredvnodes, (uint64_t)sane_size, (uint64_t)max_mem);
++				/* the k27 config's CONFIG_VNODES (1024) is for a small device; a full macOS userland needs far more */
++				if (desiredvnodes < (int)(max_mem / 65536) + 1024) {
++					desiredvnodes = (int)(max_mem / 65536) + 1024;
++					if (desiredvnodes > 263168) {
++						desiredvnodes = 263168;
++					}
++				}
++			}
++		}
+ 		vnodes_sized = 1;
+ 	}
+ }
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 index 5362b32..cd43d8e 100644
 --- a/bsd/kern/bsd_init.c

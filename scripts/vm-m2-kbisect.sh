@@ -7,7 +7,9 @@ make -s -C /lib/modules/$(uname -r)/build M=$PWD/xnu-ko KBUILD_EXTRA_SYMBOLS=$PW
 sudo dmesg -n ${CONLEVEL:-8}
 sudo rmmod xnu 2>/dev/null; sudo rmmod fki 2>/dev/null; sudo insmod fki-ko/fki.ko
 # a hosted XNU never unmounts its read-write root: check the host disk before each boot
-[ -n "$HOSTDISK" ] && sudo fsck.hfsplus -fy "$HOSTDISK" 2>&1 | tail -1
+if [ -n "$HOSTDISK" ]; then
+  for t in 1 2 3; do r=$(sudo fsck.hfsplus -fy "$HOSTDISK" 2>&1 | tail -1); echo "fsck: $r"; case "$r" in *"appears to be OK"*) break;; esac; done
+fi
 # XNU's DRAM is one physically contiguous block (GBs): free the page cache and compact first, or the allocation fails
 sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
 for K in "$@"; do

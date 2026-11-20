@@ -509,21 +509,6 @@ static void fki_idle_body(void *p)
 	local_irq_disable();
 }
 
-void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns)
-{
-	u64 now = __arch_counter_get_cntvct(), freq = arch_timer_get_cntfrq(), ns;
-	struct fki_idle_args a;
-
-	if (counter_deadline <= now)
-		return;
-	ns = div64_u64((counter_deadline - now) * 1000000ULL, freq) * 1000ULL;
-	if (ns > max_ns)
-		ns = max_ns;
-	a.ns = ns;
-	fki_linux_runs(fki_idle_body, &a);
-}
-EXPORT_SYMBOL(fki_idle_until);
-
 static void fki_yield_body(void *p)
 {
 	local_irq_enable();
@@ -532,6 +517,24 @@ static void fki_yield_body(void *p)
 	preempt_disable();
 	local_irq_disable();
 }
+
+void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns)
+{
+	u64 now = __arch_counter_get_cntvct(), freq = arch_timer_get_cntfrq(), ns;
+	struct fki_idle_args a;
+
+	if (counter_deadline <= now) {
+		/* already due: still let Linux take its interrupts and reschedule (an idle loop that never sleeps starves it) */
+		fki_linux_runs(fki_yield_body, NULL);
+		return;
+	}
+	ns = div64_u64((counter_deadline - now) * 1000000ULL, freq) * 1000ULL;
+	if (ns > max_ns)
+		ns = max_ns;
+	a.ns = ns;
+	fki_linux_runs(fki_idle_body, &a);
+}
+EXPORT_SYMBOL(fki_idle_until);
 
 void fki_yield(void)
 {
