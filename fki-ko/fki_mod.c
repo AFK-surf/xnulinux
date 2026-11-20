@@ -54,6 +54,10 @@ typedef struct page *(*alloc_contig_fn)(unsigned long nr_pages, gfp_t gfp, int n
 typedef void (*free_contig_fn)(unsigned long pfn, unsigned long nr_pages);
 static alloc_contig_fn p_alloc_contig;
 static free_contig_fn p_free_contig;
+struct cma;
+static struct cma **p_cma_area;	/* the default CMA area (cma= on the command line), if any */
+static struct page *(*p_cma_alloc)(struct cma *, unsigned long, unsigned int, bool);	/* not exported on every kernel */
+static bool (*p_cma_release)(struct cma *, const struct page *, unsigned long);
 static set_memory_fn p_set_memory_x, p_set_memory_nx;
 
 static int fki_resolve(void)
@@ -74,6 +78,9 @@ static int fki_resolve(void)
 	if (!p_alloc_contig)
 		p_alloc_contig = (alloc_contig_fn)lookup("alloc_contig_pages");
 	p_free_contig = (free_contig_fn)lookup("free_contig_range");
+	p_cma_area = (struct cma **)lookup("dma_contiguous_default_area");
+	p_cma_alloc = (void *)lookup("cma_alloc");
+	p_cma_release = (void *)lookup("cma_release");
 	p_set_memory_nx = (set_memory_fn)lookup("set_memory_nx");
 	return p_set_memory_x && p_set_memory_nx ? 0 : -ENOENT;
 }
@@ -276,6 +283,8 @@ unsigned long fki_regs_pc(void *regs) { return instruction_pointer((struct pt_re
 EXPORT_SYMBOL(fki_regs_pc);
 unsigned long fki_regs_lr(void *regs) { return ((struct pt_regs *)regs)->regs[30]; }
 EXPORT_SYMBOL(fki_regs_lr);
+unsigned long fki_regs_pstate(void *regs) { return ((struct pt_regs *)regs)->pstate; }
+EXPORT_SYMBOL(fki_regs_pstate);
 void fki_regs_set_pc(void *regs, unsigned long pc) { instruction_pointer_set((struct pt_regs *)regs, pc); }
 EXPORT_SYMBOL(fki_regs_set_pc);
 void fki_regs_set_reg(void *regs, unsigned int n, unsigned long v) { if (n < 31) ((struct pt_regs *)regs)->regs[n] = v; }
@@ -368,6 +377,23 @@ int fki_contig_alloc(unsigned long size, struct fki_region *r)
 
 	if (err)
 		return err;
+	/*
+	 * Large blocks (a hosted kernel's DRAM, GBs) come from the CMA area when there is one: a long-running host
+	 * fragments its memory with unmovable pages and alloc_contig_pages then fails. CMA blocks are 2 MiB aligned
+	 * and sized to 2 MiB; a CMA block's handle has bit 0 set.
+	 */
+	if (size >= (64UL << 20) && p_cma_area && *p_cma_area && p_cma_alloc && p_cma_release) {
+		unsigned long cnt = ALIGN(size, SZ_2M) >> PAGE_SHIFT;
+		pg = p_cma_alloc(*p_cma_area, cnt, get_order(SZ_2M), true);
+		if (pg) {
+			r->va = page_address(pg);
+			memset(r->va, 0, cnt << PAGE_SHIFT);
+			r->pa = page_to_phys(pg);
+			r->size = cnt << PAGE_SHIFT;
+			r->handle = (void *)((unsigned long)pg | 1);
+			return 0;
+		}
+	}
 	if (!p_alloc_contig)
 		return -ENOENT;
 	while ((n << PAGE_SHIFT) < size)
@@ -386,6 +412,10 @@ EXPORT_SYMBOL(fki_contig_alloc);
 
 void fki_contig_free(struct fki_region *r)
 {
+	if ((unsigned long)r->handle & 1) {
+		p_cma_release(*p_cma_area, (struct page *)((unsigned long)r->handle & ~1UL), r->size >> PAGE_SHIFT);
+		return;
+	}
 	if (p_free_contig)
 		p_free_contig(page_to_pfn((struct page *)r->handle), r->size >> PAGE_SHIFT);
 }
@@ -493,6 +523,21 @@ void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns)
 	fki_linux_runs(fki_idle_body, &a);
 }
 EXPORT_SYMBOL(fki_idle_until);
+
+static void fki_yield_body(void *p)
+{
+	local_irq_enable();
+	preempt_enable();
+	cond_resched();
+	preempt_disable();
+	local_irq_disable();
+}
+
+void fki_yield(void)
+{
+	fki_linux_runs(fki_yield_body, NULL);
+}
+EXPORT_SYMBOL(fki_yield);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Foreign kernel interface v0 (out-of-tree form for stock kernels)");
