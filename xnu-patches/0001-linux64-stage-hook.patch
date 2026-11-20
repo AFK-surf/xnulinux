@@ -1,3 +1,80 @@
+diff --git a/bsd/kern/kern_trustcache.c b/bsd/kern/kern_trustcache.c
+index 4b1e8a9..f188eed 100644
+--- a/bsd/kern/kern_trustcache.c
++++ b/bsd/kern/kern_trustcache.c
+@@ -78,6 +78,10 @@ SYSCTL_UINT(
+ 	0, "number of loadable trust caches loaded"
+ 	);
+ 
++/* LINUX64 (xnulinux) */
++extern uintptr_t linux64_hook;
++static bool linux64_trust_cache_skipped = false;
++
+ #if CONFIG_SPTM
+ /*
+  * We have the TrustedExecutionMonitor environment available. All of our artifacts
+@@ -124,6 +128,16 @@ get_trust_cache_info(void)
+ void
+ trust_cache_runtime_init(void)
+ {
++	/*
++	 * LINUX64 (xnulinux): hosted without the AppleImage4/AMFI kexts that register img4if/amfi.
++	 * Skip the trust cache runtime until they are loaded (M2e).
++	 */
++	if (linux64_hook != 0 && (img4if == NULL || amfi == NULL)) {
++		linux64_trust_cache_skipped = true;
++		printf("linux64: no image4/AMFI interface, trust cache runtime skipped\n");
++		return;
++	}
++
+ 	/* Image4 interface needs to be available */
+ 	if (img4if == NULL) {
+ 		panic("image4 interface not available");
+@@ -402,6 +416,16 @@ trust_cache_runtime_init(void)
+ 		allow_engineering_caches = true;
+ 	}
+ 
++	/*
++	 * LINUX64 (xnulinux): hosted without the AppleImage4/AMFI kexts that register img4if/amfi.
++	 * Skip the trust cache runtime until they are loaded (M2e).
++	 */
++	if (linux64_hook != 0 && (img4if == NULL || amfi == NULL)) {
++		linux64_trust_cache_skipped = true;
++		printf("linux64: no image4/AMFI interface, trust cache runtime skipped\n");
++		return;
++	}
++
+ 	/* Image4 interface needs to be available */
+ 	if (img4if == NULL) {
+ 		panic("image4 interface not available");
+@@ -579,6 +603,16 @@ trust_cache_runtime_init(void)
+ 	allow_legacy_caches = true;
+ #endif
+ 
++	/*
++	 * LINUX64 (xnulinux): hosted without the AppleImage4/AMFI kexts that register img4if/amfi.
++	 * Skip the trust cache runtime until they are loaded (M2e).
++	 */
++	if (linux64_hook != 0 && (img4if == NULL || amfi == NULL)) {
++		linux64_trust_cache_skipped = true;
++		printf("linux64: no image4/AMFI interface, trust cache runtime skipped\n");
++		return;
++	}
++
+ 	/* Image4 interface needs to be available */
+ 	if (img4if == NULL) {
+ 		panic("image4 interface not available");
+@@ -1175,6 +1209,10 @@ load_static_trust_cache(void)
+ 	/* Mark this function as having been called */
+ 	trust_cache_static_init = true;
+ 
++	if (linux64_trust_cache_skipped) {
++		return;
++	}
++
+ 	/* Nothing to do when the runtime isn't set */
+ 	if (trust_cache_rt == NULL) {
+ 		return;
 diff --git a/libkern/crypto/corecrypto_rand.c b/libkern/crypto/corecrypto_rand.c
 index d46815b..ccd2d84 100644
 --- a/libkern/crypto/corecrypto_rand.c
