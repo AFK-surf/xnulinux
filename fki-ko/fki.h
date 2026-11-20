@@ -92,6 +92,15 @@ int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsign
 void fki_fault_unregister(void);
 /* Read 8 bytes of RAM by physical address (debugging: walking a foreign page table). */
 fki_u64 fki_phys_peek(fki_u64 pa);
+/*
+ * A host file as backing store (a foreign block device's image). fki_file_open is called from ordinary Linux context
+ * and returns an opaque handle (NULL on failure) and the file's size. fki_file_rw is called from inside fki_enter():
+ * it lets Linux run (IRQs and preemption on) for the I/O, copies through a Linux bounce buffer to or from buf
+ * (with IRQs off again), and returns the bytes moved or a negative errno.
+ */
+void *fki_file_open(const char *path, int writable, fki_u64 *size);
+long fki_file_rw(void *file, int write, void *buf, unsigned long len, fki_u64 off);
+void fki_file_close(void *file);
 #ifdef __cplusplus
 }
 #endif
