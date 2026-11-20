@@ -17,5 +17,7 @@ extern struct xnu_world xnu_W;
 long xnu_world_call(unsigned long fn, unsigned long arg);
 /* The address XNU calls (linux64_hook); it calls xnu_hook(stage) in the Linux world. */
 void xnu_world_upcall(void);
+/* Where an XNU fault that cannot be handled returns to (still with XNU's keys): back to Linux's, then xnu_world_abort. */
+void xnu_world_fault_abort(void);
 /* Linux-world handler: return 0 to resume XNU, nonzero to end the run. */
 long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2);

@@ -258,7 +258,10 @@ static int fki_fault_pre(struct kprobe *p, struct pt_regs *kregs)
 	struct pt_regs *regs = (struct pt_regs *)kregs->regs[2];
 	int (*h)(unsigned long, unsigned long, void *) = READ_ONCE(fki_fault_handler);
 
-	if (!h || far < fki_fault_lo || far >= fki_fault_hi || user_mode(regs))
+	if (!h || user_mode(regs))
+		return 0;
+	if ((far < fki_fault_lo || far >= fki_fault_hi) &&
+	    (instruction_pointer(regs) < fki_fault_lo || instruction_pointer(regs) >= fki_fault_hi))
 		return 0;
 	if (h(far, esr, regs))
 		return 0;
@@ -266,6 +269,13 @@ static int fki_fault_pre(struct kprobe *p, struct pt_regs *kregs)
 	return 1;
 }
 NOKPROBE_SYMBOL(fki_fault_pre);
+
+unsigned long fki_regs_pc(void *regs) { return instruction_pointer((struct pt_regs *)regs); }
+EXPORT_SYMBOL(fki_regs_pc);
+unsigned long fki_regs_lr(void *regs) { return ((struct pt_regs *)regs)->regs[30]; }
+EXPORT_SYMBOL(fki_regs_lr);
+void fki_regs_set_pc(void *regs, unsigned long pc) { instruction_pointer_set((struct pt_regs *)regs, pc); }
+EXPORT_SYMBOL(fki_regs_set_pc);
 
 static struct kprobe fki_fault_kp = { .symbol_name = "__do_kernel_fault", .pre_handler = fki_fault_pre };
 static int fki_fault_registered;

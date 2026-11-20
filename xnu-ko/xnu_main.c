@@ -131,13 +131,33 @@ static volatile int in_xnu;
 static unsigned long (*xnu_kfault)(unsigned long far, unsigned long esr);
 static unsigned long kfaults;
 
+#define XNU_VA_LO 0xffffffe000000000ULL
+#define XNU_VA_HI 0xfffffffc00000000ULL
 static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 {
-	(void)regs;
-	if (!in_xnu || !xnu_kfault)
+	if (!in_xnu)
 		return 1;
-	kfaults++;
-	return xnu_kfault(far, esr) == 0 ? 0 : 1;
+	if (far >= XNU_VA_LO && far < XNU_VA_HI && xnu_kfault) {
+		kfaults++;
+		if (xnu_kfault(far, esr) == 0)
+			return 0;
+	}
+	/*
+	 * An XNU fault nothing resolves (a bug, or a NULL dereference): report it and end the run instead of letting Linux
+	 * oops with XNU's keys and stack live (which takes the machine with it). The exception returns into
+	 * xnu_world_fault_abort, which puts Linux's keys back and leaves through xnu_world_abort.
+	 */
+	unsigned long pc = fki_regs_pc(regs);
+	if (pc < XNU_VA_LO || pc >= XNU_VA_HI)
+		return 1;
+	in_xnu = 0;
+	logs("xnu: XNU took a fault it cannot handle; ending the run");
+	logkv("xnu:   pc ", pc);
+	logkv("xnu:   lr ", fki_regs_lr(regs));
+	logkv("xnu:   far", far);
+	logkv("xnu:   esr", esr);
+	fki_regs_set_pc(regs, (unsigned long)xnu_world_fault_abort);
+	return 0;
 }
 
 static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2);
