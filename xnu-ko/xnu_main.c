@@ -123,7 +123,33 @@ static void walk_log(const char *what, u64_t va, const unsigned long long *l1)
 	}
 }
 
+/*
+ * Kernel page faults on XNU addresses, taken in Linux's vectors while XNU runs (XNU's keys and stack live), go to
+ * XNU's own linux64_kernel_fault (vm_fault on the kernel map). in_xnu is 0 while host code runs (upcalls, monitor).
+ */
+static volatile int in_xnu;
+static unsigned long (*xnu_kfault)(unsigned long far, unsigned long esr);
+static unsigned long kfaults;
+
+static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
+{
+	(void)regs;
+	if (!in_xnu || !xnu_kfault)
+		return 1;
+	kfaults++;
+	return xnu_kfault(far, esr) == 0 ? 0 : 1;
+}
+
+static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2);
 long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
+{
+	in_xnu = 0;
+	long r = xnu_hook_body(stage, a1, a2);
+	if (!r) in_xnu = 1;
+	return r;
+}
+
+static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2)
 {
 	if (stage == 998) {		/* XNU kprintf */
 		char m[260]; const char *f = (const char *)a1; unsigned i = 0, j = 0;
@@ -368,8 +394,15 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	xnu_dbg = (const unsigned long *)macho_sym(&img, "_linux64_dbg");
 	if (xnu_dbg && monitor_cpu >= 0)
 		monitor = fki_thread_start(monitor_fn, 0, monitor_cpu, "xnu-monitor");
+	xnu_kfault = (void *)macho_sym(&img, "_linux64_kernel_fault");
+	if (xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
+		logs("xnu: kernel faults on XNU addresses go to XNU's vm_fault");
 	logs("xnu: entering arm_init");
+	in_xnu = 1;
 	long r = xnu_world_call(a_init, (unsigned long)ba);
+	in_xnu = 0;
+	fki_fault_unregister();
+	logkv("xnu: kernel faults forwarded to XNU", kfaults);
 	fki_thread_stop(monitor);
 	monitor = 0;
 	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: arm_init returned (unexpected), r =", (u64_t)r);
