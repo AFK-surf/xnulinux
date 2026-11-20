@@ -1428,10 +1428,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
-index 4224c9d..6e4aa1c 100644
+index 4224c9d..4a1fe94 100644
 --- a/osfmk/kern/assert.h
 +++ b/osfmk/kern/assert.h
-@@ -193,9 +193,22 @@ STATIC_IF_KEY_DECLARE_TRUE(mach_assert);
+@@ -193,9 +193,28 @@ STATIC_IF_KEY_DECLARE_TRUE(mach_assert);
  #define mach_assert_enabled_expr(ex) \
  	(mach_assert_enabled() || __builtin_constant_p(!(ex)))
  
@@ -1440,8 +1440,14 @@ index 4224c9d..6e4aa1c 100644
 + * LINUX64 (xnulinux): hosted inside Linux there is no XNU exception vector for the assert brk, so a
 + * failed assert() is reported to the host, which decides whether XNU continues or the run ends.
 + */
++#ifdef __cplusplus
++extern "C" {
++#endif
 +extern unsigned long linux64_hook;
 +extern void linux64_assert_report(const char *file, int line, const char *expr);
++#ifdef __cplusplus
++}
++#endif
 +#define assert(ex) \
 +	(mach_assert_enabled_expr(ex) && !(ex) \
 +	? (linux64_hook ? linux64_assert_report(__FILE_NAME__, __LINE__, #ex) \
