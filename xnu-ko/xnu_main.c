@@ -155,6 +155,12 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		if (diag_va[5]) { unsigned long l = ((unsigned long (*)(const char *))diag_va[5])("xnulinux"); logkv("xnu: probe exec strlen through XNU tables", l); }
 		logs("xnu: probes done");
 	}
+	if (stage == 810) {		/* XNU idle: let Linux run until XNU's next timer deadline */
+		static unsigned long idles;
+		if ((++idles & (idles - 1)) == 0) logkv("xnu: XNU idle, count", idles);
+		fki_idle_until(a1, 20000000ULL);	/* at most 20 ms per round */
+		return (long)stop == 810 && idles >= (unsigned long)(kmax ? kmax : 1);
+	}
 	if (stage == 999) {
 		char m[200]; const char *f = (const char *)a1; unsigned i = 0;
 		while (f && f[i] && i < sizeof(m) - 1) { m[i] = f[i]; i++; }

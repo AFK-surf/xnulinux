@@ -587,10 +587,46 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..edece60 100644
+index d10d7a1..5f33c6d 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
-@@ -735,20 +735,27 @@ cpu_idle_exit(boolean_t from_reset)
+@@ -100,6 +100,7 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
+ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sleep);
+ #endif
+ extern void arm64_force_wfi_clock_gate(void);
++extern void rtclock_intr(unsigned int);
+ #if defined(APPLETYPHOON)
+ // <rdar://problem/15827409>
+ extern void typhoon_prepare_for_wfi(void);
+@@ -614,6 +615,27 @@ cpu_idle(void)
+ 	cpc_cpu_transition(CPC_CPU_IDLE, cpu_data_ptr);
+ #endif /* CONFIG_CPU_COUNTERS */
+ 
++	{
++		/*
++		 * LINUX64 (xnulinux): no WFI and no timer interrupt of our own. The host sleeps (in Linux, with
++		 * Linux interrupts on) until XNU's next deadline; then the timer "interrupt" is delivered here.
++		 */
++		extern uintptr_t linux64_hook;
++		extern void linux64_stage_arg(unsigned long, unsigned long);
++		if (linux64_hook) {
++			uint64_t now = mach_absolute_time();
++			uint64_t deadline = cpu_data_ptr->rtcPop;
++			if (deadline == 0 || deadline == EndOfAllTime || deadline < now) {
++				deadline = now + 24000;	/* about 1 ms: re-check the run queue */
++			}
++			linux64_stage_arg(810, deadline);
++			cpu_data_ptr->cpu_decrementer = -1;
++			rtclock_intr(FALSE);
++			ClearIdlePop(TRUE);
++			cpu_idle_exit(FALSE);
++		}
++	}
++
+ 	if (wfi) {
+ #if !defined(APPLE_ARM64_ARCH_FAMILY)
+ 		platform_cache_idle_enter();
+@@ -735,20 +757,27 @@ cpu_idle_exit(boolean_t from_reset)
  void
  cpu_init(void)
  {
@@ -618,7 +654,7 @@ index d10d7a1..edece60 100644
  		} else {
  			/*
  			 * We initialize non-boot CPUs here; the boot CPU is
-@@ -758,9 +765,11 @@ cpu_init(void)
+@@ -758,9 +787,11 @@ cpu_init(void)
  		}
  
  		do_cacheid();
@@ -630,7 +666,7 @@ index d10d7a1..edece60 100644
  
  		cpu_info_p = cpuid_info();
  
-@@ -780,6 +789,7 @@ cpu_init(void)
+@@ -780,6 +811,7 @@ cpu_init(void)
  		}
  
  		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
@@ -1042,6 +1078,24 @@ index 13d2819..3ba4ba7 100644
  	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_TPIDR]
  
  	mrs		x1, MPIDR_EL1
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index f456377..5e1f0b1 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -2529,6 +2529,13 @@ ml_set_decrementer(uint32_t dec_value)
+ 		}
+ 	}
+ 
++	{
++		/* LINUX64 (xnulinux): the generic timer is Linux's; cpu_idle hands the deadline to the host. */
++		extern uintptr_t linux64_hook;
++		if (linux64_hook) {
++			return;
++		}
++	}
+ 	if (cdp->cpu_set_decrementer_func) {
+ 		cdp->cpu_set_decrementer_func((uint32_t)counter_value);
+ 	} else {
 diff --git a/osfmk/arm64/machine_routines_asm.s b/osfmk/arm64/machine_routines_asm.s
 index 96650a0..54d80e5 100644
 --- a/osfmk/arm64/machine_routines_asm.s
