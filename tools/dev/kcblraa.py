@@ -17,7 +17,7 @@ for _ in range(ncmds):
                 if (w & 0xffc00000) == 0xf9400000:          # ldr Xt, [Xn, #imm12*8]
                     rt, rn, o = w & 31, (w >> 5) & 31, ((w >> 10) & 0xfff) * 8
                     imm = None
-                    for j in range(i + 1, min(i + 6, len(words))):
+                    for j in range(i + 1, min(i + 14, len(words))):
                         x = words[j]
                         if (x & 0xffe0001f) == 0xd2800011:  # movz x17, #imm16
                             imm = (x >> 5) & 0xffff
