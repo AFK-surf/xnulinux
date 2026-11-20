@@ -8,7 +8,7 @@ sudo rmmod xnu 2>/dev/null; sudo rmmod fki 2>/dev/null; sudo insmod fki-ko/fki.k
 for S in "$@"; do
   sudo dmesg -C
   echo ">>> stop=$S"; sync
-  sudo insmod xnu-ko/xnu.ko mode=2 stop=$S
+  sudo insmod xnu-ko/xnu.ko mode=${MODE:-2} stop=$S ram_mb=${RAM_MB:-128}
   sudo dmesg | grep -a "XNU stage\|run ended\|panic\|returned" | tail -3
   sudo rmmod xnu
 done
