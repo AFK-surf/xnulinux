@@ -4,6 +4,7 @@ cd ~/w/poc
 make -s -C /lib/modules/$(uname -r)/build M=$PWD/fki-ko modules >/dev/null 2>&1
 make -s -C /lib/modules/$(uname -r)/build M=$PWD/xnu-ko clean >/dev/null 2>&1
 make -s -C /lib/modules/$(uname -r)/build M=$PWD/xnu-ko KBUILD_EXTRA_SYMBOLS=$PWD/fki-ko/Module.symvers modules >/dev/null 2>&1
+sudo dmesg -n ${CONLEVEL:-8}
 sudo rmmod xnu 2>/dev/null; sudo rmmod fki 2>/dev/null; sudo insmod fki-ko/fki.ko
 for K in "$@"; do
   sudo dmesg -C
