@@ -139,7 +139,9 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 	while (*what && p < buf + 94) *p++ = *what++;
 	*p = 0;
 	logs(buf);
-	return (long)stage >= stop;
+	if (stop >= 1000)		/* sub-stage ids: stop exactly there */
+		return (long)stage == stop;
+	return (long)stage >= stop && stage < 900;
 }
 
 /*

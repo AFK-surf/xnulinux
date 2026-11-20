@@ -204,10 +204,100 @@ index 743117b..9dc298b 100644
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index f7f387e..38d37cd 100644
+index f7f387e..0e4cbba 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
-@@ -1883,6 +1883,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1404,16 +1404,20 @@ arm_vm_prot_init(__unused boot_args * args)
+ 	 * it and apply fixups (after we're off the bootstrap translation
+ 	 * tables).
+ 	 */
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5001); }
+ 	arm_vm_page_granular_RWNX(auxkc_base, auxKC_range->length, 0);
+ 
+ noAuxKC:
+ 	/* Map coalesced kext TEXT segment RWNX for now */
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5002); }
+ 	arm_vm_page_granular_RWNX(segPRELINKTEXTB, segSizePRELINKTEXT, ARM64_GRANULE_ALLOW_BLOCK); // Refined in OSKext::readPrelinkedExtensions
+ 
+ 	/* Map coalesced kext DATA_CONST segment RWNX (could be empty) */
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5003); }
+ 	arm_vm_page_granular_RWNX(segPLKDATACONSTB, segSizePLKDATACONST, ARM64_GRANULE_ALLOW_BLOCK); // Refined in OSKext::readPrelinkedExtensions
+ 
+ 	/* Map coalesced kext TEXT_EXEC segment RX (could be empty) */
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5004); }
+ 	arm_vm_page_granular_ROX(segPLKTEXTEXECB, segSizePLKTEXTEXEC, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_GUARDED); // Refined in OSKext::readPrelinkedExtensions
+ 
+ 	/* if new segments not present, set space between PRELINK_TEXT and xnu TEXT to RWNX
+@@ -1443,48 +1447,68 @@ noAuxKC:
+ 	 *
+ 	 * TEXT segment contains mach headers and other non-executable data. This will become RONX later.
+ 	 */
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5005); }
+ 	arm_vm_page_granular_RNX(segTEXTB, segSizeTEXT, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+ 
+ 	/* Can DATACONST start out and stay RNX?
+ 	 * NO, stuff in this segment gets modified during startup (viz. mac_policy_init()/mac_policy_list)
+ 	 * Make RNX in prot_finalize
+ 	 */
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5006); }
+ 	arm_vm_page_granular_RWNX(segDATACONSTB, segSizeDATACONST, ARM64_GRANULE_ALLOW_BLOCK);
+ 
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5007); }
+ 	arm_vm_page_granular_ROX(segTEXTEXECB, segSizeTEXTEXEC, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_GUARDED);
+ 
+ #if XNU_MONITOR
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5008); }
+ 	arm_vm_page_granular_ROX(segPPLTEXTB, segSizePPLTEXT, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_UNGUARDED);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5009); }
+ 	arm_vm_page_granular_ROX(segPPLTRAMPB, segSizePPLTRAMP, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_UNGUARDED);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5010); }
+ 	arm_vm_page_granular_RNX(segPPLDATACONSTB, segSizePPLDATACONST, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+ #endif
+ 
+ 	/* DATA segment will remain RWNX */
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5011); }
+ 	arm_vm_page_granular_RWNX(segDATAB, segSizeDATA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+ #if XNU_MONITOR
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5012); }
+ 	arm_vm_page_granular_RWNX(segPPLDATAB, segSizePPLDATA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+ #endif
+ 
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5013); }
+ 	arm_vm_page_granular_RWNX(segHIBDATAB, segSizeHIBDATA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+ 
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5014); }
+ 	arm_vm_page_granular_RWNX(segBOOTDATAB, segSizeBOOTDATA, 0);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5015); }
+ 	arm_vm_page_granular_RNX((vm_offset_t)&intstack_low_guard, PAGE_MAX_SIZE, 0);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5016); }
+ 	arm_vm_page_granular_RNX((vm_offset_t)&intstack_high_guard, PAGE_MAX_SIZE, 0);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5017); }
+ 	arm_vm_page_granular_RNX((vm_offset_t)&excepstack_high_guard, PAGE_MAX_SIZE, 0);
+ 
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5018); }
+ 	arm_vm_page_granular_ROX(segKLDB, segSizeKLD, 0, ARM64_PAGE_GUARDED);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5019); }
+ 	arm_vm_page_granular_RNX(segKLDDATAB, segSizeKLDDATA, 0);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5020); }
+ 	arm_vm_page_granular_RWNX(segLINKB, segSizeLINK, 0);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5021); }
+ 	arm_vm_page_granular_RWNX(segPLKLINKEDITB, segSizePLKLINKEDIT, 0); // Coalesced kext LINKEDIT segment
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5022); }
+ 	arm_vm_page_granular_ROX(segLASTB, segSizeLAST, ARM64_GRANULE_ALLOW_BLOCK, ARM64_PAGE_GUARDED); // __LAST may be empty, but we cannot assume this
+ 	if (segLASTDATACONSTB) {
+ 		arm_vm_page_granular_RWNX(segLASTDATACONSTB, segSizeLASTDATACONST, ARM64_GRANULE_ALLOW_BLOCK); // __LASTDATA_CONST may be empty, but we cannot assume this
+ 	}
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5023); }
+ 	arm_vm_page_granular_RWNX(segPRELINKDATAB, segSizePRELINKDATA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // Prelink __DATA for kexts (RW data)
+ 
+ 	if (segSizePLKLLVMCOV > 0) {
+ 		arm_vm_page_granular_RWNX(segPLKLLVMCOVB, segSizePLKLLVMCOV, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // LLVM code coverage data
+ 	}
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(5024); }
+ 	arm_vm_page_granular_RWNX(segPRELINKINFOB, segSizePRELINKINFO, 0); /* PreLinkInfoDictionary */
+ 
+ 	/* Record the bounds of the kernelcache. */
+@@ -1883,6 +1907,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	// Slide the physical aperture to a random page-aligned location within the slide range
  	port_crumb = 50;
@@ -215,7 +305,7 @@ index f7f387e..38d37cd 100644
  	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
  	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
  	port_crumb = 51;
-@@ -1937,6 +1938,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1937,6 +1962,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	boot_tte = (tt_entry_t *)&bootstrap_pagetables;
  	boot_ttep = kvtophys((vm_offset_t)boot_tte);
  	port_crumb = 52;
@@ -223,7 +313,7 @@ index f7f387e..38d37cd 100644
  
  #if DEVELOPMENT || DEBUG
  	/* Sanity check - assert that BOOTSTRAP_TABLE_SIZE is sufficiently-large to
-@@ -1972,6 +1974,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1972,6 +1998,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	invalid_tte = (tt_entry_t *)alloc_ptpage(TRUE);
  	invalid_ttep = kvtophys((vm_offset_t)invalid_tte);
  	port_crumb = 53;
@@ -231,7 +321,7 @@ index f7f387e..38d37cd 100644
  	bzero(invalid_tte, ARM_PGBYTES);
  
  	/*
-@@ -1998,6 +2001,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1998,6 +2025,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	 */
  	init_ptpages(cpu_tte, gVirtBase, dynamic_memory_begin, TRUE, ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
  	port_crumb = 32;
@@ -239,7 +329,7 @@ index f7f387e..38d37cd 100644
  
  #if defined(ARM_LARGE_MEMORY)
  	/*
-@@ -2117,6 +2121,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2117,6 +2145,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	vm_set_page_size();
  	port_crumb = 35;
@@ -247,7 +337,7 @@ index f7f387e..38d37cd 100644
  
  	vm_kernel_base = segTEXTB;
  	vm_kernel_top = (vm_offset_t) &last_kernel_symbol;
-@@ -2152,6 +2157,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2152,6 +2181,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	arm_vm_prot_init(args);
  	port_crumb = 36;
@@ -255,7 +345,7 @@ index f7f387e..38d37cd 100644
  
  	/*
  	 * Initialize the page tables for the low globals:
-@@ -2183,6 +2189,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2183,6 +2213,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	 */
  	init_ptpages(cpu_tte, dynamic_memory_begin, VM_MAX_KERNEL_ADDRESS, TRUE, ARM_DYNAMIC_TABLE_XN | ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
  	port_crumb = 37;
@@ -263,7 +353,7 @@ index f7f387e..38d37cd 100644
  #endif
  
  #if KASAN
-@@ -2194,14 +2201,32 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2194,14 +2225,32 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	arm_vm_physmap_init(args);
  	port_crumb = 38;
@@ -298,7 +388,7 @@ index f7f387e..38d37cd 100644
  
  	flush_mmu_tlb();
  	port_crumb = 40;
-@@ -2301,8 +2326,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2301,8 +2350,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
      }
  #endif
  #endif
@@ -309,7 +399,7 @@ index f7f387e..38d37cd 100644
  
  	disable_preemption();
  
-@@ -2431,6 +2458,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2431,6 +2482,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	patch_low_glo_static_region(args->topOfKernelData, avail_start - args->topOfKernelData);
  	enable_preemption();
  	port_crumb = 43;
