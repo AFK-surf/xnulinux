@@ -1988,10 +1988,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..c977b9c 100644
+index d8f1b19..a97c679 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,119 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,140 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2057,6 +2057,9 @@ index d8f1b19..c977b9c 100644
 + * where user space would start. Entering EL0 is M3.
 + */
 +void linux64_thread_bootstrap_return(void) __attribute__((noreturn));
++static thread_t linux64_svc_thread;	/* LINUX64 debug: the thread whose system call is in flight, and its number */
++static long long linux64_svc_num;
++
 +void
 +linux64_thread_bootstrap_return(void)
 +{
@@ -2068,6 +2071,11 @@ index d8f1b19..c977b9c 100644
 +
 +	(void)ml_set_interrupts_enabled(FALSE);
 +	ast_taken_user();
++	if (linux64_svc_thread == thread) {	/* LINUX64 debug: what the system call returned (C set: x0 is errno) */
++		linux64_svc_thread = NULL;
++		kprintf("linux64: svc %lld -> x0 0x%llx x1 0x%llx%s\n", linux64_svc_num, get_saved_state_reg(thread->machine.upcb, 0),
++		    get_saved_state_reg(thread->machine.upcb, 1), (get_saved_state_cpsr(thread->machine.upcb) & PSR64_C) ? " (error)" : "");
++	}
 +	if (reported++ == 0) {
 +		linux64_stage_arg(9100, get_saved_state_pc(thread->machine.upcb));
 +	}
@@ -2107,6 +2115,19 @@ index d8f1b19..c977b9c 100644
 +	 * or its abort path takes the user fault for one from a non-interruptible context */
 +	set_saved_state_cpsr(ss, (uint32_t)f->cpsr & ~(uint32_t)0x3c0);
 +	linux64_dbg[15] = 3;
++	if (ESR_EC(f->esr) == ESR_EC_SVC_64) {
++		long long num = (long long)f->x[16];
++		linux64_svc_thread = thread;
++		linux64_svc_num = num;
++		if (num == 5 || num == 463 || num == 33 || num == 338 || num == 340 || num == 59 || num == 466 || num == 469) {
++			char path[128];
++			size_t len = 0;
++			uint64_t ua = (num == 463 || num == 466 || num == 469) ? f->x[1] : f->x[0];
++			if (copyinstr((user_addr_t)ua, path, sizeof(path), &len) == 0) {
++				kprintf("linux64: svc %lld path \"%s\"\n", num, path);
++			}
++		}
++	}
 +	sleh_synchronous(thread->machine.contextData, f->esr, (vm_offset_t)f->far, false);
 +	linux64_dbg[15] = 4;
 +	thread_exception_return();
