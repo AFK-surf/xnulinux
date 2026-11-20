@@ -292,7 +292,7 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
-	adt_node(&a, 11, 3);				/* /chosen */
+	adt_node(&a, 22, 3);				/* /chosen */
 	adt_prop_str(&a, "name", "chosen");
 	adt_prop_u64(&a, "dram-base", phys);
 	adt_prop_u64(&a, "dram-size", size);
@@ -312,6 +312,21 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 		adt_prop_u32(&a, "nvram-current-bank", 0);
 		adt_prop(&a, "nvram-proxy-data", nvram, sizeof(nvram));
 	}
+	/*
+	 * The identity a bootloader states for the AP, which Image4 reads: Apple's VM platform (chip 0xFE00, board 0x20)
+	 * in an insecure, non-production mode, as a development VM boots.
+	 */
+	adt_prop_str(&a, "crypto-hash-method", "sha2-384");
+	adt_prop_u32(&a, "chip-id", 0xfe00);
+	adt_prop_u32(&a, "board-id", 0x20);
+	adt_prop_u64(&a, "unique-chip-id", 0x0000584e554c4e58ULL);
+	adt_prop_u32(&a, "chip-epoch", 0);
+	adt_prop_u32(&a, "security-domain", 1);
+	adt_prop_u32(&a, "certificate-production-status", 0);
+	adt_prop_u32(&a, "certificate-security-mode", 0);
+	adt_prop_u32(&a, "effective-production-status-ap", 0);
+	adt_prop_u32(&a, "effective-security-mode-ap", 0);
+	adt_prop_u32(&a, "mix-n-match-prevention-status", 0);
 	adt_node(&a, 1, 0);				/* /chosen/memory-map: no trust caches, no AuxKC */
 	adt_prop_str(&a, "name", "memory-map");
 	adt_node(&a, 1, 0);				/* /chosen/manifest-properties: AppleImage4 reads it (empty: no manifest) */
