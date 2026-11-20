@@ -153,12 +153,13 @@ static int run_m2a(void)
 	adt_prop_u32(&a, "debug-enabled", 1);
 	adt_node(&a, 1, 1);				/* /cpus */
 	adt_prop_str(&a, "name", "cpus");
-	adt_node(&a, 5, 0);				/* /cpus/cpu0 */
+	adt_node(&a, 6, 0);				/* /cpus/cpu0 */
 	adt_prop_str(&a, "name", "cpu0");
 	adt_prop_str(&a, "device_type", "cpu");
 	adt_prop_str(&a, "state", "running");
 	adt_prop_u32(&a, "reg", (unsigned)mpidr);
 	adt_prop_u64(&a, "timebase-frequency", fki_counter_frequency());
+	adt_prop_u32(&a, "cluster-type", 'P');	/* the AMP scheduler wants E/M/P, not SMP */
 	adt_node(&a, 3, 0);				/* /arm-io: no devices; XNU needs a nonzero SoC base */
 	adt_prop_str(&a, "name", "arm-io");
 	adt_prop_str(&a, "device_type", "linux64-io");
