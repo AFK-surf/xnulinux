@@ -10,8 +10,8 @@ XCODE=${XCODE:-/Applications/Xcode_27.app}
 V="bash scripts/vm.sh"
 
 $V "set -e; sudo umount /mnt/full 2>/dev/null || true; rm -f /var/tmp/full.img; truncate -s $SIZE /var/tmp/full.img
-    mkfs.hfsplus -v xnulinux-full /var/tmp/full.img >/dev/null; sudo mkdir -p /mnt/full
-    sudo mount -o loop,rw -t hfsplus /var/tmp/full.img /mnt/full; df -h /mnt/full | tail -1"
+    mkfs.hfsplus -J -v xnulinux-full /var/tmp/full.img >/dev/null; sudo mkdir -p /mnt/full
+    sudo mount -o loop,rw,force -t hfsplus /var/tmp/full.img /mnt/full; df -h /mnt/full | tail -1"
 
 # bsdtar --exclude patterns are not anchored ("Library/Preferences" also drops System/Library/Preferences), so the
 # top-level choices are made by listing what goes in; the exclusions left are unique paths.
