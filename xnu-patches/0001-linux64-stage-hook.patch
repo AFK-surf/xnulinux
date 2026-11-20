@@ -337,10 +337,10 @@ index e5e58b5..6e6596d 100644
  }
  
 diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
-index d8fd4af..dd071cb 100644
+index d8fd4af..61033bd 100644
 --- a/bsd/vm/vm_unix.c
 +++ b/bsd/vm/vm_unix.c
-@@ -1917,6 +1917,31 @@ _shared_region_map_and_slide(
+@@ -1917,6 +1917,28 @@ _shared_region_map_and_slide(
  		    proc_getpid(p), p->p_comm, kr));
  	}
  
@@ -356,14 +356,11 @@ index d8fd4af..dd071cb 100644
 +				kprintf("linux64: shared region data mapping at 0x%llx size 0x%llx from 0x%llx: sees %d %016llx %016llx %016llx, source %d %016llx %016llx\n",
 +				    m->sms_address, m->sms_size, m->sms_file_offset, e1, w[0], w[1], w[2], e2, src[0], src[1]);
 +				{
-+					extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
-+					extern vm_offset_t phystokv(pmap_paddr_t);
 +					pmap_t upmap = get_task_pmap(current_task());
 +					ppnum_t pn = pmap_find_phys(upmap, (addr64_t)m->sms_file_offset);
 +					uint64_t pa = ((uint64_t)pn << PAGE_SHIFT) | (m->sms_file_offset & PAGE_MASK);
-+					uint64_t *kv = pn ? (uint64_t *)phystokv(pa) : NULL;
-+					kprintf("linux64:   source pn 0x%x pa 0x%llx via physmap %016llx %016llx; PAR after AT S1E0R: 0x%llx\n", pn, pa,
-+					    kv ? kv[0] : 0, kv ? kv[1] : 0, ({ uint64_t par; __asm__ volatile ("at s1e0r, %1\n isb\n mrs %0, par_el1" : "=r"(par) : "r"(m->sms_file_offset)); par; }));
++					kprintf("linux64:   source pn 0x%x pa 0x%llx via phys %016llx %016llx; PAR after AT S1E0R: 0x%llx\n", pn, pa,
++					    pn ? ml_phys_read_double_64(pa) : 0, pn ? ml_phys_read_double_64(pa + 8) : 0, ({ uint64_t par; __asm__ volatile ("at s1e0r, %1\n isb\n mrs %0, par_el1" : "=r"(par) : "r"(m->sms_file_offset)); par; }));
 +				}
 +			}
 +		}
