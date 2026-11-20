@@ -40,7 +40,7 @@ Lopen_again:
 	lsr	w0, w0, #8		// WEXITSTATUS
 	and	w0, w0, #0xff
 	mov	x23, x0
-	cmp	w0, #7			// /sbin/hello exits 7, /bin/echo 0
+	cmp	w0, #7			// /sbin/hello exits 7, /bin/echo and /bin/sh 0
 	ccmp	w0, #0, #4, ne
 	b.ne	Lbad_status
 	adr	x1, Lmsg3
@@ -55,8 +55,21 @@ Lchild:
 	adr	x1, Lmsg2
 	mov	x2, #(Lmsg2_end - Lmsg2)
 	bl	Lwrite
-	adr	x0, Lecho		// execve("/bin/echo", {"echo", "hello from /bin/echo ...", NULL}, {NULL}): Apple's dynamically
-	adr	x1, Lechoarg		// linked echo through dyld and the shared cache, where the root has them
+	adr	x0, Lsh			// execve("/bin/sh", {"sh", "-c", script, NULL}, {"PATH=/bin:/usr/bin", NULL}): Apple's shell
+	adr	x9, Lsharg2		// (dyld + shared cache) where the root has it
+	stp	x9, xzr, [sp, #-16]!	// argv[2], argv[3] = NULL
+	adr	x9, Lsh0
+	adr	x10, Lsharg1
+	stp	x9, x10, [sp, #-16]!	// argv[0], argv[1]
+	adr	x9, Lpathenv
+	stp	x9, xzr, [sp, #-16]!	// envp[0], envp[1] = NULL
+	add	x1, sp, #16
+	mov	x2, sp
+	mov	x16, #59		// SYS_execve
+	svc	#0x80
+	add	sp, sp, #48
+	adr	x0, Lecho		// no /bin/sh: execve("/bin/echo", {"echo", "hello from /bin/echo ...", NULL}, {NULL})
+	adr	x1, Lechoarg
 	stp	x1, xzr, [sp, #-16]!
 	adr	x1, Lecho0
 	stp	xzr, x1, [sp, #-16]!	// sp+0: envp NULL, sp+8: argv[0], sp+16: argv[1], sp+24: NULL
@@ -110,6 +123,16 @@ Lmsg2:
 Lmsg2_end:
 Lhello:
 	.asciz	"/sbin/hello"
+Lsh:
+	.asciz	"/bin/sh"
+Lsh0:
+	.asciz	"sh"
+Lsharg1:
+	.asciz	"-c"
+Lsharg2:
+	.asciz	"echo \"hello from $0 (pid $$) on Linux\"; uname -a; ls /; for i in 1 2 3; do echo \"loop $i\"; done"
+Lpathenv:
+	.asciz	"PATH=/bin:/usr/bin"
 Lecho:
 	.asciz	"/bin/echo"
 Lecho0:
