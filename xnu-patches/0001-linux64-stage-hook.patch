@@ -1,8 +1,8 @@
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..acd7193 100644
+index ac1713e..96b959a 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -228,6 +228,13 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
+@@ -228,6 +228,15 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
  extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
  extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
  
@@ -12,11 +12,13 @@ index ac1713e..acd7193 100644
 +unsigned long linux64_tpidr;
 +/* LINUX64: the slide xnu.ko applied. */
 +uintptr_t linux64_slide;
++/* LINUX64: XNU's virtual interrupt-enable state (hardware IRQs stay masked while hosted). */
++unsigned int linux64_vint;
 +
  static void
  arm_slide_rebase_and_sign_image(void)
  {
-@@ -285,10 +292,14 @@ arm_slide_rebase_and_sign_image(void)
+@@ -285,10 +294,14 @@ arm_slide_rebase_and_sign_image(void)
  		 * using hardcoded kernel link address
  		 */
  		slide = (uintptr_t)k_mh - VM_KERNEL_LINK_ADDRESS;
@@ -32,7 +34,7 @@ index ac1713e..acd7193 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +352,50 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +354,50 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
@@ -83,7 +85,7 @@ index ac1713e..acd7193 100644
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
-@@ -361,6 +416,7 @@ arm_init(
+@@ -361,6 +418,7 @@ arm_init(
  	port_crumb = 100;
  	arm_slide_rebase_and_sign_image();
  	port_crumb = 101;
@@ -91,7 +93,7 @@ index ac1713e..acd7193 100644
  
  	arm_static_if_init(args);
  	port_crumb = 102;
-@@ -382,6 +438,7 @@ arm_init(
+@@ -382,6 +440,7 @@ arm_init(
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	boot_progress_init();
@@ -99,7 +101,7 @@ index ac1713e..acd7193 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -475,6 +532,7 @@ arm_init(
+@@ -475,6 +534,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -107,7 +109,7 @@ index ac1713e..acd7193 100644
  
  
  	boot_cpu_id = ml_get_boot_cpu_number();
-@@ -511,15 +569,19 @@ arm_init(
+@@ -511,15 +571,19 @@ arm_init(
  
  	kernel_debug_string_early("kernel_startup_bootstrap");
  	kernel_startup_bootstrap();
@@ -127,7 +129,7 @@ index ac1713e..acd7193 100644
  
  	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
  		xmaxmem = (uint64_t) maxmem * (1024 * 1024);
-@@ -544,7 +606,9 @@ arm_init(
+@@ -544,7 +608,9 @@ arm_init(
  	}
  #endif /* SCHED_HYGIENE_DEBUG */
  
@@ -137,7 +139,7 @@ index ac1713e..acd7193 100644
  
  #if HAS_BP_RET
  	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
-@@ -581,10 +645,12 @@ arm_init(
+@@ -581,10 +647,12 @@ arm_init(
  		panic("%s: Unable to find 'dram-size' entry in the 'chosen' DT node", __FUNCTION__);
  	}
  
@@ -150,7 +152,7 @@ index ac1713e..acd7193 100644
  	boot_progress_stage("arm_vm_init enter");
  	port_crumb = 1;
  	arm_vm_init(xmaxmem, args);
-@@ -607,6 +673,7 @@ arm_init(
+@@ -607,6 +675,7 @@ arm_init(
  	port_crumb = 5;
  	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
  	kprintf("kprintf initialized\n");
@@ -158,7 +160,7 @@ index ac1713e..acd7193 100644
  
  	serialmode = 0;
  	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
-@@ -648,10 +715,12 @@ arm_init(
+@@ -648,10 +717,12 @@ arm_init(
  	}
  	PE_create_console();
  	port_crumb = 6;
@@ -171,7 +173,7 @@ index ac1713e..acd7193 100644
  
  #if __arm64__
  #if DEBUG
-@@ -661,9 +730,11 @@ arm_init(
+@@ -661,9 +732,11 @@ arm_init(
  
  	cpu_machine_idle_init(TRUE);
  	port_crumb = 8;
@@ -183,7 +185,7 @@ index ac1713e..acd7193 100644
  
  	/* Initialize the debug infrastructure system-wide and on the local core. */
  	pe_arm_debug_init_early(&BootCpuData);
-@@ -676,6 +747,7 @@ arm_init(
+@@ -676,6 +749,7 @@ arm_init(
  
  	ml_map_cpu_pio();
  	port_crumb = 10;
@@ -191,7 +193,7 @@ index ac1713e..acd7193 100644
  
  #if APPLE_ARM64_ARCH_FAMILY
  	configure_late_apple_regs(true);
-@@ -685,6 +757,7 @@ arm_init(
+@@ -685,6 +759,7 @@ arm_init(
  
  	cpu_timebase_init(TRUE);
  	port_crumb = 11;
@@ -199,7 +201,7 @@ index ac1713e..acd7193 100644
  
  #if KPERF
  	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
-@@ -693,6 +766,7 @@ arm_init(
+@@ -693,6 +768,7 @@ arm_init(
  
  	PE_init_cpu();
  	port_crumb = 12;
@@ -207,7 +209,7 @@ index ac1713e..acd7193 100644
  #if __arm64__
  	apt_msg_init();
  	apt_msg_init_cpu();
-@@ -717,6 +791,7 @@ arm_init(
+@@ -717,6 +793,7 @@ arm_init(
  	 */
  	__stack_chk_guard &= ~(0xFFULL << 8);
  	port_crumb = 13;
@@ -260,6 +262,41 @@ index 743117b..9dc298b 100644
  	__asm__ volatile (
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
+diff --git a/osfmk/arm/machine_routines_common.c b/osfmk/arm/machine_routines_common.c
+index b65f76c..bc3207b 100644
+--- a/osfmk/arm/machine_routines_common.c
++++ b/osfmk/arm/machine_routines_common.c
+@@ -1094,6 +1094,30 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
+ 
+ 	thread = current_thread();
+ 
++	{
++		/*
++		 * LINUX64 (xnulinux): XNU runs on its own kernel stacks, where Linux cannot take an interrupt
++		 * (its entry code treats a foreign stack as overflow). Keep IRQs masked in hardware and track
++		 * XNU's view in linux64_vint; timer "interrupts" are delivered from cpu_idle.
++		 */
++		extern uintptr_t linux64_hook;
++		extern unsigned int linux64_vint;
++		if (linux64_hook) {
++			boolean_t was = linux64_vint ? TRUE : FALSE;
++			if (enable && !was) {
++				if (get_preemption_level() == 0) {
++					while (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
++						ast_taken_kernel();
++					}
++				}
++				linux64_vint = 1;
++			} else if (!enable) {
++				linux64_vint = 0;
++			}
++			return was;
++		}
++	}
++
+ 	state = __builtin_arm_rsr("DAIF");
+ 
+ 	if (__improbable(!(state & DAIF_DEBUGF))) {
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
 index 79d0bc1..ac5b387 100644
 --- a/osfmk/arm/pmap/pmap.c
@@ -1079,10 +1116,25 @@ index 13d2819..3ba4ba7 100644
  
  	mrs		x1, MPIDR_EL1
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index f456377..5e1f0b1 100644
+index f456377..b4c18c1 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -2529,6 +2529,13 @@ ml_set_decrementer(uint32_t dec_value)
+@@ -441,6 +441,14 @@ ml_get_interrupts_enabled(void)
+ {
+ 	uint64_t        value;
+ 
++	{
++		/* LINUX64: interrupts are virtual while hosted (see ml_set_interrupts_enabled_with_debug). */
++		extern uintptr_t linux64_hook;
++		extern unsigned int linux64_vint;
++		if (linux64_hook) {
++			return linux64_vint ? TRUE : FALSE;
++		}
++	}
+ 	MRS(value, "DAIF");
+ 	if ((value & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE) {
+ 		return FALSE;
+@@ -2529,6 +2537,13 @@ ml_set_decrementer(uint32_t dec_value)
  		}
  	}
  
@@ -1151,10 +1203,10 @@ index 0eae1f6..9a4e240 100644
  	read_lbr();
  #endif
 diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
-index 2fc6931..19e5838 100644
+index 2fc6931..dd59ae6 100644
 --- a/osfmk/kern/printf.c
 +++ b/osfmk/kern/printf.c
-@@ -876,6 +876,25 @@ __printflike(1, 0)
+@@ -876,6 +876,26 @@ __printflike(1, 0)
  static int
  vprintf_internal(const char *fmt, va_list ap_in, void *caller)
  {
@@ -1162,6 +1214,7 @@ index 2fc6931..19e5838 100644
 +		/* LINUX64 (xnulinux): hosted XNU prints through the host (dmesg), like kprintf. */
 +		extern uintptr_t linux64_hook;
 +		if (linux64_hook && fmt) {
++			extern int vsnprintf(char *, size_t, const char *, va_list);
 +			char buf[256];
 +			va_list ap;
 +			va_copy(ap, ap_in);
