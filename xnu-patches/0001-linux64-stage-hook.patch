@@ -1,5 +1,5 @@
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..9d38023 100644
+index ac1713e..acd7193 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -228,6 +228,13 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
@@ -158,6 +158,63 @@ index ac1713e..9d38023 100644
  
  	serialmode = 0;
  	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
+@@ -648,10 +715,12 @@ arm_init(
+ 	}
+ 	PE_create_console();
+ 	port_crumb = 6;
++	linux64_stage(360);
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
+ 	port_crumb = 7;
++	linux64_stage(370);
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -661,9 +730,11 @@ arm_init(
+ 
+ 	cpu_machine_idle_init(TRUE);
+ 	port_crumb = 8;
++	linux64_stage(380);
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
+ 	port_crumb = 9;
++	linux64_stage(390);
+ 
+ 	/* Initialize the debug infrastructure system-wide and on the local core. */
+ 	pe_arm_debug_init_early(&BootCpuData);
+@@ -676,6 +747,7 @@ arm_init(
+ 
+ 	ml_map_cpu_pio();
+ 	port_crumb = 10;
++	linux64_stage(400);
+ 
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs(true);
+@@ -685,6 +757,7 @@ arm_init(
+ 
+ 	cpu_timebase_init(TRUE);
+ 	port_crumb = 11;
++	linux64_stage(410);
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+@@ -693,6 +766,7 @@ arm_init(
+ 
+ 	PE_init_cpu();
+ 	port_crumb = 12;
++	linux64_stage(420);
+ #if __arm64__
+ 	apt_msg_init();
+ 	apt_msg_init_cpu();
+@@ -717,6 +791,7 @@ arm_init(
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
+ 	port_crumb = 13;
++	linux64_stage(490);
+ 	machine_startup(args);
+ }
+ 
 diff --git a/osfmk/arm/cpu_data.h b/osfmk/arm/cpu_data.h
 index 743117b..9dc298b 100644
 --- a/osfmk/arm/cpu_data.h
