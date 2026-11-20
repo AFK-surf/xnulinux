@@ -28,6 +28,21 @@ module_param(kmax, int, 0444);
 static int kcount;
 static int idle_max = 200;	/* end the run after this many XNU idle rounds (0: never) */
 module_param(idle_max, int, 0444);
+static int quiet_console = 1;	/* drop the known high-volume console and kprintf lines (see quiet_line) */
+module_param(quiet_console, int, 0444);
+static int quiet_line(const char *l, unsigned n)
+{
+	static const char *const pfx[] = { "com.apple.xpc.launchd|", "kmutil: AppleImage4", "cryptexd: AppleImage4", "ACMTRM", "ACM:",
+		"AppleCredentialManagerUserClient", "hfs: set hardlink bit", "Couldn't alloc class", "  dynamic: platformVersion" };
+	for (unsigned i = 0; i < sizeof(pfx) / sizeof(pfx[0]); i++) {
+		unsigned k = 0;
+		while (pfx[i][k] && k < n && l[k] == pfx[i][k]) k++;
+		if (!pfx[i][k]) return 1;
+	}
+	for (unsigned k = 0; k + 18 <= n; k++)	/* "... triggered unnest of range ..." */
+		if (!x_strncmp(l + k, "triggered unnest", 16)) return 1;
+	return 0;
+}
 static int assert_fatal;	/* 1: a failed XNU assert() ends the run; 0: report it and let XNU continue */
 module_param(assert_fatal, int, 0444);
 
@@ -298,8 +313,11 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 				const char *p = "darwin console: ";
 				while (*p) m[j++] = *p++;
 				for (k = 0; k < n; k++) m[j++] = line[k];
-				m[j] = 0; n = 0;
-				logs(m);
+				m[j] = 0;
+				/* quiet_console: launchd's and AppleImage4's chatter (thousands of lines a second) stays out */
+				if (!(quiet_console && quiet_line(line, n)))
+					logs(m);
+				n = 0;
 			}
 		}
 		/* a prompt (a write that ends in "# ", "$ " or "> " without a newline): show it now */
@@ -319,7 +337,7 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		while (f && f[i] && j < sizeof(m) - 1) { if (f[i] != '\n') m[j++] = f[i]; i++; }
 		m[j] = 0;
 		/* the per-entry startup trace is thousands of lines: count it, do not print it */
-		if (!(f && !x_strncmp(f, "kernel_startup_initialize_upto[", 31)))
+		if (!(f && !x_strncmp(f, "kernel_startup_initialize_upto[", 31)) && !(quiet_console && quiet_line(m + 5, j - 5)))
 			logs(m);
 		if (kmax && ++kcount >= kmax) { logs("xnu: kprintf budget reached"); return 1; }
 		return 0;
