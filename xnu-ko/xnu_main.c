@@ -28,6 +28,8 @@ module_param(kmax, int, 0444);
 static int kcount;
 static int idle_max = 200;	/* end the run after this many XNU idle rounds (0: never) */
 module_param(idle_max, int, 0444);
+static int assert_fatal;	/* 1: a failed XNU assert() ends the run; 0: report it and let XNU continue */
+module_param(assert_fatal, int, 0444);
 
 static struct xnu_image img;
 static struct fki_region l2page;
@@ -162,6 +164,18 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		if ((++idles & (idles - 1)) == 0) logkv("xnu: XNU idle, count", idles);
 		fki_idle_until(a1, 20000000ULL);	/* at most 20 ms per round */
 		return idle_max && idles >= (unsigned long)idle_max;
+	}
+	if (stage == 997) {		/* XNU assert() failed */
+		const struct { const char *file; long line; const char *expr; } *a = (const void *)a1;
+		char m[240]; unsigned j = 0, i;
+		const char *parts[3] = { "xnu: XNU assert failed: ", a->file, ": " };
+		for (int p = 0; p < 3; p++)
+			for (i = 0; parts[p] && parts[p][i] && j < sizeof(m) - 1; i++) m[j++] = parts[p][i];
+		for (i = 0; a->expr && a->expr[i] && j < sizeof(m) - 1; i++) m[j++] = a->expr[i];
+		m[j] = 0;
+		logs(m);
+		logkv("xnu:   at line", a->line);
+		return assert_fatal;
 	}
 	if (stage == 999) {
 		char m[200]; const char *f = (const char *)a1; unsigned i = 0;
