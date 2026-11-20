@@ -75,6 +75,39 @@ index 4b1e8a9..f188eed 100644
  	/* Nothing to do when the runtime isn't set */
  	if (trust_cache_rt == NULL) {
  		return;
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index 76555f6..3fad099 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -2341,6 +2341,8 @@ IOPlatformDevice::getResources( void )
+ * the kernel with a suitable message.
+ *********************************************************************/
+ 
++extern "C" uintptr_t linux64_hook; /* LINUX64 (xnulinux) */
++
+ class IOPanicPlatform : IOPlatformExpert {
+ 	OSDeclareDefaultStructors(IOPanicPlatform);
+ 
+@@ -2361,6 +2363,19 @@ IOPanicPlatform::start(IOService * provider)
+ 		platform_name = provider->getName();
+ 	}
+ 
++	/*
++	 * LINUX64 (xnulinux): hosted without the platform kexts, the generic IOPlatformExpert stands in as
++	 * the platform driver, so matching and gIOPlatform users can proceed.
++	 */
++	if (linux64_hook != 0) {
++		IOLog("linux64: no platform driver for \"%s\", using the generic IOPlatformExpert\n", platform_name);
++		if (!IOPlatformExpert::start(provider)) {
++			return false;
++		}
++		registerService();
++		return true;
++	}
++
+ 	panic("Unable to find driver for this platform: \"%s\".",
+ 	    platform_name);
+ 
 diff --git a/libkern/crypto/corecrypto_rand.c b/libkern/crypto/corecrypto_rand.c
 index d46815b..ccd2d84 100644
 --- a/libkern/crypto/corecrypto_rand.c
