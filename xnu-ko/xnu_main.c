@@ -28,7 +28,7 @@ static struct xnu_image img;
 static struct fki_region l2page;
 static unsigned long long *window_slot, *window_l1;
 static unsigned char window_owned[512];
-static u64_t diag_va[4];
+static u64_t diag_va[6];
 #define XNU_L1_FIRST 384	/* VM_MIN_KERNEL_ADDRESS 0xffffffe000000000 */
 #define XNU_L1_LAST 495	/* VM_MAX_KERNEL_ADDRESS 0xfffffffbffffffff */
 static void *blob;
@@ -140,6 +140,13 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		}
 		if (last >= 0) fki_window_set(&window_l1[last], tte[last]);	/* barrier + TLB flush */
 		logkv("xnu: XNU L1 entries installed", n);
+		/* Touch XNU memory through XNU's own tables now (Linux context: a fault here is a readable oops). */
+		logkv("xnu: probe text word", *(volatile unsigned int *)diag_va[0]);
+		logkv("xnu: probe Mach-O magic", *(volatile unsigned int *)diag_va[1]);
+		logkv("xnu: probe boot args Version", ((volatile struct boot_args_v2 *)diag_va[2])->Version);
+		logkv("xnu: probe ADT word", *(volatile unsigned int *)diag_va[3]);
+		if (diag_va[4]) { volatile unsigned int *pc = (void *)diag_va[4]; unsigned v = *pc; *pc = v; logkv("xnu: probe port_crumb (rw)", v); }
+		logs("xnu: probes done");
 	}
 	if (stage == 999) {
 		char m[200]; const char *f = (const char *)a1; unsigned i = 0;
@@ -265,7 +272,8 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	*(u64_t *)a_hook = (u64_t)xnu_world_upcall;
 	*(u64_t *)a_slide = img.slide;
 
-	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba;
+	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba; diag_va[3] = (u64_t)ba->deviceTreeP;
+	diag_va[4] = macho_sym(&img, "_port_crumb");
 	logs("xnu: entering arm_init");
 	long r = xnu_world_call(a_init, (unsigned long)ba);
 	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: arm_init returned (unexpected), r =", (u64_t)r);
