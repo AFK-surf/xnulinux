@@ -842,7 +842,7 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..6711f39 100644
+index d10d7a1..6d2cc80 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -100,6 +100,7 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
@@ -866,7 +866,18 @@ index d10d7a1..6711f39 100644
  	if (unmask) {
  		/* Latch SW IRQ+FIQ counter prior to unmasking
  		 * interrupts.
-@@ -614,6 +621,27 @@ cpu_idle(void)
+@@ -570,7 +577,9 @@ cpu_idle(void)
+ 		}
+ 	}
+ 
+-	if (__improbable(cpu_proximate_timer())) {
++	extern uintptr_t linux64_hook;
++	/* LINUX64: no timer interrupt will arrive while hosted; the host idle below delivers the due timer. */
++	if (__improbable(cpu_proximate_timer()) && !linux64_hook) {
+ 		if (idle_wfe_poll && idle_proximate_timer_wfe == 1) {
+ 			/* Poll issuing WFEs until the expected
+ 			 * timer FIQ arrives.
+@@ -614,6 +623,27 @@ cpu_idle(void)
  	cpc_cpu_transition(CPC_CPU_IDLE, cpu_data_ptr);
  #endif /* CONFIG_CPU_COUNTERS */
  
@@ -894,7 +905,7 @@ index d10d7a1..6711f39 100644
  	if (wfi) {
  #if !defined(APPLE_ARM64_ARCH_FAMILY)
  		platform_cache_idle_enter();
-@@ -735,20 +763,27 @@ cpu_idle_exit(boolean_t from_reset)
+@@ -735,20 +765,27 @@ cpu_idle_exit(boolean_t from_reset)
  void
  cpu_init(void)
  {
@@ -922,7 +933,7 @@ index d10d7a1..6711f39 100644
  		} else {
  			/*
  			 * We initialize non-boot CPUs here; the boot CPU is
-@@ -758,9 +793,11 @@ cpu_init(void)
+@@ -758,9 +795,11 @@ cpu_init(void)
  		}
  
  		do_cacheid();
@@ -934,7 +945,7 @@ index d10d7a1..6711f39 100644
  
  		cpu_info_p = cpuid_info();
  
-@@ -780,6 +817,7 @@ cpu_init(void)
+@@ -780,6 +819,7 @@ cpu_init(void)
  		}
  
  		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
