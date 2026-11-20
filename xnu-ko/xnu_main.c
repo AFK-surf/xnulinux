@@ -153,7 +153,7 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 {
 	if (!in_xnu)
 		return 1;
-	if (((far >= XNU_VA_LO && far < XNU_VA_HI) || far < 0x0001000000000000ULL) && xnu_kfault) {
+	if (far && ((far >= XNU_VA_LO && far < XNU_VA_HI) || far < 0x0001000000000000ULL) && xnu_kfault) {
 		static unsigned long last_far, repeats;
 		kfaults++;
 		repeats = (far == last_far) ? repeats + 1 : 0;
