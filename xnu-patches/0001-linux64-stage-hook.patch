@@ -1635,10 +1635,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..4b1d7bd 100644
+index d8f1b19..2e1422e 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,65 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,76 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1684,7 +1684,18 @@ index d8f1b19..4b1d7bd 100644
 +			return result;
 +		}
 +	}
-+	return vm_fault(map, far, fault_type, FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0);
++	kern_return_t kr = vm_fault(map, far, fault_type, FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0);
++	if (map != kernel_map) {
++		/* LINUX64 debug: where did the user fault land? */
++		static int reported;
++		if (reported++ < 4) {
++			kprintf("linux64 ufault far 0x%llx esr 0x%llx kr %d map %p pmap %p ttep 0x%llx asid %u phys 0x%llx cur_ttbr0 0x%llx pagesize %llu\n",
++			    far, esr, kr, map, map->pmap, (uint64_t)map->pmap->ttep, (unsigned)map->pmap->hw_asid,
++			    (uint64_t)pmap_find_phys(map->pmap, far) << PAGE_SHIFT, __builtin_arm_rsr64("TTBR0_EL1"),
++			    (uint64_t)vm_map_page_size(map));
++		}
++	}
++	return kr;
 +}
 +
 +/*
