@@ -313,6 +313,14 @@ void fki_fault_unregister(void)
 }
 EXPORT_SYMBOL(fki_fault_unregister);
 
+fki_u64 fki_phys_peek(fki_u64 pa)
+{
+	if (!pfn_valid(PHYS_PFN(pa)))
+		return ~0ULL;
+	return READ_ONCE(*(u64 *)phys_to_virt(pa & ~7ULL));
+}
+EXPORT_SYMBOL(fki_phys_peek);
+
 /* ---- contiguous memory and the top foreign window ---- */
 
 int fki_contig_alloc(unsigned long size, struct fki_region *r)
