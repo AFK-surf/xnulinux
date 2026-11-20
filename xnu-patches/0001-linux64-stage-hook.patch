@@ -1635,10 +1635,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..cac79d3 100644
+index d8f1b19..4b1d7bd 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,56 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,65 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1666,16 +1666,25 @@ index d8f1b19..cac79d3 100644
 +	} else {
 +		return KERN_FAILURE;
 +	}
-+	if (!is_vm_fault(fault_code) || !VM_KERNEL_ADDRESS(far)) {
++	if (!is_vm_fault(fault_code)) {
 +		return KERN_FAILURE;
 +	}
++	/* a kernel address faults on the kernel map; a user one (copyio) on the current thread's map */
++	vm_map_t map = kernel_map;
++	if (!VM_KERNEL_ADDRESS(far)) {
++		thread_t thread = current_thread();
++		if (thread == THREAD_NULL || thread->map == VM_MAP_NULL || thread->map == kernel_map) {
++			return KERN_FAILURE;
++		}
++		map = thread->map;
++	}
 +	if (!is_translation_fault(fault_code)) {
-+		result = arm_fast_fault(kernel_map->pmap, far, fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), FALSE);
++		result = arm_fast_fault(map->pmap, far, fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), FALSE);
 +		if (result == KERN_SUCCESS) {
 +			return result;
 +		}
 +	}
-+	return vm_fault(kernel_map, far, fault_type, FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0);
++	return vm_fault(map, far, fault_type, FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0);
 +}
 +
 +/*
