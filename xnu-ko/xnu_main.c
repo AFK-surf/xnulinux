@@ -170,6 +170,9 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		{ 210, "arm_vm_init: XNU's kernel L1 entries installed in Linux's table" },
 		{ 215, "arm_vm_init: running on XNU's own page tables" }, { 220, "pmap_bootstrap returned" },
 		{ 230, "arm_vm_init returned" }, { 300, "kprintf initialized" },
+		{ 360, "PE_create_console" }, { 370, "PE_init_printf" }, { 380, "cpu_machine_idle_init" },
+		{ 390, "PE_init_platform(TRUE)" }, { 400, "ml_map_cpu_pio" }, { 410, "cpu_timebase_init" },
+		{ 420, "PE_init_cpu" }, { 490, "about to call machine_startup" },
 	};
 	if (stage >= 1000) {
 		logkv("xnu: XNU sub-stage", stage);
