@@ -29,6 +29,7 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/sched.h>
+#include <linux/fs.h>
 
 int fki_version(void)
 {
@@ -401,3 +402,71 @@ EXPORT_SYMBOL(fki_idle_until);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Foreign kernel interface v0 (out-of-tree form for stock kernels)");
+
+void *fki_file_open(const char *path, int writable, fki_u64 *size)
+{
+	struct file *f = filp_open(path, (writable ? O_RDWR : O_RDONLY) | O_LARGEFILE, 0);
+
+	if (IS_ERR(f))
+		return NULL;
+	if (size)
+		*size = i_size_read(file_inode(f));
+	return f;
+}
+EXPORT_SYMBOL(fki_file_open);
+
+#define FKI_FILE_CHUNK (256UL << 10)
+
+long fki_file_rw(void *file, int write, void *buf, unsigned long len, fki_u64 off)
+{
+	struct file *f = file;
+	unsigned long done = 0;
+	long ret = 0;
+	void *bounce;
+
+	if (!f)
+		return -EBADF;
+	local_irq_enable();
+	preempt_enable();
+	bounce = kvmalloc(min(len, FKI_FILE_CHUNK), GFP_KERNEL);
+	if (!bounce)
+		ret = -ENOMEM;
+	while (bounce && done < len) {
+		unsigned long n = min(len - done, FKI_FILE_CHUNK);
+		loff_t pos = off + done;
+		ssize_t r;
+
+		if (write) {
+			preempt_disable(); local_irq_disable();
+			memcpy(bounce, (char *)buf + done, n);
+			local_irq_enable(); preempt_enable();
+			r = kernel_write(f, bounce, n, &pos);
+		} else {
+			r = kernel_read(f, bounce, n, &pos);
+			if (r > 0) {
+				preempt_disable(); local_irq_disable();
+				memcpy((char *)buf + done, bounce, r);
+				local_irq_enable(); preempt_enable();
+			}
+		}
+		if (r < 0) {
+			ret = r;
+			break;
+		}
+		done += r;
+		if ((unsigned long)r < n)
+			break;
+	}
+	kvfree(bounce);
+	preempt_disable();
+	local_irq_disable();
+	return ret < 0 && !done ? ret : (long)done;
+}
+EXPORT_SYMBOL(fki_file_rw);
+
+void fki_file_close(void *file)
+{
+	if (file)
+		filp_close(file, NULL);
+}
+EXPORT_SYMBOL(fki_file_close);
