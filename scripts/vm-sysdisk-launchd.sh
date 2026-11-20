@@ -18,6 +18,28 @@ if [ "${MODE:-launchd}" = launchd ]; then
     done
     [ -s /var/tmp/daemons.tar ] && sudo tar xf /var/tmp/daemons.tar -C /mnt/sys --warning=no-unknown-keyword
     sudo mkdir -p /mnt/sys/private/var/db/diagnostics /mnt/sys/private/var/db/uuidtext /mnt/sys/private/var/log /mnt/sys/private/var/run /mnt/sys/Library/Preferences
+    # a minimal local directory node for opendirectoryd (it panics the system without /Local/Default): root, daemon, wheel
+    D=/mnt/sys/private/var/db/dslocal/nodes/Default
+    sudo mkdir -p $D/users $D/groups $D/config /mnt/sys/private/var/root
+    u() { sudo tee $D/users/$1.plist >/dev/null <<UP
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>name</key><array><string>$1</string></array><key>uid</key><array><string>$2</string></array>
+<key>gid</key><array><string>$3</string></array><key>home</key><array><string>$4</string></array>
+<key>shell</key><array><string>/bin/sh</string></array><key>realname</key><array><string>$5</string></array>
+<key>passwd</key><array><string>*</string></array><key>generateduid</key><array><string>FFFFEEEE-DDDD-CCCC-BBBB-AAAA0000000$2</string></array>
+</dict></plist>
+UP
+    }
+    u root 0 0 /var/root "System Administrator"; u daemon 1 1 /var/root "System Services"
+    sudo tee $D/groups/wheel.plist >/dev/null <<'GP'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>name</key><array><string>wheel</string></array><key>gid</key><array><string>0</string></array>
+<key>users</key><array><string>root</string></array><key>generateduid</key><array><string>ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000000</string></array></dict></plist>
+GP
+    sudo chmod -R go-rwx /mnt/sys/private/var/db/dslocal
   fi
   sudo tee /mnt/sys/System/Library/LaunchDaemons/xnulinux.hello.plist >/dev/null <<'PL'
 <?xml version="1.0" encoding="UTF-8"?>
