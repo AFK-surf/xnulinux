@@ -128,7 +128,7 @@ index ac1713e..283fb99 100644
  	port_crumb = 1;
  	arm_vm_init(xmaxmem, args);
 diff --git a/osfmk/arm/cpu_data.h b/osfmk/arm/cpu_data.h
-index 743117b..999d5bc 100644
+index 743117b..9dc298b 100644
 --- a/osfmk/arm/cpu_data.h
 +++ b/osfmk/arm/cpu_data.h
 @@ -61,8 +61,9 @@ current_thread_fast(void)
@@ -154,6 +154,24 @@ index 743117b..999d5bc 100644
  	return __unsafe_forge_single(thread_t, result);
  #else
  	// TPIDRPRW
+@@ -114,7 +115,16 @@ current_thread_volatile(void)
+ static inline vm_offset_t
+ exception_stack_pointer(void)
+ {
+-	vm_offset_t result = 0;
++	vm_offset_t result = 0, spsel;
++	/*
++	 * LINUX64 (xnulinux): hosted XNU runs on Linux's SP_EL1 stack, and SP_EL0 is
++	 * Linux's `current`; never flip SPSel. When already on SP_EL1, sp is the answer.
++	 */
++	__asm__ volatile ("mrs %0, SPSel" : "=r" (spsel));
++	if (spsel & 1) {
++		__asm__ volatile ("mov %0, sp" : "=r" (result));
++		return result;
++	}
+ 	__asm__ volatile (
+                  "msr		SPSel, #1  \n"
+                  "mov		%0, sp     \n"
 diff --git a/osfmk/arm64/asm.h b/osfmk/arm64/asm.h
 index 84deb3f..767b8f8 100644
 --- a/osfmk/arm64/asm.h
