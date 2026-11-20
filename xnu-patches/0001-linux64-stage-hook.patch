@@ -1094,7 +1094,7 @@ index d10d7a1..15e2fb4 100644
  		cpc_cpu_transition(CPC_CPU_EARLY_INIT, cdp);
  #endif /* CONFIG_CPU_COUNTERS */
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
-index a191eb3..571ea46 100644
+index a191eb3..fe8bf4e 100644
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
 @@ -185,7 +185,8 @@
@@ -1157,6 +1157,126 @@ index a191eb3..571ea46 100644
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	load_general_registers	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
+@@ -444,3 +450,119 @@ LEXT(machine_set_current_thread)
+ 
+ 
+ /* vim: set ts=4: */
++
++/*
++ * LINUX64 (xnulinux): user space while hosted. linux64_el0_run(ss) enters EL0 with the user state in ss
++ * (IRQs stay masked at EL0), on this CPU, with VBAR_EL1 pointing at linux64_el0_vectors and SP_EL0 holding the
++ * user sp; Linux's vectors and its `current` (SP_EL0) are kept in linux64_el0_save. An exception from EL0 builds a
++ * register frame on the thread's kernel stack, puts Linux's VBAR and SP_EL0 back and calls
++ * linux64_el0_exception(frame) (sleh.c), which hands it to sleh_synchronous and returns to user space again.
++ */
++	.data
++	.align 3
++	.globl EXT(linux64_el0_save)
++LEXT(linux64_el0_save)
++	.quad	0, 0
++
++	.text
++	.align 2
++	.globl EXT(linux64_el0_run)
++LEXT(linux64_el0_run)
++	ARM64_PROLOG
++	adrp	x9, EXT(linux64_el0_save)@page
++	add		x9, x9, EXT(linux64_el0_save)@pageoff
++	mrs		x10, SP_EL0
++	str		x10, [x9, #0]
++	mrs		x10, VBAR_EL1
++	str		x10, [x9, #8]
++	adrp	x10, EXT(linux64_el0_vectors)@page
++	add		x10, x10, EXT(linux64_el0_vectors)@pageoff
++	msr		VBAR_EL1, x10
++	ldr		x10, [x0, SS64_SP]
++	msr		SP_EL0, x10
++	ldr		x10, [x0, SS64_PC]
++	msr		ELR_EL1, x10
++	ldr		w10, [x0, SS64_CPSR]
++	orr		w10, w10, #0xc0						// IRQ and FIQ stay masked at EL0 while hosted
++	msr		SPSR_EL1, x10
++	// the next exception from EL0 starts from the top of this thread's kernel stack
++	adrp	x11, _linux64_tpidr@PAGE
++	ldr		x11, [x11, _linux64_tpidr@PAGEOFF]
++	LOAD_KERN_STACK_TOP	dst=x12, src=x11, tmp=x13
++	mov		sp, x12
++	isb
++	add		x30, x0, SS64_X0
++	ldp		x2, x3, [x30, #16]
++	ldp		x4, x5, [x30, #32]
++	ldp		x6, x7, [x30, #48]
++	ldp		x8, x9, [x30, #64]
++	ldp		x10, x11, [x30, #80]
++	ldp		x12, x13, [x30, #96]
++	ldp		x14, x15, [x30, #112]
++	ldp		x16, x17, [x30, #128]
++	ldp		x18, x19, [x30, #144]
++	ldp		x20, x21, [x30, #160]
++	ldp		x22, x23, [x30, #176]
++	ldp		x24, x25, [x30, #192]
++	ldp		x26, x27, [x30, #208]
++	ldp		x28, x29, [x30, #224]
++	ldp		x0, x1, [x30, #0]
++	ldr		x30, [x30, #240]
++	eret
++
++	.text
++	.align 11
++	.globl EXT(linux64_el0_vectors)
++LEXT(linux64_el0_vectors)
++	.rept 8										// current EL (SP0, SPx): not expected while at EL0
++	b		.
++	.align 7
++	.endr
++	.rept 4										// lower EL, AArch64: sync, IRQ, FIQ, SError
++	b		Llinux64_el0_entry
++	.align 7
++	.endr
++	.rept 4										// lower EL, AArch32
++	b		.
++	.align 7
++	.endr
++
++Llinux64_el0_entry:
++	sub		sp, sp, #(36 * 8)
++	stp		x0, x1, [sp, #0]
++	stp		x2, x3, [sp, #16]
++	stp		x4, x5, [sp, #32]
++	stp		x6, x7, [sp, #48]
++	stp		x8, x9, [sp, #64]
++	stp		x10, x11, [sp, #80]
++	stp		x12, x13, [sp, #96]
++	stp		x14, x15, [sp, #112]
++	stp		x16, x17, [sp, #128]
++	stp		x18, x19, [sp, #144]
++	stp		x20, x21, [sp, #160]
++	stp		x22, x23, [sp, #176]
++	stp		x24, x25, [sp, #192]
++	stp		x26, x27, [sp, #208]
++	stp		x28, x29, [sp, #224]
++	str		x30, [sp, #240]
++	mrs		x0, SP_EL0
++	str		x0, [sp, #248]
++	mrs		x0, ELR_EL1
++	str		x0, [sp, #256]
++	mrs		x0, SPSR_EL1
++	str		x0, [sp, #264]
++	mrs		x0, ESR_EL1
++	str		x0, [sp, #272]
++	mrs		x0, FAR_EL1
++	str		x0, [sp, #280]
++	adrp	x9, EXT(linux64_el0_save)@page
++	add		x9, x9, EXT(linux64_el0_save)@pageoff
++	ldr		x10, [x9, #0]
++	msr		SP_EL0, x10
++	ldr		x10, [x9, #8]
++	msr		VBAR_EL1, x10
++	isb
++	mov		x0, sp
++	mov		x29, xzr
++	bl		EXT(linux64_el0_exception)
++	b		.
 diff --git a/osfmk/arm64/exception_asm.h b/osfmk/arm64/exception_asm.h
 index b0772a7..ea5e679 100644
 --- a/osfmk/arm64/exception_asm.h
@@ -1635,10 +1755,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..2e1422e 100644
+index d8f1b19..578aa9a 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,76 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,106 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1710,10 +1830,40 @@ index d8f1b19..2e1422e 100644
 +	extern void linux64_stage_arg(unsigned long, unsigned long);
 +	thread_t thread = current_thread();
 +
++	extern void linux64_el0_run(arm_saved_state_t *) __attribute__((noreturn));
++	static int reported;
++
 +	(void)ml_set_interrupts_enabled(FALSE);
 +	ast_taken_user();
-+	linux64_stage_arg(9100, get_saved_state_pc(thread->machine.upcb));
-+	panic("linux64: user space entry is not hosted yet");
++	if (reported++ == 0) {
++		linux64_stage_arg(9100, get_saved_state_pc(thread->machine.upcb));
++	}
++	linux64_el0_run(thread->machine.upcb);
++}
++
++/* LINUX64: the registers linux64_el0_vectors saved for an exception taken at EL0 (cswitch.s) */
++struct linux64_el0_frame {
++	uint64_t x[31];
++	uint64_t sp, pc, cpsr, esr, far;
++};
++
++void linux64_el0_exception(struct linux64_el0_frame *f) __attribute__((noreturn));
++void
++linux64_el0_exception(struct linux64_el0_frame *f)
++{
++	thread_t thread = current_thread();
++	arm_saved_state_t *ss = thread->machine.upcb;
++
++	for (unsigned i = 0; i < 29; i++) {
++		set_saved_state_reg(ss, i, f->x[i]);
++	}
++	set_saved_state_fp(ss, f->x[29]);
++	set_saved_state_lr(ss, f->x[30]);
++	set_saved_state_sp(ss, f->sp);
++	set_saved_state_pc(ss, f->pc);
++	set_saved_state_cpsr(ss, (uint32_t)f->cpsr);
++	sleh_synchronous(thread->machine.contextData, f->esr, (vm_offset_t)f->far, false);
++	thread_exception_return();
 +}
 diff --git a/osfmk/arm64/status.c b/osfmk/arm64/status.c
 index c615764..72ec4a7 100644
