@@ -257,14 +257,14 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		return 0;
 	}
 	if (stage == 996) {		/* XNU console bytes (/dev/console): line-buffered into the host log */
-		static char line[200]; static unsigned n;
+		static char line[1000]; static unsigned n;
 		const char *b = (const char *)a1; unsigned long i;
 		for (i = 0; b && i < a2; i++) {
 			char c = b[i];
 			if (c == '\r') continue;
 			if (c != '\n') line[n++] = c;
 			if (c == '\n' || n == sizeof(line) - 1) {
-				char m[220]; unsigned j = 0, k;
+				static char m[1024]; unsigned j = 0, k;
 				const char *p = "darwin console: ";
 				while (*p) m[j++] = *p++;
 				for (k = 0; k < n; k++) m[j++] = line[k];
@@ -272,8 +272,9 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 				logs(m);
 			}
 		}
-		if (n) {	/* a write without a newline (a prompt): show it now */
-			char m[220]; unsigned j = 0, k;
+		/* a prompt (a write that ends in "# ", "$ " or "> " without a newline): show it now */
+		if (n >= 2 && line[n - 1] == ' ' && (line[n - 2] == '#' || line[n - 2] == '$' || line[n - 2] == '>')) {
+			static char m[1024]; unsigned j = 0, k;
 			const char *p = "darwin console: ";
 			while (*p) m[j++] = *p++;
 			for (k = 0; k < n; k++) m[j++] = line[k];
