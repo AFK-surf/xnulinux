@@ -141,7 +141,7 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 {
 	if (!in_xnu)
 		return 1;
-	if (far >= XNU_VA_LO && far < XNU_VA_HI && xnu_kfault) {
+	if (((far >= XNU_VA_LO && far < XNU_VA_HI) || far < 0x0001000000000000ULL) && xnu_kfault) {
 		kfaults++;
 		if (xnu_kfault(far, esr) == 0)
 			return 0;
@@ -478,6 +478,14 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	xnu_kfault = (void *)macho_sym(&img, "_linux64_kernel_fault");
 	if (xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
 		logs("xnu: kernel faults on XNU addresses go to XNU's vm_fault");
+	{
+		/* XNU's user half starts as Linux's TTBR0 under XNU's T0SZ (25: 39-bit user VA, 3-level 4K tables) */
+		unsigned long long tcr, ttbr0;
+		__asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
+		__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
+		xnu_W.xnu_tcr = (tcr & ~0x3fULL) | 25;
+		xnu_W.xnu_ttbr0 = ttbr0;
+	}
 	logs("xnu: entering arm_init");
 	in_xnu = 1;
 	long r = xnu_world_call(a_init, (unsigned long)ba);

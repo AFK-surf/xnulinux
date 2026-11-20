@@ -9,7 +9,10 @@ struct xnu_world {
 	unsigned long long xnu_stack_top;	/* 232 */
 	struct fki_pac_keys linux_keys;		/* 240 */
 	struct fki_pac_keys xnu_keys;		/* 328 */
+	unsigned long long linux_ttbr0, linux_tcr;	/* 416, 424: Linux's user address space while XNU runs */
+	unsigned long long xnu_ttbr0, xnu_tcr;		/* 432, 440: XNU's (its user pmaps, its T0SZ) */
 };
+_Static_assert(__builtin_offsetof(struct xnu_world, linux_ttbr0) == 416, "xnu_world layout");
 _Static_assert(sizeof(struct fki_pac_keys) == 88, "fki_pac_keys layout");
 _Static_assert(__builtin_offsetof(struct xnu_world, xnu_keys) == 328, "xnu_world layout");
 extern struct xnu_world xnu_W;
