@@ -210,6 +210,17 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2);
 long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 {
+	{
+		/* debugging: an XNU stack Linux's overflow check would reject (bit 14 of sp set) */
+		static int told;
+		unsigned long sp;
+		__asm__ volatile("mov %0, sp" : "=r"(sp));
+		if ((sp & 0x4000) && told < 3) {
+			told++;
+			logkv("xnu: upcall on an XNU stack with sp bit 14 set, sp", sp);
+			logkv("xnu:   stage", stage);
+		}
+	}
 	in_xnu = 0;
 	long r = xnu_hook_body(stage, a1, a2);
 	if (!r) in_xnu = 1;
