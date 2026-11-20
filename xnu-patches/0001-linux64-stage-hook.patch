@@ -336,6 +336,26 @@ index e5e58b5..6e6596d 100644
  	pthread_functions->pth_proc_hashinit(p);
  }
  
+diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
+index 229d6a1..e610b22 100644
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1144,7 +1144,14 @@ vfs_rootmountalloc_internal(struct vfstable *vfsp, const char *devname)
+ 
+ 	mp->mnt_vtable = vfsp;
+ 	mp->mnt_op = vfsp->vfc_vfsops;
+-	mp->mnt_flag = MNT_RDONLY | MNT_ROOTFS;
++	{
++		/*
++		 * LINUX64 (xnulinux): a hosted root (the host-file disk) mounts read-write; nothing here runs the boot tasks
++		 * that would remount it (logd traps on EROFS writing /private/var/db/diagnostics).
++		 */
++		extern uintptr_t linux64_hook;
++		mp->mnt_flag = (linux64_hook ? 0 : MNT_RDONLY) | MNT_ROOTFS;
++	}
+ 	mp->mnt_vnodecovered = NULLVP;
+ 	//mp->mnt_stat.f_type = vfsp->vfc_typenum;
+ 	mp->mnt_flag |= vfsp->vfc_flags & MNT_VISFLAGMASK;
 diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
 index d8fd4af..815051f 100644
 --- a/bsd/vm/vm_unix.c
