@@ -115,6 +115,21 @@ index e5e58b5..6e6596d 100644
  	pthread_functions->pth_proc_hashinit(p);
  }
  
+diff --git a/iokit/Kernel/IONVRAMCHRPHandler.cpp b/iokit/Kernel/IONVRAMCHRPHandler.cpp
+index 0cc7f6e..c07d35c 100644
+--- a/iokit/Kernel/IONVRAMCHRPHandler.cpp
++++ b/iokit/Kernel/IONVRAMCHRPHandler.cpp
+@@ -511,6 +511,10 @@ IONVRAMCHRPHandler::unserializeVariables(void)
+ 		if (currentRegion->size == 0) {
+ 			continue;
+ 		}
++		/* LINUX64 (xnulinux): no NVRAM image from a bootloader (blank store): no partition to read */
++		if (_nvramImage == nullptr || currentRegion->offset == 0xFFFFFFFF) {
++			continue;
++		}
+ 
+ 		DEBUG_INFO("region = %d\n", currentRegion->type);
+ 		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
 index 76555f6..3fad099 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
