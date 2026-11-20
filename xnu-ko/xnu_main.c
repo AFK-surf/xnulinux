@@ -83,6 +83,14 @@ static const char *cmdline = "debug=0x8 -v serial=0 startup_debug=1 vm_compressi
 
 long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 {
+	if (stage == 998) {		/* XNU kprintf */
+		char m[260]; const char *f = (const char *)a1; unsigned i = 0, j = 0;
+		m[j++] = 'x'; m[j++] = 'n'; m[j++] = 'u'; m[j++] = ']'; m[j++] = ' ';
+		while (f && f[i] && j < sizeof(m) - 1) { if (f[i] != '\n') m[j++] = f[i]; i++; }
+		m[j] = 0;
+		logs(m);
+		return 0;
+	}
 	if (stage == 999) {
 		char m[200]; const char *f = (const char *)a1; unsigned i = 0;
 		while (f && f[i] && i < sizeof(m) - 1) { m[i] = f[i]; i++; }
