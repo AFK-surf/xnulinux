@@ -23,6 +23,9 @@ static int stop = 199;
 module_param(stop, int, 0444);
 static int ram_mb = 256;
 module_param(ram_mb, int, 0444);
+static int kmax;	/* end the run after this many XNU kprintf lines (0: no limit) */
+module_param(kmax, int, 0444);
+static int kcount;
 
 static struct xnu_image img;
 static struct fki_region l2page;
@@ -124,6 +127,7 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		while (f && f[i] && j < sizeof(m) - 1) { if (f[i] != '\n') m[j++] = f[i]; i++; }
 		m[j] = 0;
 		logs(m);
+		if (kmax && ++kcount >= kmax) { logs("xnu: kprintf budget reached"); return 1; }
 		return 0;
 	}
 	if (stage == 210 && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
