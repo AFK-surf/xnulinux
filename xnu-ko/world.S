@@ -1,4 +1,6 @@
-/* World switch, see world.h. No PAC instructions here: keys change under our feet. */
+/* World switch, see world.h. No PAC instructions here: keys change under our feet.
+ * TPIDR_EL1 stays Linux's: the LINUX64 XNU keeps its thread pointer in memory (linux64_tpidr),
+ * so a fault taken in XNU code reaches Linux with a sane per-cpu base and becomes a normal oops. */
 #define W(reg) adrp reg, xnu_W; add reg, reg, :lo12:xnu_W
 
 	.text
@@ -21,20 +23,12 @@ xnu_world_call:
 	bl	fki_enter		/* no preemption, no IRQs */
 	W(x9)
 	str	x0, [x9, #104]
-	mrs	x10, tpidr_el1
-	str	x10, [x9, #216]
-	ldr	x10, [x9, #224]
-	msr	tpidr_el1, x10
 	ldr	x10, [x9, #232]
 	mov	sp, x10
 	mov	x0, x20
 	blr	x19
 	/* fn returned: XNU keys and thread pointer are live */
 	W(x9)
-	mrs	x10, tpidr_el1
-	str	x10, [x9, #224]
-	ldr	x10, [x9, #216]
-	msr	tpidr_el1, x10
 	mov	x19, #0
 	b	2f
 xnu_world_abort:			/* from the upcall: Linux keys and TPIDR are live */
@@ -72,10 +66,6 @@ xnu_world_upcall:			/* x0 = stage, called by XNU with blr */
 	mov	x19, x0
 	mov	x20, x1
 	mov	x21, x2
-	mrs	x10, tpidr_el1
-	str	x10, [x9, #224]
-	ldr	x10, [x9, #216]
-	msr	tpidr_el1, x10
 	add	x0, x9, #240		/* load Linux keys */
 	add	x1, x9, #328		/* save XNU keys */
 	bl	fki_pac_swap
@@ -89,8 +79,6 @@ xnu_world_upcall:			/* x0 = stage, called by XNU with blr */
 	add	x1, x9, #240		/* save Linux keys */
 	bl	fki_pac_swap
 	W(x9)
-	ldr	x10, [x9, #224]
-	msr	tpidr_el1, x10
 	ldr	x10, [x9, #208]
 	mov	sp, x10
 	ldp	x19, x20, [x9, #112]
