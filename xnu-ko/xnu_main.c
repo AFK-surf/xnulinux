@@ -39,6 +39,10 @@ static u64_t diag_va[6];
 #define XNU_L1_FIRST 384	/* VM_MIN_KERNEL_ADDRESS 0xffffffe000000000 */
 #define XNU_L1_LAST 495	/* VM_MAX_KERNEL_ADDRESS 0xfffffffbffffffff */
 static void *blob;
+/* A root RAM disk (firmware blob): placed in XNU's DRAM after the ADT, /chosen/memory-map RAMDisk, boot-arg rd=md0. */
+static char *ramdisk;
+module_param(ramdisk, charp, 0444);
+static const void *rd_data; static unsigned long rd_size; static void *rd_blob;
 struct xnu_world xnu_W;
 
 static void logs(const char *s) { fki_log(s, x_strlen(s)); }
@@ -327,8 +331,13 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_u32(&a, "effective-production-status-ap", 0);
 	adt_prop_u32(&a, "effective-security-mode-ap", 0);
 	adt_prop_u32(&a, "mix-n-match-prevention-status", 0);
-	adt_node(&a, 1, 0);				/* /chosen/memory-map: no trust caches, no AuxKC */
+	u64_t off_rd = (off_dt + 0x40000 + 0x3fff) & ~0x3fffULL;	/* the RAM disk, after the ADT's room */
+	adt_node(&a, rd_size ? 2 : 1, 0);		/* /chosen/memory-map: no trust caches, no AuxKC */
 	adt_prop_str(&a, "name", "memory-map");
+	if (rd_size) {
+		u64_t rd[2] = { phys + off_rd, rd_size };
+		adt_prop(&a, "RAMDisk", rd, sizeof(rd));
+	}
 	adt_node(&a, 1, 0);				/* /chosen/manifest-properties: AppleImage4 reads it (empty: no manifest) */
 	adt_prop_str(&a, "name", "manifest-properties");
 	adt_node(&a, 3, 0);				/* /chosen/asmb: the SIP configuration a bootloader passes (csr_bootstrap) */
@@ -366,9 +375,18 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	ba->memSize = size;
 	ba->memSizeActual = size;
 	ba->topOfKernelData = phys + ((off_dt + dt_len + 0x3fff) & ~0x3fffULL);
+	if (rd_size) {
+		x_memcpy(base_va + off_rd, rd_data, rd_size);
+		ba->topOfKernelData = phys + ((off_rd + rd_size + 0x3fff) & ~0x3fffULL);
+		logkv("xnu: root RAM disk bytes", rd_size);
+	}
 	ba->deviceTreeP = base_va + off_dt;
 	ba->deviceTreeLength = (unsigned)dt_len;
 	x_memcpy(ba->CommandLine, cmdline, x_strlen(cmdline) + 1);
+	if (rd_size) {
+		const char *rd = " rd=md0";
+		x_memcpy(ba->CommandLine + x_strlen(cmdline), rd, x_strlen(rd) + 1);
+	}
 	logkv("xnu: boot args at", (u64_t)ba);
 	logkv("xnu: ADT bytes", dt_len);
 	logkv("xnu: topOfKernelData (phys)", ba->topOfKernelData);
@@ -488,7 +506,7 @@ static int run_m2b(void)
 	u64_t image_size = img.vmhigh - img.vmlow;
 	if (img.vmlow < 0xffffffe000000000ULL) { logs("xnu: unexpected link address"); return -22; }
 	u64_t image_off = img.vmlow - XNU_WINDOW_BASE;
-	u64_t want = image_off + image_size + 0x20000 + ((u64_t)ram_mb << 20);
+	u64_t want = image_off + image_size + 0x60000 + ((rd_size + 0x3fff) & ~0x3fffULL) + ((u64_t)ram_mb << 20);
 	int err = fki_contig_alloc(want, &img.region);
 	if (err) { logkv("xnu: contiguous allocation failed, err", (u64_t)err); return err; }
 	logkv("xnu: contiguous DRAM at phys", img.region.pa);
@@ -533,6 +551,10 @@ static int __init xnu_init(void)
 
 	if (fki_version() != 0)
 		return -22;
+	if (ramdisk) {
+		err = fki_blob_get(ramdisk, &rd_data, &rd_size, &rd_blob);
+		if (err) { logkv("xnu: cannot read the RAM disk, err", (u64_t)err); return err; }
+	}
 	err = fki_blob_get(image, &data, &size, &blob);
 	if (err) { logkv("xnu: cannot read image, err", (u64_t)err); return err; }
 	err = macho_load(&img, data, size, mode == 3 ? ~0UL : mode == 2 ? (unsigned long)ram_mb << 20 : 0);
@@ -562,6 +584,7 @@ static void __exit xnu_exit(void)
 		if (l2page.va) fki_contig_free(&l2page);
 	} else if (img.region.va) fki_region_free(&img.region);
 	if (blob) fki_blob_put(blob);
+	if (rd_blob) fki_blob_put(rd_blob);
 }
 
 module_init(xnu_init);
