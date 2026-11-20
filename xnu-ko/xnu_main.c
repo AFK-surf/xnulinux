@@ -142,9 +142,15 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 	if (!in_xnu)
 		return 1;
 	if (((far >= XNU_VA_LO && far < XNU_VA_HI) || far < 0x0001000000000000ULL) && xnu_kfault) {
+		static unsigned long last_far, repeats;
 		kfaults++;
-		if (xnu_kfault(far, esr) == 0)
+		repeats = (far == last_far) ? repeats + 1 : 0;
+		last_far = far;
+		/* the same address faulting over and over: vm_fault says yes, the hardware still says no */
+		if (repeats < 64 && xnu_kfault(far, esr) == 0)
 			return 0;
+		if (repeats >= 64)
+			logs("xnu: the same address keeps faulting after vm_fault resolved it");
 	}
 	/*
 	 * An XNU fault nothing resolves (a bug, or a NULL dereference): report it and end the run instead of letting Linux
