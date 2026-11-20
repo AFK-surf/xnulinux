@@ -11,6 +11,25 @@ index 5362b32..cd43d8e 100644
  
  #if DEBUG_BSDINIT
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 2bf34ab..1be1fe1 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8304,6 +8304,14 @@ load_init_program(proc_t p)
+ 	boot_progress_stage("root check enter");
+ 	int cache_error = native_owner_cache_prepare(p, (user_addr_t)scratch_addr, &init_envp);
+ 	boot_progress_stage("root check returned");
++	{
++		/* LINUX64 (xnulinux): a hosted test root (no macOS OS volume, no boot manifest) skips the owner root check */
++		extern uintptr_t linux64_hook;
++		if (cache_error && linux64_hook) {
++			printf("linux64: owner root check failed (%d); continuing on a test root\n", cache_error);
++			cache_error = 0;
++		}
++	}
+ 	if (cache_error) panic("offline owner root check failed: %d", cache_error);
+ #endif
+ #if defined(XNU_BOOT_PROGRESS) && XNU_BOOT_PROGRESS
 diff --git a/bsd/kern/kern_trustcache.c b/bsd/kern/kern_trustcache.c
 index 4b1e8a9..f188eed 100644
 --- a/bsd/kern/kern_trustcache.c
