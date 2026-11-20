@@ -544,7 +544,13 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		unsigned long long tcr, ttbr0;
 		__asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
 		__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-		xnu_W.xnu_tcr = tcr;
+		/*
+		 * TCR.A1 off in XNU's world: Linux takes the ASID from TTBR1 (A1 = 1), XNU's pmaps put theirs in TTBR0. With
+		 * Linux's A1 every XNU user pmap ran under Linux's one ASID, so XNU's per-ASID TLB flushes missed and a freed
+		 * pmap's cached table walk (the exec'd child's stack L2) served the parent: a translation fault that repeats
+		 * after vm_fault. The world switch drops the local TLB both ways, so the two ASID spaces never mix.
+		 */
+		xnu_W.xnu_tcr = tcr & ~(1ULL << 22);
 		xnu_W.xnu_ttbr0 = ttbr0;
 	}
 	logs("xnu: entering arm_init");
