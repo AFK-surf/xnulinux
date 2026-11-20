@@ -272,15 +272,26 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
-	adt_node(&a, 6, 1);				/* /chosen */
+	adt_node(&a, 7, 3);				/* /chosen */
 	adt_prop_str(&a, "name", "chosen");
 	adt_prop_u64(&a, "dram-base", phys);
 	adt_prop_u64(&a, "dram-size", size);
 	adt_prop(&a, "random-seed", seed, sizeof(seed));
 	adt_prop_str(&a, "firmware-version", "xnulinux-m2");
 	adt_prop_u32(&a, "debug-enabled", 1);
+	{
+		/* the SHA-384 of the boot manifest a bootloader would pass; there is none, so zeros (27's Image4 needs the property) */
+		static const unsigned char zero48[48];
+		adt_prop(&a, "boot-manifest-hash", zero48, sizeof(zero48));
+	}
 	adt_node(&a, 1, 0);				/* /chosen/memory-map: no trust caches, no AuxKC */
 	adt_prop_str(&a, "name", "memory-map");
+	adt_node(&a, 1, 0);				/* /chosen/manifest-properties: AppleImage4 reads it (empty: no manifest) */
+	adt_prop_str(&a, "name", "manifest-properties");
+	adt_node(&a, 3, 0);				/* /chosen/asmb: the SIP configuration a bootloader passes (csr_bootstrap) */
+	adt_prop_str(&a, "name", "asmb");
+	adt_prop_u64(&a, "lp-sip0", 0x2);		/* CSR_ALLOW_UNTRUSTED_KEXTS, as DroidVM boots */
+	adt_prop_u32(&a, "lp-sip1", 1);			/* CSR_ALLOW_UNAUTHENTICATED_ROOT */
 	adt_node(&a, 1, 1);				/* /cpus */
 	adt_prop_str(&a, "name", "cpus");
 	adt_node(&a, 6, 0);				/* /cpus/cpu0 */
