@@ -871,7 +871,7 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..0d4079d 100644
+index d10d7a1..15e2fb4 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -100,6 +100,7 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
@@ -895,7 +895,7 @@ index d10d7a1..0d4079d 100644
  	if (unmask) {
  		/* Latch SW IRQ+FIQ counter prior to unmasking
  		 * interrupts.
-@@ -506,6 +513,28 @@ cpu_idle(void)
+@@ -506,6 +513,34 @@ cpu_idle(void)
  	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
  	bool idle_disallowed = false;
  
@@ -913,7 +913,13 @@ index d10d7a1..0d4079d 100644
 +			if (deadline == 0 || deadline == EndOfAllTime || deadline < now) {
 +				deadline = now + 24000;	/* about 1 ms: re-check the run queue */
 +			}
-+			{ extern unsigned long linux64_dbg[16]; linux64_dbg[3]++; }	/* LINUX64 debug */
++			{
++				extern unsigned long linux64_dbg[16];
++				extern void linux64_dump_threads(void);
++				if (++linux64_dbg[3] == 20000) {
++					linux64_dump_threads();	/* LINUX64 debug: who is blocked, and where */
++				}
++			}
 +			linux64_stage_arg(810, deadline);
 +			cpu_data_ptr->cpu_decrementer = -1;
 +			rtclock_intr(FALSE);
@@ -924,7 +930,7 @@ index d10d7a1..0d4079d 100644
  	if (__improbable((!idle_enable))) {
  		idle_disallowed = true;
  		os_atomic_inc(&virt_idle_disallowed[0], relaxed);
-@@ -570,7 +599,9 @@ cpu_idle(void)
+@@ -570,7 +605,9 @@ cpu_idle(void)
  		}
  	}
  
@@ -935,7 +941,7 @@ index d10d7a1..0d4079d 100644
  		if (idle_wfe_poll && idle_proximate_timer_wfe == 1) {
  			/* Poll issuing WFEs until the expected
  			 * timer FIQ arrives.
-@@ -614,6 +645,28 @@ cpu_idle(void)
+@@ -614,6 +651,28 @@ cpu_idle(void)
  	cpc_cpu_transition(CPC_CPU_IDLE, cpu_data_ptr);
  #endif /* CONFIG_CPU_COUNTERS */
  
@@ -964,7 +970,7 @@ index d10d7a1..0d4079d 100644
  	if (wfi) {
  #if !defined(APPLE_ARM64_ARCH_FAMILY)
  		platform_cache_idle_enter();
-@@ -735,20 +788,27 @@ cpu_idle_exit(boolean_t from_reset)
+@@ -735,20 +794,27 @@ cpu_idle_exit(boolean_t from_reset)
  void
  cpu_init(void)
  {
@@ -992,7 +998,7 @@ index d10d7a1..0d4079d 100644
  		} else {
  			/*
  			 * We initialize non-boot CPUs here; the boot CPU is
-@@ -758,9 +818,11 @@ cpu_init(void)
+@@ -758,9 +824,11 @@ cpu_init(void)
  		}
  
  		do_cacheid();
@@ -1004,7 +1010,7 @@ index d10d7a1..0d4079d 100644
  
  		cpu_info_p = cpuid_info();
  
-@@ -780,6 +842,7 @@ cpu_init(void)
+@@ -780,6 +848,7 @@ cpu_init(void)
  		}
  
  		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
@@ -1625,7 +1631,7 @@ index 2fc6931..dd59ae6 100644
  		struct console_printbuf_state info_data;
  
 diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
-index b2aae03..dcfaff8 100644
+index b2aae03..3b2058f 100644
 --- a/osfmk/kern/sched_prim.c
 +++ b/osfmk/kern/sched_prim.c
 @@ -3010,6 +3010,7 @@ thread_invoke(
@@ -1644,6 +1650,41 @@ index b2aae03..dcfaff8 100644
  		/*
  		 * Ensure that updates to my processor and pset state,
  		 * made by the IPI source processor before sending the IPI,
+@@ -9984,3 +9986,34 @@ sysctl_clutch_thread_group_cpu_time_for_thread(__unused thread_t thread,
+ #endif /* !SCHED_TEST_HARNESS */
+ 
+ #endif /* DEVELOPMENT || DEBUG */
++
++/*
++ * LINUX64 (xnulinux) debug: print every thread's state, wait event, continuation and a few saved frames.
++ * Called from the hosted idle path (single CPU, interrupts off), so the list is walked without its lock.
++ */
++void linux64_dump_threads(void);
++void
++linux64_dump_threads(void)
++{
++	thread_t t;
++	int n = 0;
++	queue_iterate(&threads, t, thread_t, threads) {
++		if (++n > 120) {
++			break;
++		}
++		struct arm_kernel_saved_state *ss = (struct arm_kernel_saved_state *)(void *)t->machine.kstackptr;
++		uint64_t lr = 0, fp = 0;
++		if (ss != NULL && t->kernel_stack != 0) {
++			lr = ss->lr | 0xffffff8000000000ULL;
++			fp = ss->fp;
++		}
++		kprintf("linux64 thread %p tid %llu state 0x%x pri %d wait %p cont %p lr 0x%llx\n",
++		    t, t->thread_id, t->state, t->sched_pri, (void *)t->wait_event, (void *)t->continuation, lr);
++		for (int f = 0; f < 8 && fp != 0 && t->kernel_stack != 0 &&
++		    fp >= t->kernel_stack && fp < t->kernel_stack + kernel_stack_size; f++) {
++			uint64_t *frame = (uint64_t *)fp;
++			kprintf("linux64     frame 0x%llx\n", frame[1] | 0xffffff8000000000ULL);
++			fp = frame[0];
++		}
++	}
++}
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
 index a004862..8d4f8a1 100644
 --- a/osfmk/kern/startup.c
