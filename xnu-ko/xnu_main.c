@@ -173,13 +173,15 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
-	adt_node(&a, 6, 0);				/* /chosen */
+	adt_node(&a, 6, 1);				/* /chosen */
 	adt_prop_str(&a, "name", "chosen");
 	adt_prop_u64(&a, "dram-base", phys);
 	adt_prop_u64(&a, "dram-size", size);
 	adt_prop(&a, "random-seed", seed, sizeof(seed));
 	adt_prop_str(&a, "firmware-version", "xnulinux-m2");
 	adt_prop_u32(&a, "debug-enabled", 1);
+	adt_node(&a, 1, 0);				/* /chosen/memory-map: no trust caches, no AuxKC */
+	adt_prop_str(&a, "name", "memory-map");
 	adt_node(&a, 1, 1);				/* /cpus */
 	adt_prop_str(&a, "name", "cpus");
 	adt_node(&a, 6, 0);				/* /cpus/cpu0 */
