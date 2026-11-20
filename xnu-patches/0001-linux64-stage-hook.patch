@@ -2462,6 +2462,61 @@ index 11d9eb4..92f42d3 100644
  	if (disableConsoleOutput) {
  		return;
  	}
+diff --git a/osfmk/console/serial_general.c b/osfmk/console/serial_general.c
+index b1ca47a..406a431 100644
+--- a/osfmk/console/serial_general.c
++++ b/osfmk/console/serial_general.c
+@@ -48,13 +48,40 @@ SECURITY_READ_ONLY_LATE(unsigned int) serialmode;
+  *  characters that have been typed.
+  */
+ 
++/*
++ * LINUX64 (xnulinux): a hosted XNU's console input comes from the host (stage 993: up to len bytes into buf, the count
++ * in result), polled by the serial keyboard thread like a UART.
++ */
++extern uintptr_t linux64_hook;
++struct linux64_cons_req { void *buf; uint64_t len; long result; };
++static int
++linux64_cons_getc(void)
++{
++	static char buf[64];
++	static int n, i;
++
++	if (i < n) {
++		return (unsigned char)buf[i++];
++	}
++	struct linux64_cons_req q = { .buf = buf, .len = sizeof(buf), .result = 0 };
++	register unsigned long x0 __asm__("x0") = 993;
++	register unsigned long x1 __asm__("x1") = (unsigned long)&q;
++	register unsigned long x2 __asm__("x2") = 0;
++	__asm__ volatile ("blr %3" : "+r"(x0), "+r"(x1), "+r"(x2) : "r"(linux64_hook)
++	    : "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++	    "x14", "x15", "x16", "x17", "x30", "cc", "memory");
++	n = q.result > 0 ? (int)q.result : 0;
++	i = 0;
++	return n ? (unsigned char)buf[i++] : -1;
++}
++
+ void
+ serial_keyboard_init(void)
+ {
+ 	kern_return_t   result;
+ 	thread_t                thread;
+ 
+-	if (!(serialmode & SERIALMODE_INPUT)) { /* Leave if we do not want a serial console */
++	if (!(serialmode & SERIALMODE_INPUT) && !linux64_hook) { /* Leave if we do not want a serial console */
+ 		return;
+ 	}
+ 
+@@ -82,7 +109,7 @@ serial_keyboard_poll(void)
+ 	uint64_t next;
+ 
+ 	while (1) {
+-		chr = _serial_getc(false); /* Get a character if there is one */
++		chr = linux64_hook ? linux64_cons_getc() : _serial_getc(false); /* Get a character if there is one */
+ 		if (chr < 0) { /* The serial buffer is empty */
+ 			break;
+ 		}
 diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
 index 4224c9d..4a1fe94 100644
 --- a/osfmk/kern/assert.h
