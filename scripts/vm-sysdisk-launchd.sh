@@ -12,6 +12,12 @@ if [ "${MODE:-launchd}" = launchd ]; then
   if [ "${ONLY_OURS:-1}" = 1 ]; then
     sudo mkdir -p /mnt/sys/private/var/xnulinux-apple-daemons
     sudo sh -c 'mv /mnt/sys/System/Library/LaunchDaemons/*.plist /mnt/sys/private/var/xnulinux-apple-daemons/ 2>/dev/null || true'
+    # KEEP: Apple daemons put back (their binaries come in /var/tmp/daemons.tar from the macOS host)
+    for d in ${KEEP:-}; do
+      sudo mv /mnt/sys/private/var/xnulinux-apple-daemons/$d.plist /mnt/sys/System/Library/LaunchDaemons/ 2>/dev/null || echo "no $d.plist"
+    done
+    [ -s /var/tmp/daemons.tar ] && sudo tar xf /var/tmp/daemons.tar -C /mnt/sys --warning=no-unknown-keyword
+    sudo mkdir -p /mnt/sys/private/var/db/diagnostics /mnt/sys/private/var/db/uuidtext /mnt/sys/private/var/log /mnt/sys/private/var/run /mnt/sys/Library/Preferences
   fi
   sudo tee /mnt/sys/System/Library/LaunchDaemons/xnulinux.hello.plist >/dev/null <<'PL'
 <?xml version="1.0" encoding="UTF-8"?>
