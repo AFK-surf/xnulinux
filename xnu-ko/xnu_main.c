@@ -211,7 +211,7 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	logkv("xnu: running on MPIDR Aff1:Aff0", mpidr);
 
 	adt_init(&a, base_va + off_dt, 0x10000);
-	adt_node(&a, 3, 3);				/* / */
+	adt_node(&a, 3, 5);				/* / */
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
@@ -233,6 +233,10 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_u32(&a, "reg", (unsigned)mpidr);
 	adt_prop_u64(&a, "timebase-frequency", fki_counter_frequency());
 	adt_prop_u32(&a, "cluster-type", 'P');	/* the AMP scheduler wants E/M/P, not SMP */
+	adt_node(&a, 1, 0);				/* /defaults: XNU looks these up without checking */
+	adt_prop_str(&a, "name", "defaults");
+	adt_node(&a, 1, 0);				/* /product */
+	adt_prop_str(&a, "name", "product");
 	adt_node(&a, 3, 0);				/* /arm-io: no devices; XNU needs a nonzero SoC base */
 	adt_prop_str(&a, "name", "arm-io");
 	adt_prop_str(&a, "device_type", "linux64-io");
