@@ -1,5 +1,5 @@
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..f0a504d 100644
+index ac1713e..9d38023 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -228,6 +228,13 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
@@ -32,7 +32,7 @@ index ac1713e..f0a504d 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +352,34 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +352,50 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
@@ -64,10 +64,26 @@ index ac1713e..f0a504d 100644
 +	linux64_stage(stage);
 +}
 +
++/* A stage that hands the host one argument (x1). */
++void linux64_stage_arg(unsigned long stage, unsigned long arg);
++void
++linux64_stage_arg(unsigned long stage, unsigned long arg)
++{
++	if (linux64_hook) {
++		register unsigned long x0 __asm__("x0") = stage;
++		register unsigned long x1 __asm__("x1") = arg;
++		__asm__ volatile ("blr %2"
++		    : "+r"(x0), "+r"(x1)
++		    : "r"(linux64_hook)
++		    : "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
++		    "x12", "x13", "x14", "x15", "x16", "x17", "x30", "cc", "memory");
++	}
++}
++
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
-@@ -361,6 +400,7 @@ arm_init(
+@@ -361,6 +416,7 @@ arm_init(
  	port_crumb = 100;
  	arm_slide_rebase_and_sign_image();
  	port_crumb = 101;
@@ -75,7 +91,7 @@ index ac1713e..f0a504d 100644
  
  	arm_static_if_init(args);
  	port_crumb = 102;
-@@ -382,6 +422,7 @@ arm_init(
+@@ -382,6 +438,7 @@ arm_init(
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	boot_progress_init();
@@ -83,7 +99,7 @@ index ac1713e..f0a504d 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -475,6 +516,7 @@ arm_init(
+@@ -475,6 +532,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -91,7 +107,7 @@ index ac1713e..f0a504d 100644
  
  
  	boot_cpu_id = ml_get_boot_cpu_number();
-@@ -511,15 +553,19 @@ arm_init(
+@@ -511,15 +569,19 @@ arm_init(
  
  	kernel_debug_string_early("kernel_startup_bootstrap");
  	kernel_startup_bootstrap();
@@ -111,7 +127,7 @@ index ac1713e..f0a504d 100644
  
  	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
  		xmaxmem = (uint64_t) maxmem * (1024 * 1024);
-@@ -544,7 +590,9 @@ arm_init(
+@@ -544,7 +606,9 @@ arm_init(
  	}
  #endif /* SCHED_HYGIENE_DEBUG */
  
@@ -121,7 +137,7 @@ index ac1713e..f0a504d 100644
  
  #if HAS_BP_RET
  	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
-@@ -581,10 +629,12 @@ arm_init(
+@@ -581,10 +645,12 @@ arm_init(
  		panic("%s: Unable to find 'dram-size' entry in the 'chosen' DT node", __FUNCTION__);
  	}
  
@@ -134,6 +150,14 @@ index ac1713e..f0a504d 100644
  	boot_progress_stage("arm_vm_init enter");
  	port_crumb = 1;
  	arm_vm_init(xmaxmem, args);
+@@ -607,6 +673,7 @@ arm_init(
+ 	port_crumb = 5;
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
++	linux64_stage(300);
+ 
+ 	serialmode = 0;
+ 	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
 diff --git a/osfmk/arm/cpu_data.h b/osfmk/arm/cpu_data.h
 index 743117b..9dc298b 100644
 --- a/osfmk/arm/cpu_data.h
@@ -179,6 +203,63 @@ index 743117b..9dc298b 100644
  	__asm__ volatile (
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index f7f387e..8cd4c20 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2194,14 +2194,31 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ 	arm_vm_physmap_init(args);
+ 	port_crumb = 38;
+-	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
++	{
++		extern uintptr_t linux64_hook;
++		extern void linux64_stage_arg(unsigned long, unsigned long);
++		if (linux64_hook) {
++			/*
++			 * LINUX64 (xnulinux): TTBR1 is Linux's. The host installs XNU's kernel L1 entries
++			 * (the kernel VA range only) into Linux's top-level L1 table; TTBR0 stays Linux's.
++			 */
++			linux64_stage_arg(200, (unsigned long)cpu_tte);
++		} else {
++			set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
++		}
++	}
+ 	port_crumb = 39;
+ 
+ #if XNU_MONITOR
+ 	ml_enable_monitor();
+ #endif
+ 
+-	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
++	{
++		extern uintptr_t linux64_hook;
++		if (!linux64_hook) {
++			set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
++		}
++	}
+ 
+ 	flush_mmu_tlb();
+ 	port_crumb = 40;
+@@ -2301,8 +2318,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+     }
+ #endif
+ #endif
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(210); }
+ 	pmap_bootstrap(dynamic_memory_begin);
+ 	port_crumb = 41;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(220); }
+ 
+ 	disable_preemption();
+ 
+@@ -2431,6 +2450,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	patch_low_glo_static_region(args->topOfKernelData, avail_start - args->topOfKernelData);
+ 	enable_preemption();
+ 	port_crumb = 43;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(230); }
+ }
+ 
+ /*
 diff --git a/osfmk/arm64/asm.h b/osfmk/arm64/asm.h
 index 84deb3f..767b8f8 100644
 --- a/osfmk/arm64/asm.h

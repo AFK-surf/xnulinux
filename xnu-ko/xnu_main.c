@@ -25,6 +25,11 @@ static int ram_mb = 256;
 module_param(ram_mb, int, 0444);
 
 static struct xnu_image img;
+static struct fki_region l2page;
+static unsigned long long *window_slot, *window_l1;
+static unsigned char window_owned[512];
+#define XNU_L1_FIRST 384	/* VM_MIN_KERNEL_ADDRESS 0xffffffe000000000 */
+#define XNU_L1_LAST 495	/* VM_MAX_KERNEL_ADDRESS 0xfffffffbffffffff */
 static void *blob;
 struct xnu_world xnu_W;
 
@@ -91,6 +96,17 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		logs(m);
 		return 0;
 	}
+	if (stage == 200 && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
+		const unsigned long long *tte = (const unsigned long long *)a1;
+		int n = 0, last = -1;
+		for (int i = XNU_L1_FIRST; i <= XNU_L1_LAST; i++) {
+			if (!(tte[i] & 1)) continue;
+			if (window_l1[i] && &window_l1[i] != window_slot) { logkv("xnu: L1 slot in use by Linux, refusing:", i); return 1; }
+			window_l1[i] = tte[i]; window_owned[i] = 1; n++; last = i;
+		}
+		if (last >= 0) fki_window_set(&window_l1[last], tte[last]);	/* barrier + TLB flush */
+		logkv("xnu: XNU L1 entries installed", n);
+	}
 	if (stage == 999) {
 		char m[200]; const char *f = (const char *)a1; unsigned i = 0;
 		while (f && f[i] && i < sizeof(m) - 1) { m[i] = f[i]; i++; }
@@ -106,6 +122,9 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		{ 140, "timer_call_init" }, { 150, "cpu_init" }, { 160, "processor_bootstrap" },
 		{ 170, "boot-arg parsing" }, { 175, "nanoseconds_to_absolutetime" }, { 180, "/chosen dram-base/size" },
 		{ 199, "arm_init reached arm_vm_init" },
+		{ 200, "arm_vm_init: XNU's kernel L1 entries installed in Linux's table" },
+		{ 210, "arm_vm_init: running on XNU's own page tables" }, { 220, "pmap_bootstrap returned" },
+		{ 230, "arm_vm_init returned" }, { 300, "kprintf initialized" },
 	};
 	const char *what = "?";
 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
@@ -221,8 +240,6 @@ static int run_m2a(void)
  * physical addresses, so that the page tables XNU builds can be walked by the hardware.
  */
 #define XNU_WINDOW_BASE 0xfffffff007000000ULL	/* 2 MiB aligned, at or below the image's vmlow */
-static struct fki_region l2page;
-static unsigned long long *window_slot;
 
 static int run_m2b(void)
 {
@@ -252,6 +269,8 @@ static int run_m2b(void)
 	logkv("xnu: L1 slot", idx);
 	if (l1[idx]) { logkv("xnu: L1 slot already used by Linux:", l1[idx]); return -16; }
 	window_slot = &l1[idx];
+	window_l1 = l1;
+	window_owned[idx] = 1;
 	fki_window_set(window_slot, l2page.pa | 3);
 	logs("xnu: bootstrap window mapped");
 
@@ -289,7 +308,11 @@ static int __init xnu_init(void)
 
 static void __exit xnu_exit(void)
 {
-	if (window_slot) fki_window_set(window_slot, 0);
+	if (window_l1) {
+		int last = -1;
+		for (int i = 0; i < 512; i++) if (window_owned[i]) { window_l1[i] = 0; last = i; }
+		if (last >= 0) fki_window_set(&window_l1[last], 0);
+	}
 	if (mode == 3) {
 		if (img.region.va) fki_contig_free(&img.region);
 		if (l2page.va) fki_contig_free(&l2page);
