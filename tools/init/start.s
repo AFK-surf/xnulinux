@@ -1,8 +1,8 @@
 // A minimal static arm64 Mach-O for /sbin/launchd on a test root, BSD syscalls through svc #0x80 only:
 // open("/dev/console", O_WRONLY), write a line, fork; the child writes its own line and exits 7,
-// the parent wait4()s for it, writes a closing line and exits 42.
+// the child then execve()s /sbin/hello (which writes its line and exits 7); the parent wait4()s for it, writes a closing line and exits 42.
 // Darwin reports a failed syscall with the carry flag set and errno in x0. Exit codes on failure:
-// open 64+errno, write 128+errno, short write 3, fork 4, wait4 5, child status not 7 6.
+// open 64+errno, write 128+errno, short write 3, fork 4, wait4 5, child status not 7 6 (8: execve failed, 9: /sbin/hello failed).
 	.text
 	.globl	_start
 	.p2align 2
@@ -49,7 +49,13 @@ Lchild:
 	adr	x1, Lmsg2
 	mov	x2, #(Lmsg2_end - Lmsg2)
 	bl	Lwrite
-	mov	x0, #7
+	adr	x0, Lhello		// execve("/sbin/hello", {"/sbin/hello", NULL}, {NULL}); /sbin/hello exits 7
+	stp	x0, xzr, [sp, #-16]!
+	mov	x1, sp
+	add	x2, sp, #8
+	mov	x16, #59		// SYS_execve
+	svc	#0x80
+	mov	x0, #8			// execve returned: failed
 	b	Lexit
 // write(x19, x1, x2), exits on failure
 Lwrite:
@@ -87,6 +93,8 @@ Lmsg_end:
 Lmsg2:
 	.ascii	"hello from the forked child\n"
 Lmsg2_end:
+Lhello:
+	.asciz	"/sbin/hello"
 Lmsg3:
 	.ascii	"parent: child exited with 7\n"
 Lmsg3_end:
