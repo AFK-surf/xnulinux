@@ -336,6 +336,32 @@ index e5e58b5..6e6596d 100644
  	pthread_functions->pth_proc_hashinit(p);
  }
  
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index d8fd4af..2954d8c 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -1917,6 +1917,21 @@ _shared_region_map_and_slide(
+ 		    proc_getpid(p), p->p_comm, kr));
+ 	}
+ 
++	{
++		/* LINUX64 debug: what the process now sees where data from its own memory (fd -1) went */
++		extern uintptr_t linux64_hook;
++		for (uint32_t f = 0; linux64_hook && kr == KERN_SUCCESS && f < files_count; f++) {
++			if (sr_file_mappings[f].fd == -1 && sr_file_mappings[f].mappings_count > 0) {
++				struct shared_file_mapping_slide_np *m = &sr_file_mappings[f].mappings[0];
++				uint64_t w[4] = {0, 0, 0, 0}, src[2] = {0, 0};
++				int e1 = copyin((user_addr_t)m->sms_address, w, sizeof(w));
++				int e2 = copyin((user_addr_t)m->sms_file_offset, src, sizeof(src));
++				kprintf("linux64: shared region data mapping at 0x%llx size 0x%llx from 0x%llx: sees %d %016llx %016llx %016llx, source %d %016llx %016llx\n",
++				    m->sms_address, m->sms_size, m->sms_file_offset, e1, w[0], w[1], w[2], e2, src[0], src[1]);
++			}
++		}
++	}
++
+ 	/* convert kern_return_t to errno */
+ 	switch (kr) {
+ 	case KERN_SUCCESS:
 diff --git a/iokit/Kernel/IONVRAMCHRPHandler.cpp b/iokit/Kernel/IONVRAMCHRPHandler.cpp
 index 0cc7f6e..c07d35c 100644
 --- a/iokit/Kernel/IONVRAMCHRPHandler.cpp
