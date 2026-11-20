@@ -227,6 +227,10 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		logkv("xnu:   at line", a->line);
 		return assert_fatal;
 	}
+	if (stage == 9100) {		/* a new user thread is about to enter user space (not hosted yet: M3) */
+		logkv("xnu: XNU is about to enter user space; user pc", a1);
+		return 1;
+	}
 	if (stage == 999) {
 		char m[500]; const char *f = (const char *)a1; unsigned i = 0;
 		while (f && f[i] && i < sizeof(m) - 1) { m[i] = f[i]; i++; }
