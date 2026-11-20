@@ -58,6 +58,16 @@ xnu_world_abort:			/* from the upcall: Linux keys and TPIDR are live */
 	ret
 	.size	xnu_world_call, . - xnu_world_call
 
+	.globl	xnu_world_fault_abort
+	.type	xnu_world_fault_abort, %function
+xnu_world_fault_abort:			/* exception return here: XNU keys live, XNU stack */
+	W(x9)
+	add	x0, x9, #240		/* load Linux keys */
+	add	x1, x9, #328		/* save XNU keys */
+	bl	fki_pac_swap
+	b	xnu_world_abort
+	.size	xnu_world_fault_abort, . - xnu_world_fault_abort
+
 	.globl	xnu_world_upcall
 	.type	xnu_world_upcall, %function
 xnu_world_upcall:			/* x0 = stage, called by XNU with blr */
