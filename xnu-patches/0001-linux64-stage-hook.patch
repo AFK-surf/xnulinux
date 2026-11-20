@@ -2216,10 +2216,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..26bd832 100644
+index d8f1b19..145d3f2 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,179 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,194 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2306,6 +2306,21 @@ index d8f1b19..26bd832 100644
 + * where user space would start. Entering EL0 is M3.
 + */
 +void linux64_thread_bootstrap_return(void) __attribute__((noreturn));
++/* LINUX64 debug: boot-arg linux64_trace=1 logs every EL0 exception, system call return and path (execve paths always) */
++static int linux64_trace_level = -1;
++static inline int
++linux64_tracing(void)
++{
++	if (__improbable(linux64_trace_level < 0)) {
++		int v = 0;
++		if (!PE_parse_boot_argn("linux64_trace", &v, sizeof(v))) {
++			v = 0;
++		}
++		linux64_trace_level = v;
++	}
++	return linux64_trace_level;
++}
++
 +static thread_t linux64_svc_thread;	/* LINUX64 debug: the thread whose system call is in flight, and its number */
 +static long long linux64_svc_num;
 +
@@ -2320,7 +2335,7 @@ index d8f1b19..26bd832 100644
 +
 +	(void)ml_set_interrupts_enabled(FALSE);
 +	ast_taken_user();
-+	if (linux64_svc_thread == thread) {	/* LINUX64 debug: what the system call returned (C set: x0 is errno) */
++	if (linux64_svc_thread == thread && linux64_tracing()) {	/* LINUX64 debug: what the system call returned (C set: x0 is errno) */
 +		linux64_svc_thread = NULL;
 +		kprintf("linux64: svc %lld -> x0 0x%llx x1 0x%llx%s\n", linux64_svc_num, get_saved_state_reg(thread->machine.upcb, 0),
 +		    get_saved_state_reg(thread->machine.upcb, 1), (get_saved_state_cpsr(thread->machine.upcb) & PSR64_C) ? " (error)" : "");
@@ -2355,7 +2370,7 @@ index d8f1b19..26bd832 100644
 +	linux64_dbg[12] = f->far;
 +	linux64_dbg[13] = f->pc;
 +	linux64_dbg[15] = 1;
-+	kprintf("linux64: EL0 exception esr 0x%llx far 0x%llx pc 0x%llx x16 %lld ttbr0 0x%llx ttep 0x%llx\n", f->esr, f->far, f->pc, f->x[16],
++	if (linux64_tracing()) kprintf("linux64: EL0 exception esr 0x%llx far 0x%llx pc 0x%llx x16 %lld ttbr0 0x%llx ttep 0x%llx\n", f->esr, f->far, f->pc, f->x[16],
 +	    __builtin_arm_rsr64("TTBR0_EL1"), (uint64_t)thread->map->pmap->ttep);
 +	for (unsigned i = 0; i < 29; i++) {
 +		set_saved_state_reg(ss, i, f->x[i]);
@@ -2379,14 +2394,14 @@ index d8f1b19..26bd832 100644
 +		long long num = (long long)f->x[16];
 +		linux64_svc_thread = thread;
 +		linux64_svc_num = num;
-+		if (num == 202 && f->x[1] > 0 && f->x[1] <= 8) {	/* sysctl: the MIB and this thread's kernel stack */
++		if (linux64_tracing() && num == 202 && f->x[1] > 0 && f->x[1] <= 8) {	/* sysctl: the MIB and this thread's kernel stack */
 +			int mib[8] = {0};
 +			if (copyin((user_addr_t)f->x[0], mib, f->x[1] * sizeof(int)) == 0) {
 +				kprintf("linux64: svc 202 mib %d.%d.%d.%d (len %llu) kstack 0x%llx\n", mib[0], mib[1], mib[2], mib[3], f->x[1],
 +				    (uint64_t)thread->kernel_stack);
 +			}
 +		}
-+		if (num == 5 || num == 463 || num == 33 || num == 338 || num == 340 || num == 59 || num == 466 || num == 469) {
++		if (num == 59 || (linux64_tracing() && (num == 5 || num == 463 || num == 33 || num == 338 || num == 340 || num == 466 || num == 469))) {
 +			char path[128];
 +			size_t len = 0;
 +			uint64_t ua = (num == 463 || num == 466 || num == 469) ? f->x[1] : f->x[0];
