@@ -2014,10 +2014,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..a97c679 100644
+index d8f1b19..be334a5 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,140 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,161 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2075,6 +2075,27 @@ index d8f1b19..a97c679 100644
 +		}
 +	}
 +	return kr;
++}
++
++/*
++ * LINUX64 (xnulinux): a kernel fault vm_fault could not resolve, taken inside a copyin/copyout routine: the pc its
++ * copyio recovery entry returns through (the routine then returns an error; x0 = EFAULT), 0 when pc has none.
++ */
++uint64_t linux64_kernel_fault_recover(uint64_t pc, uint64_t far, uint64_t esr);
++uint64_t
++linux64_kernel_fault_recover(uint64_t pc, uint64_t far, uint64_t esr)
++{
++	struct copyio_recovery_entry *e = find_copyio_recovery_entry(pc);
++	thread_t thread = current_thread();
++
++	if (e == NULL) {
++		return 0;
++	}
++	if (thread != THREAD_NULL) {
++		thread->machine.recover_esr = esr;
++		thread->machine.recover_far = far;
++	}
++	return (uint64_t)copyio_recover_table + (uint64_t)e->cre_recovery;
 +}
 +
 +/*

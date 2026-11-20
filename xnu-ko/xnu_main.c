@@ -144,6 +144,7 @@ static void walk_log(const char *what, u64_t va, const unsigned long long *l1)
  */
 static volatile int in_xnu;
 static unsigned long (*xnu_kfault)(unsigned long far, unsigned long esr);
+static unsigned long (*xnu_kfault_recover)(unsigned long pc, unsigned long far, unsigned long esr);
 static unsigned long kfaults;
 
 #define XNU_VA_LO 0xffffffe000000000ULL
@@ -187,6 +188,15 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 	unsigned long pc = fki_regs_pc(regs);
 	if (pc < XNU_VA_LO || pc >= XNU_VA_HI)
 		return 1;
+	/* inside copyin/copyout: the routine's recovery path returns EFAULT to its caller, as XNU's own abort handler does */
+	if (xnu_kfault_recover) {
+		unsigned long rpc = xnu_kfault_recover(pc, far, esr);
+		if (rpc) {
+			fki_regs_set_reg(regs, 0, 14);	/* EFAULT */
+			fki_regs_set_pc(regs, rpc);
+			return 0;
+		}
+	}
 	in_xnu = 0;
 	logs("xnu: XNU took a fault it cannot handle; ending the run");
 	logkv("xnu:   pc ", pc);
@@ -554,6 +564,7 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	if (xnu_dbg && monitor_cpu >= 0)
 		monitor = fki_thread_start(monitor_fn, 0, monitor_cpu, "xnu-monitor");
 	xnu_kfault = (void *)macho_sym(&img, "_linux64_kernel_fault");
+	xnu_kfault_recover = (void *)macho_sym(&img, "_linux64_kernel_fault_recover");
 	if (xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
 		logs("xnu: kernel faults on XNU addresses go to XNU's vm_fault");
 	{
