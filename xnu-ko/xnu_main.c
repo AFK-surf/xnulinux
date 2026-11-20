@@ -200,6 +200,24 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 
 static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2)
 {
+	if (stage == 996) {		/* XNU console bytes (/dev/console): line-buffered into the host log */
+		static char line[200]; static unsigned n;
+		const char *b = (const char *)a1; unsigned long i;
+		for (i = 0; b && i < a2; i++) {
+			char c = b[i];
+			if (c == '\r') continue;
+			if (c != '\n') line[n++] = c;
+			if (c == '\n' || n == sizeof(line) - 1) {
+				char m[220]; unsigned j = 0, k;
+				const char *p = "darwin console: ";
+				while (*p) m[j++] = *p++;
+				for (k = 0; k < n; k++) m[j++] = line[k];
+				m[j] = 0; n = 0;
+				logs(m);
+			}
+		}
+		return 0;
+	}
 	if (stage == 998) {		/* XNU kprintf */
 		char m[260]; const char *f = (const char *)a1; unsigned i = 0, j = 0;
 		m[j++] = 'x'; m[j++] = 'n'; m[j++] = 'u'; m[j++] = ']'; m[j++] = ' ';
