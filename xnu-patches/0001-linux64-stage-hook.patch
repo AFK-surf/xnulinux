@@ -204,7 +204,7 @@ index 743117b..9dc298b 100644
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index f7f387e..fc6b09e 100644
+index f7f387e..c239600 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
 @@ -1089,7 +1089,9 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
@@ -425,7 +425,23 @@ index f7f387e..fc6b09e 100644
  	max_mem = mem_size;
  	vm_kernel_slid_base = segLOWESTTEXT;
  	// vm_kernel_slide is set by arm_init()->arm_slide_rebase_and_sign_image()
-@@ -2274,6 +2330,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2267,13 +2323,20 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 		vm_kernel_etext = segTEXTEXECB + segSizeTEXTEXEC;
+ 		vm_kernel_slid_top = vm_slinkedit;
+ 	} else {
+-		assert(segDATACONSTB == segTEXTB + segSizeTEXT);
+-		assert(segTEXTEXECB == segDATACONSTB + segSizeDATACONST);
+-		vm_kernel_etext = segTEXTB + segSizeTEXT + segSizeDATACONST + segSizeTEXTEXEC;
++		extern uintptr_t linux64_hook;
++		if (linux64_hook) {
++			/* LINUX64: this kernel is linked with the KC segment layout (k27): segments are not adjacent. */
++			vm_kernel_etext = segTEXTEXECB + segSizeTEXTEXEC;
++		} else {
++			assert(segDATACONSTB == segTEXTB + segSizeTEXT);
++			assert(segTEXTEXECB == segDATACONSTB + segSizeDATACONST);
++			vm_kernel_etext = segTEXTB + segSizeTEXT + segSizeDATACONST + segSizeTEXTEXEC;
++		}
+ 		vm_kernel_slid_top = vm_prelink_einfo;
  	}
  
  	dynamic_memory_begin = ROUND_TWIG(dynamic_memory_begin);
@@ -433,7 +449,7 @@ index f7f387e..fc6b09e 100644
  #if (defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR)) && defined(CONFIG_XNUPOST)
  	// reserve a 32MB region without permission overrides to use later for a CTRR unit test
  	{
-@@ -2301,8 +2358,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2301,8 +2364,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
      }
  #endif
  #endif
@@ -444,7 +460,7 @@ index f7f387e..fc6b09e 100644
  
  	disable_preemption();
  
-@@ -2431,6 +2490,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2431,6 +2496,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	patch_low_glo_static_region(args->topOfKernelData, avail_start - args->topOfKernelData);
  	enable_preemption();
  	port_crumb = 43;
