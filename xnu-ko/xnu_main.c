@@ -337,9 +337,12 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_u32(&a, "lp-sip1", 1);			/* CSR_ALLOW_UNAUTHENTICATED_ROOT */
 	adt_node(&a, 1, 1);				/* /cpus */
 	adt_prop_str(&a, "name", "cpus");
-	adt_node(&a, 6, 0);				/* /cpus/cpu0 */
+	/*
+	 * /cpus/cpu0, without device_type "cpu": that would match Apple's CPU driver (AppleARMCPU, IONameMatch "cpu"),
+	 * which drives the AIC interrupts and IPIs of real hardware. While hosted, the CPU is Linux's.
+	 */
+	adt_node(&a, 5, 0);
 	adt_prop_str(&a, "name", "cpu0");
-	adt_prop_str(&a, "device_type", "cpu");
 	adt_prop_str(&a, "state", "running");
 	adt_prop_u32(&a, "reg", (unsigned)mpidr);
 	adt_prop_u64(&a, "timebase-frequency", fki_counter_frequency());
