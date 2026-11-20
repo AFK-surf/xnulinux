@@ -842,7 +842,7 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..5f33c6d 100644
+index d10d7a1..6711f39 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -100,6 +100,7 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
@@ -853,7 +853,20 @@ index d10d7a1..5f33c6d 100644
  #if defined(APPLETYPHOON)
  // <rdar://problem/15827409>
  extern void typhoon_prepare_for_wfi(void);
-@@ -614,6 +615,27 @@ cpu_idle(void)
+@@ -430,6 +431,12 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
+ 	 * another core/cluster in a powergated state.
+ 	 * Hence, optionally unmask IRQs+FIQs across WFE.
+ 	 */
++	{
++		extern uintptr_t linux64_hook;
++		if (linux64_hook) {
++			unmask = false;	/* LINUX64: never unmask hardware IRQs while hosted */
++		}
++	}
+ 	if (unmask) {
+ 		/* Latch SW IRQ+FIQ counter prior to unmasking
+ 		 * interrupts.
+@@ -614,6 +621,27 @@ cpu_idle(void)
  	cpc_cpu_transition(CPC_CPU_IDLE, cpu_data_ptr);
  #endif /* CONFIG_CPU_COUNTERS */
  
@@ -881,7 +894,7 @@ index d10d7a1..5f33c6d 100644
  	if (wfi) {
  #if !defined(APPLE_ARM64_ARCH_FAMILY)
  		platform_cache_idle_enter();
-@@ -735,20 +757,27 @@ cpu_idle_exit(boolean_t from_reset)
+@@ -735,20 +763,27 @@ cpu_idle_exit(boolean_t from_reset)
  void
  cpu_init(void)
  {
@@ -909,7 +922,7 @@ index d10d7a1..5f33c6d 100644
  		} else {
  			/*
  			 * We initialize non-boot CPUs here; the boot CPU is
-@@ -758,9 +787,11 @@ cpu_init(void)
+@@ -758,9 +793,11 @@ cpu_init(void)
  		}
  
  		do_cacheid();
@@ -921,7 +934,7 @@ index d10d7a1..5f33c6d 100644
  
  		cpu_info_p = cpuid_info();
  
-@@ -780,6 +811,7 @@ cpu_init(void)
+@@ -780,6 +817,7 @@ cpu_init(void)
  		}
  
  		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
@@ -1334,10 +1347,26 @@ index 13d2819..3ba4ba7 100644
  
  	mrs		x1, MPIDR_EL1
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index f456377..4568231 100644
+index f456377..ef5a7f5 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -441,6 +441,14 @@ ml_get_interrupts_enabled(void)
+@@ -400,6 +400,15 @@ machine_idle(void)
+ 		 */
+ 		Idle_context();
+ 	}
++	{
++		/* LINUX64 (xnulinux): hosted, hardware IRQs stay masked; only the virtual flag changes. */
++		extern uintptr_t linux64_hook;
++		extern unsigned int linux64_vint;
++		if (linux64_hook) {
++			linux64_vint = 1;
++			return;
++		}
++	}
+ 	__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
+ }
+ 
+@@ -441,6 +450,14 @@ ml_get_interrupts_enabled(void)
  {
  	uint64_t        value;
  
@@ -1352,7 +1381,7 @@ index f456377..4568231 100644
  	MRS(value, "DAIF");
  	if ((value & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE) {
  		return FALSE;
-@@ -585,8 +593,12 @@ machine_lockdown(void)
+@@ -585,8 +602,12 @@ machine_lockdown(void)
  #else
  #endif
  
@@ -1365,7 +1394,7 @@ index f456377..4568231 100644
  
  #if CONFIG_KERNEL_INTEGRITY
  #if KERNEL_INTEGRITY_WT
-@@ -2529,6 +2541,13 @@ ml_set_decrementer(uint32_t dec_value)
+@@ -2529,6 +2550,13 @@ ml_set_decrementer(uint32_t dec_value)
  		}
  	}
  
