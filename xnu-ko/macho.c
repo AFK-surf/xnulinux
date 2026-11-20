@@ -12,6 +12,7 @@ int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsi
 {
 	const struct mh64 *mh = file;
 	int err;
+	(void)err;
 
 	img->file = file; img->file_size = size;
 	if (size < sizeof(*mh) || mh->magic != MH_MAGIC_64)
@@ -40,16 +41,24 @@ int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsi
 	}
 	if (img->vmhigh <= img->vmlow)
 		return -ENOEXEC;
+	if (extra == ~0UL)		/* parse only: the caller places the image (macho_copy) */
+		return 0;
 	err = fki_region_alloc(img->vmhigh - img->vmlow + extra, &img->region);
 	if (err)
 		return err;
 	img->slide = (u64_t)img->region.va - img->vmlow;
+	return macho_copy(img, img->region.va);
+}
+
+/* Copy the segments to dst, which is where vmlow will live. */
+int macho_copy(struct xnu_image *img, void *dst)
+{
 	FOR_EACH_LC(img, l) {
 		if (l->cmd != LC_SEGMENT_64) continue;
 		const struct seg64 *s = (const void *)l;
 		if (!s->vmsize || !s->filesize || !x_strncmp(s->segname, "__PAGEZERO", 16)) continue;
-		if (s->fileoff + s->filesize > size) return -ENOEXEC;
-		x_memcpy((char *)img->region.va + (s->vmaddr - img->vmlow), img->file + s->fileoff, s->filesize);
+		if (s->fileoff + s->filesize > img->file_size) return -ENOEXEC;
+		x_memcpy((char *)dst + (s->vmaddr - img->vmlow), img->file + s->fileoff, s->filesize);
 	}
 	return 0;
 }

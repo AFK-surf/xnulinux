@@ -52,6 +52,18 @@ void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save);
 fki_u64 fki_counter_frequency(void);
 fki_u64 fki_counter(void);
 void fki_random(void *buf, unsigned long len);
+/*
+ * Physically contiguous memory with real physical addresses (for a foreign kernel whose own page tables
+ * the hardware walks). va is a kernel linear-map address (RW, not executable). size rounds up to a power of two.
+ */
+int fki_contig_alloc(unsigned long size, struct fki_region *r);
+void fki_contig_free(struct fki_region *r);
+/*
+ * The top foreign window: the L1 table that Linux's TTBR1 L0 entry for va points to. A foreign kernel may
+ * own L1 entries Linux leaves empty in that table; fki_window_set installs one (then a full TLB flush).
+ */
+int fki_window_l1(unsigned long va, unsigned long long **l1_va, fki_u64 *l1_pa);
+void fki_window_set(unsigned long long *slot, fki_u64 desc);
 /* Keep the calling task on one CPU (the hosted kernel sees that CPU's MPIDR). */
 int fki_bind_cpu(int cpu);
 #ifdef __cplusplus
