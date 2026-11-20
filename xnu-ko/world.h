@@ -1,0 +1,21 @@
+/* World switch between Linux and the hosted XNU (see world.S for the layout). */
+#pragma once
+#include "../fki-ko/fki.h"
+struct xnu_world {
+	unsigned long long linux_regs[14];	/* 0: x19..x28, x29, x30, sp, irq cookie */
+	unsigned long long xnu_regs[13];	/* 112: x19..x28, x29, x30, sp */
+	unsigned long long linux_tpidr;		/* 216 */
+	unsigned long long xnu_tpidr;		/* 224 */
+	unsigned long long xnu_stack_top;	/* 232 */
+	struct fki_pac_keys linux_keys;		/* 240 */
+	struct fki_pac_keys xnu_keys;		/* 328 */
+};
+_Static_assert(sizeof(struct fki_pac_keys) == 88, "fki_pac_keys layout");
+_Static_assert(__builtin_offsetof(struct xnu_world, xnu_keys) == 328, "xnu_world layout");
+extern struct xnu_world xnu_W;
+/* Run fn(arg) in the XNU world. 0: fn returned; 1: the hook ended the run. */
+long xnu_world_call(unsigned long fn, unsigned long arg);
+/* The address XNU calls (linux64_hook); it calls xnu_hook(stage) in the Linux world. */
+void xnu_world_upcall(void);
+/* Linux-world handler: return 0 to resume XNU, nonzero to end the run. */
+long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2);
