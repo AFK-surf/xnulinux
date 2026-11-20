@@ -23,6 +23,7 @@ xnu_world_call:
 	bl	fki_enter		/* no preemption, no IRQs */
 	W(x9)
 	str	x0, [x9, #104]
+	msr	daifset, #0xf		/* XNU's kernel runs with debug exceptions masked (PSTATE.D) */
 	mrs	x10, tpidr_el0		/* XNU writes the user TLS registers of the thread it believes current */
 	str	x10, [x9, #216]
 	mrs	x10, tpidrro_el0
