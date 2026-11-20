@@ -204,14 +204,71 @@ index 743117b..9dc298b 100644
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index f7f387e..8cd4c20 100644
+index f7f387e..38d37cd 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
-@@ -2194,14 +2194,31 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1883,6 +1883,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ 	// Slide the physical aperture to a random page-aligned location within the slide range
+ 	port_crumb = 50;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(201); }
+ 	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
+ 	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
+ 	port_crumb = 51;
+@@ -1937,6 +1938,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	boot_tte = (tt_entry_t *)&bootstrap_pagetables;
+ 	boot_ttep = kvtophys((vm_offset_t)boot_tte);
+ 	port_crumb = 52;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(202); }
+ 
+ #if DEVELOPMENT || DEBUG
+ 	/* Sanity check - assert that BOOTSTRAP_TABLE_SIZE is sufficiently-large to
+@@ -1972,6 +1974,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	invalid_tte = (tt_entry_t *)alloc_ptpage(TRUE);
+ 	invalid_ttep = kvtophys((vm_offset_t)invalid_tte);
+ 	port_crumb = 53;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(203); }
+ 	bzero(invalid_tte, ARM_PGBYTES);
+ 
+ 	/*
+@@ -1998,6 +2001,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	 */
+ 	init_ptpages(cpu_tte, gVirtBase, dynamic_memory_begin, TRUE, ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
+ 	port_crumb = 32;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(204); }
+ 
+ #if defined(ARM_LARGE_MEMORY)
+ 	/*
+@@ -2117,6 +2121,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ 	vm_set_page_size();
+ 	port_crumb = 35;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(205); }
+ 
+ 	vm_kernel_base = segTEXTB;
+ 	vm_kernel_top = (vm_offset_t) &last_kernel_symbol;
+@@ -2152,6 +2157,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ 	arm_vm_prot_init(args);
+ 	port_crumb = 36;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(206); }
+ 
+ 	/*
+ 	 * Initialize the page tables for the low globals:
+@@ -2183,6 +2189,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	 */
+ 	init_ptpages(cpu_tte, dynamic_memory_begin, VM_MAX_KERNEL_ADDRESS, TRUE, ARM_DYNAMIC_TABLE_XN | ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
+ 	port_crumb = 37;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(207); }
+ #endif
+ 
+ #if KASAN
+@@ -2194,14 +2201,32 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	arm_vm_physmap_init(args);
  	port_crumb = 38;
 -	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(208); }
 +	{
 +		extern uintptr_t linux64_hook;
 +		extern void linux64_stage_arg(unsigned long, unsigned long);
@@ -220,7 +277,7 @@ index f7f387e..8cd4c20 100644
 +			 * LINUX64 (xnulinux): TTBR1 is Linux's. The host installs XNU's kernel L1 entries
 +			 * (the kernel VA range only) into Linux's top-level L1 table; TTBR0 stays Linux's.
 +			 */
-+			linux64_stage_arg(200, (unsigned long)cpu_tte);
++			linux64_stage_arg(210, (unsigned long)cpu_tte);
 +		} else {
 +			set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
 +		}
@@ -241,18 +298,18 @@ index f7f387e..8cd4c20 100644
  
  	flush_mmu_tlb();
  	port_crumb = 40;
-@@ -2301,8 +2318,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2301,8 +2326,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
      }
  #endif
  #endif
-+	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(210); }
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(215); }
  	pmap_bootstrap(dynamic_memory_begin);
  	port_crumb = 41;
 +	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(220); }
  
  	disable_preemption();
  
-@@ -2431,6 +2450,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2431,6 +2458,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	patch_low_glo_static_region(args->topOfKernelData, avail_start - args->topOfKernelData);
  	enable_preemption();
  	port_crumb = 43;
