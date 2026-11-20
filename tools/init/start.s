@@ -7,6 +7,8 @@
 	.globl	_start
 	.p2align 2
 _start:
+	mov	x9, sp			// the kernel hands over sp at the Mach-O stack's argc slot (8-aligned); EL0 checks SP alignment
+	and	sp, x9, #~15
 	adr	x0, Lpath
 	mov	x1, #1			// O_WRONLY
 	mov	x2, #0
