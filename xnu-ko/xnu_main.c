@@ -154,36 +154,66 @@ static unsigned long kfaults;
 
 #define XNU_VA_LO 0xffffffe000000000ULL
 #define XNU_VA_HI 0xfffffffc00000000ULL
+/*
+ * A kernel fault XNU's vm_fault should resolve is not resolved here, inside Linux's exception handler (a kprobe: no
+ * sleeping, no rescheduling, and a nested fault in it is a missed kprobe and an oops), because vm_fault may page in
+ * from disk (a file I/O upcall that lets Linux schedule) or block the thread. The exception instead returns into
+ * xnu_fault_tramp (world.S) with every register as it was; the trampoline calls xnu_fault_deferred in XNU's own
+ * context, then returns (eret) to the faulting instruction, to the copyio recovery path, or to the abort.
+ */
+static struct { unsigned long far, esr, pc, pstate; } xnu_deferred;
+extern void xnu_fault_tramp(void);
+extern void xnu_world_fault_abort(void);
+
+unsigned long xnu_fault_deferred(unsigned long *frame);
+unsigned long xnu_fault_deferred(unsigned long *frame)
+{
+	unsigned long far = xnu_deferred.far, esr = xnu_deferred.esr, pc = xnu_deferred.pc;
+	static unsigned long last_far, repeats;
+
+	frame[31] = xnu_deferred.pstate;	/* the SPSR the trampoline returns with */
+	repeats = (far == last_far) ? repeats + 1 : 0;
+	last_far = far;
+	/*
+	 * The same address faulting again is normal (libmalloc's MADV_FREE_REUSABLE clears a page's referenced and
+	 * modified state, so each reuse takes one fault). Only report it, rarely, when it looks endless.
+	 */
+	if (xnu_kfault(far, esr) == 0) {
+		if (repeats == 100000)
+			logkv("xnu: one address took 100000 kernel faults in a row (each resolved), far", far);
+		return pc;
+	}
+	/* inside copyin/copyout: the routine's recovery path returns EFAULT to its caller, as XNU's own abort handler does */
+	if (xnu_kfault_recover) {
+		unsigned long rpc = xnu_kfault_recover(pc, far, esr);
+		if (rpc) {
+			frame[0] = 14;	/* EFAULT */
+			return rpc;
+		}
+	}
+	in_xnu = 0;
+	logs("xnu: XNU took a fault vm_fault cannot resolve; ending the run");
+	logkv("xnu:   pc ", pc);
+	logkv("xnu:   lr ", frame[30]);
+	logkv("xnu:   far", far);
+	logkv("xnu:   esr", esr);
+	return (unsigned long)xnu_world_fault_abort;
+}
+
 static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 {
 	if (!in_xnu)
 		return 1;
-	if (far && ((far >= XNU_VA_LO && far < XNU_VA_HI) || far < 0x0001000000000000ULL) && xnu_kfault) {
-		static unsigned long last_far, repeats;
+	unsigned long fpc = fki_regs_pc(regs);
+	if (far && ((far >= XNU_VA_LO && far < XNU_VA_HI) || far < 0x0001000000000000ULL) && xnu_kfault &&
+	    fpc >= XNU_VA_LO && fpc < XNU_VA_HI) {
 		kfaults++;
-		repeats = (far == last_far) ? repeats + 1 : 0;
-		last_far = far;
-		/* the same address faulting over and over: vm_fault says yes, the hardware still says no */
-		if (repeats < 64 && xnu_kfault(far, esr) == 0)
-			return 0;
-		if (repeats >= 64) {
-			unsigned long long ttbr0, tcr;
-			__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-			__asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
-			logs("xnu: the same address keeps faulting after vm_fault resolved it");
-			logkv("xnu:   TTBR0", ttbr0);
-			logkv("xnu:   TCR  ", tcr);
-			/* walk it as the hardware does with this TCR (4K granule, T0SZ from TCR) */
-			unsigned t0sz = tcr & 0x3f, level = t0sz > 24 ? 1 : 0;
-			u64_t table = ttbr0 & 0x0000fffffffff000ULL;
-			for (; level <= 3; level++) {
-				unsigned shift = 39 - 9 * level;
-				u64_t d = fki_phys_peek(table + ((far >> shift) & 511) * 8);
-				logkv(level == 0 ? "xnu:   L0" : level == 1 ? "xnu:   L1" : level == 2 ? "xnu:   L2" : "xnu:   L3", d);
-				if ((d & 3) != 3 || level == 3) break;
-				table = d & 0x0000fffffffff000ULL;
-			}
-		}
+		xnu_deferred.far = far;
+		xnu_deferred.esr = esr;
+		xnu_deferred.pc = fpc;
+		xnu_deferred.pstate = fki_regs_pstate(regs);
+		fki_regs_set_pc(regs, (unsigned long)xnu_fault_tramp);
+		return 0;
 	}
 	/*
 	 * An XNU fault nothing resolves (a bug, or a NULL dereference): report it and end the run instead of letting Linux
@@ -316,6 +346,10 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		if (diag_va[4]) { volatile unsigned int *pc = (void *)diag_va[4]; unsigned v = *pc; *pc = v; logkv("xnu: probe port_crumb (rw)", v); }
 		if (diag_va[5]) { unsigned long l = ((unsigned long (*)(const char *))diag_va[5])("xnulinux"); logkv("xnu: probe exec strlen through XNU tables", l); }
 		logs("xnu: probes done");
+	}
+	if (stage == 811) {		/* XNU busy: a host IRQ preempted its user code; let Linux handle it */
+		fki_yield();
+		return 0;
 	}
 	if (stage == 810) {		/* XNU idle: let Linux run until XNU's next timer deadline */
 		static unsigned long idles;
@@ -656,15 +690,25 @@ static int run_m2b(void)
 	if (err) { logkv("xnu: contiguous allocation failed, err", (u64_t)err); return err; }
 	logkv("xnu: contiguous DRAM at phys", img.region.pa);
 	logkv("xnu: contiguous DRAM size", img.region.size);
-	if ((img.region.pa & 0x1fffff) || img.region.size > (1ULL << 30)) { logs("xnu: region not 2 MiB aligned or above 1 GiB"); return -22; }
+	if (img.region.pa & 0x1fffff) { logs("xnu: region not 2 MiB aligned"); return -22; }
 
 	err = fki_contig_alloc(4096, &l2page);
 	if (err) return err;
 	unsigned long long *l2 = l2page.va;
 	unsigned first = (XNU_WINDOW_BASE >> 21) & 511;
-	if (first + (img.region.size >> 21) > 512) { logs("xnu: image and DRAM cross a 1 GiB L1 slot (one bootstrap L2 table only)"); return -22; }
+	/*
+	 * One bootstrap L2 table: map what fits in the window's 1 GiB L1 slot. XNU only touches the image, the
+	 * boot data and its first bootstrap allocations before it hands us its own kernel L1 entries (stage 210),
+	 * which map all of its DRAM, so DRAM beyond the slot needs no bootstrap mapping.
+	 */
+	u64_t boot_map = img.region.size;
+	if (boot_map > ((u64_t)(512 - first) << 21)) boot_map = (u64_t)(512 - first) << 21;
+	if (boot_map < image_off + image_size + 0x60000 + ((rd_size + 0x3fff) & ~0x3fffULL) + (64ULL << 20)) {
+		logs("xnu: image and boot data do not fit in the bootstrap window"); return -22;
+	}
 	logkv("xnu: bootstrap window base", XNU_WINDOW_BASE);
-	for (u64_t o = 0; o < img.region.size; o += 0x200000) {
+	logkv("xnu: bootstrap window bytes", boot_map);
+	for (u64_t o = 0; o < boot_map; o += 0x200000) {
 		/* 2 MiB block: normal WB (AttrIdx 0 in Linux's MAIR), inner shareable, AF, EL1 RWX, UXN */
 		l2[first + (o >> 21)] = (img.region.pa + o) | (1ULL << 54) | (1ULL << 10) | (3ULL << 8) | 1;
 	}
