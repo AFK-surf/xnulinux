@@ -292,7 +292,7 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
-	adt_node(&a, 9, 3);				/* /chosen */
+	adt_node(&a, 11, 3);				/* /chosen */
 	adt_prop_str(&a, "name", "chosen");
 	adt_prop_u64(&a, "dram-base", phys);
 	adt_prop_u64(&a, "dram-size", size);
@@ -308,6 +308,8 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 		/* NVRAM as iBoot hands it over: the bank size and the image (blank: IODTNVRAM formats it as a CHRP store) */
 		static unsigned char nvram[0x10000];
 		adt_prop_u32(&a, "nvram-bank-size", sizeof(nvram));
+		adt_prop_u32(&a, "nvram-bank-count", 1);
+		adt_prop_u32(&a, "nvram-current-bank", 0);
 		adt_prop(&a, "nvram-proxy-data", nvram, sizeof(nvram));
 	}
 	adt_node(&a, 1, 0);				/* /chosen/memory-map: no trust caches, no AuxKC */
