@@ -1,0 +1,125 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index ac1713e..ade9738 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -228,6 +228,9 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
+ extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
+ extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
+ 
++/* LINUX64 (xnulinux): set by xnu.ko; see linux64_stage(). */
++uintptr_t linux64_hook;
++
+ static void
+ arm_slide_rebase_and_sign_image(void)
+ {
+@@ -285,10 +288,15 @@ arm_slide_rebase_and_sign_image(void)
+ 		 * using hardcoded kernel link address
+ 		 */
+ 		slide = (uintptr_t)k_mh - VM_KERNEL_LINK_ADDRESS;
++		if (linux64_hook) {
++			/* LINUX64: xnu.ko loaded, slid and signed the image already. */
++			seg = (kernel_segment_command_t *)((uintptr_t)k_mh + sizeof(*k_mh));
++			slide = (uintptr_t)k_mh - seg->vmaddr;
++		}
+ 
+ 		/* rebase and sign jops */
+ 		static_kernelcache = &__thread_starts_sect_end[0] != &__thread_starts_sect_start[0];
+-		if (static_kernelcache) {
++		if (static_kernelcache && !linux64_hook) {
+ 			rebase_threaded_starts( &__thread_starts_sect_start[0],
+ 			    &__thread_starts_sect_end[0],
+ 			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
+@@ -341,6 +349,27 @@ arm_auxkc_init(void *mh, void *base)
+ #endif /* defined(HAS_APPLE_PAC) */
+ }
+ 
++/*
++ * LINUX64 (xnulinux): when XNU is hosted inside Linux by xnu.ko, xnu.ko sets
++ * linux64_hook before calling arm_init. Each stage calls into the host, which
++ * may resume XNU or end the run. The call is a plain blr: the hook is host
++ * code, not an XNU function pointer.
++ */
++extern uintptr_t linux64_hook;
++
++static inline void
++linux64_stage(unsigned long stage)
++{
++	if (linux64_hook) {
++		register unsigned long x0 __asm__("x0") = stage;
++		__asm__ volatile ("blr %1"
++		    : "+r"(x0)
++		    : "r"(linux64_hook)
++		    : "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
++		    "x12", "x13", "x14", "x15", "x16", "x17", "x30", "cc", "memory");
++	}
++}
++
+ /*
+  *		Routine:		arm_init
+  *		Function:		Runs on the boot CPU, once, on entry from iBoot.
+@@ -361,6 +390,7 @@ arm_init(
+ 	port_crumb = 100;
+ 	arm_slide_rebase_and_sign_image();
+ 	port_crumb = 101;
++	linux64_stage(101);
+ 
+ 	arm_static_if_init(args);
+ 	port_crumb = 102;
+@@ -382,6 +412,7 @@ arm_init(
+ 
+ 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+ 	boot_progress_init();
++	linux64_stage(110);
+ 
+ #if __arm64__
+ 	configure_timer_apple_regs();
+@@ -475,6 +506,7 @@ arm_init(
+ #endif
+ 
+ 	ml_parse_cpu_topology();
++	linux64_stage(120);
+ 
+ 
+ 	boot_cpu_id = ml_get_boot_cpu_number();
+@@ -511,6 +543,7 @@ arm_init(
+ 
+ 	kernel_debug_string_early("kernel_startup_bootstrap");
+ 	kernel_startup_bootstrap();
++	linux64_stage(130);
+ 
+ 	/*
+ 	 * Initialize the timer callout world
+@@ -585,6 +618,7 @@ arm_init(
+ 	gDramSize = *dram_size;
+ 	pmap_first_pnum = (ppnum_t)atop(gDramBase);
+ 
++	linux64_stage(199);
+ 	boot_progress_stage("arm_vm_init enter");
+ 	port_crumb = 1;
+ 	arm_vm_init(xmaxmem, args);
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 0eae1f6..9a4e240 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1253,6 +1253,21 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ {
+ #pragma clang diagnostic pop
+ 
++#if defined(__arm64__)
++	{
++		/* LINUX64 (xnulinux): report the panic to the host (see arm_init.c). */
++		extern uintptr_t linux64_hook;
++		if (linux64_hook) {
++			register unsigned long x0 __asm__("x0") = 999;
++			register unsigned long x1 __asm__("x1") = (unsigned long)panic_format_str;
++			register unsigned long x2 __asm__("x2") = panic_caller;
++			__asm__ volatile ("blr %3" : "+r"(x0), "+r"(x1), "+r"(x2) : "r"(linux64_hook)
++			    : "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++			    "x14", "x15", "x16", "x17", "x30", "cc", "memory");
++		}
++	}
++#endif
++
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif

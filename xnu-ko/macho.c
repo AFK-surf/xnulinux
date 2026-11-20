@@ -8,7 +8,7 @@
 	for (const struct lc *l = (const void *)((img)->file + sizeof(struct mh64)), *_e = (const void *)((img)->file + sizeof(struct mh64) + ((const struct mh64 *)(img)->file)->sizeofcmds); \
 	     l < _e; l = (const void *)((const char *)l + l->cmdsize))
 
-int macho_load(struct xnu_image *img, const void *file, unsigned long size)
+int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsigned long extra)
 {
 	const struct mh64 *mh = file;
 	int err;
@@ -40,7 +40,7 @@ int macho_load(struct xnu_image *img, const void *file, unsigned long size)
 	}
 	if (img->vmhigh <= img->vmlow)
 		return -ENOEXEC;
-	err = fki_region_alloc(img->vmhigh - img->vmlow, &img->region);
+	err = fki_region_alloc(img->vmhigh - img->vmlow + extra, &img->region);
 	if (err)
 		return err;
 	img->slide = (u64_t)img->region.va - img->vmlow;
