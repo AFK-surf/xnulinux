@@ -27,6 +27,7 @@ struct xnu_image {
 };
 
 int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsigned long extra);
+int macho_copy(struct xnu_image *img, void *dst);
 int macho_rebase(struct xnu_image *img);
 int macho_slide_header(struct xnu_image *img, u64_t *mh_unslid);
 u64_t macho_sym(struct xnu_image *img, const char *name);	/* runtime address or 0 */

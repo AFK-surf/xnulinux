@@ -21,6 +21,8 @@
 #include <linux/vmalloc.h>
 #include <asm/arch_timer.h>
 #include <asm/sysreg.h>
+#include <asm/tlbflush.h>
+#include <asm/barrier.h>
 #include <linux/kprobes.h>
 
 int fki_version(void)
@@ -41,6 +43,10 @@ EXPORT_SYMBOL(fki_log);
  * patch calls it directly; here it is found once through kallsyms (via a kprobe).
  */
 typedef int (*set_memory_fn)(unsigned long addr, int numpages);
+typedef struct page *(*alloc_contig_fn)(unsigned long nr_pages, gfp_t gfp, int nid, nodemask_t *nodemask);
+typedef void (*free_contig_fn)(unsigned long pfn, unsigned long nr_pages);
+static alloc_contig_fn p_alloc_contig;
+static free_contig_fn p_free_contig;
 static set_memory_fn p_set_memory_x, p_set_memory_nx;
 
 static int fki_resolve(void)
@@ -57,6 +63,10 @@ static int fki_resolve(void)
 		unregister_kprobe(&kp);
 	}
 	p_set_memory_x = (set_memory_fn)lookup("set_memory_x");
+	p_alloc_contig = (alloc_contig_fn)lookup("alloc_contig_pages_noprof");
+	if (!p_alloc_contig)
+		p_alloc_contig = (alloc_contig_fn)lookup("alloc_contig_pages");
+	p_free_contig = (free_contig_fn)lookup("free_contig_range");
 	p_set_memory_nx = (set_memory_fn)lookup("set_memory_nx");
 	return p_set_memory_x && p_set_memory_nx ? 0 : -ENOENT;
 }
@@ -190,6 +200,63 @@ int fki_bind_cpu(int cpu)
 	return set_cpus_allowed_ptr(current, cpumask_of(cpu));
 }
 EXPORT_SYMBOL(fki_bind_cpu);
+
+/* ---- contiguous memory and the top foreign window ---- */
+
+int fki_contig_alloc(unsigned long size, struct fki_region *r)
+{
+	unsigned long n = 1;
+	struct page *pg;
+	int err = fki_resolve();
+
+	if (err)
+		return err;
+	if (!p_alloc_contig)
+		return -ENOENT;
+	while ((n << PAGE_SHIFT) < size)
+		n <<= 1;
+	pg = p_alloc_contig(n, GFP_KERNEL | __GFP_NOWARN, numa_node_id(), NULL);
+	if (!pg)
+		return -ENOMEM;
+	r->va = page_address(pg);
+	memset(r->va, 0, n << PAGE_SHIFT);
+	r->pa = page_to_phys(pg);
+	r->size = n << PAGE_SHIFT;
+	r->handle = pg;
+	return 0;
+}
+EXPORT_SYMBOL(fki_contig_alloc);
+
+void fki_contig_free(struct fki_region *r)
+{
+	if (p_free_contig)
+		p_free_contig(page_to_pfn((struct page *)r->handle), r->size >> PAGE_SHIFT);
+}
+EXPORT_SYMBOL(fki_contig_free);
+
+int fki_window_l1(unsigned long va, unsigned long long **l1_va, fki_u64 *l1_pa)
+{
+	u64 ttbr1 = read_sysreg(ttbr1_el1) & GENMASK_ULL(47, 1);
+	u64 *l0 = phys_to_virt(ttbr1 & ~0xfffULL);
+	u64 e = READ_ONCE(l0[(va >> 39) & 511]);
+
+	if ((e & 3) != 3)
+		return -ENOENT;
+	*l1_pa = e & GENMASK_ULL(47, 12);
+	*l1_va = phys_to_virt(*l1_pa);
+	return 0;
+}
+EXPORT_SYMBOL(fki_window_l1);
+
+void fki_window_set(unsigned long long *slot, fki_u64 desc)
+{
+	WRITE_ONCE(*slot, desc);
+	dsb(ishst);
+	__tlbi(vmalle1is);
+	dsb(ish);
+	isb();
+}
+EXPORT_SYMBOL(fki_window_set);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Foreign kernel interface v0 (out-of-tree form for stock kernels)");

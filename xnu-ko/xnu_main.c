@@ -120,14 +120,14 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 	return (long)stage >= stop;
 }
 
-static int run_m2a(void)
+/*
+ * Boot handoff. The XNU "DRAM" region is described by (virtBase, physBase, size): XNU sees base_va as the
+ * kernel virtual address of physBase. The image's vmlow sits at base_va + image_off.
+ */
+static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t size, u64_t image_off, u64_t image_size)
 {
-	u64_t image_size = img.vmhigh - img.vmlow;
-	unsigned char *base = img.region.va;
-	unsigned long region = img.region.size;
-	/* region: [image][boot args][ADT][free "DRAM" ...] */
-	u64_t off_args = (image_size + 0x3fff) & ~0x3fffULL;
-	struct boot_args_v2 *ba = (void *)(base + off_args);
+	u64_t off_args = (image_off + image_size + 0x3fff) & ~0x3fffULL;
+	struct boot_args_v2 *ba = (void *)(base_va + off_args);
 	u64_t off_dt = off_args + 0x4000;
 	struct adt a;
 	static unsigned char seed[256];
@@ -135,21 +135,22 @@ static int run_m2a(void)
 	fki_random(seed, sizeof(seed));
 	/* XNU identifies its CPU by MPIDR: run on CPU 0 and describe exactly that CPU. */
 	int berr = fki_bind_cpu(0);
-	if (berr) { logkv("xnu: cannot bind to cpu0, err", (u64_t)berr); return berr; }
+	if (berr) { logkv("xnu: cannot bind to cpu0, err", (u64_t)berr); return 0; }
 	u64_t mpidr; __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
 	mpidr &= 0xffff;	/* XNU compares Aff1:Aff0 */
 	logkv("xnu: running on MPIDR Aff1:Aff0", mpidr);
-	adt_init(&a, base + off_dt, 0x10000);
+
+	adt_init(&a, base_va + off_dt, 0x10000);
 	adt_node(&a, 3, 3);				/* / */
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
 	adt_node(&a, 6, 0);				/* /chosen */
 	adt_prop_str(&a, "name", "chosen");
-	adt_prop_u64(&a, "dram-base", XNU_FAKE_PHYS);
-	adt_prop_u64(&a, "dram-size", region);
+	adt_prop_u64(&a, "dram-base", phys);
+	adt_prop_u64(&a, "dram-size", size);
 	adt_prop(&a, "random-seed", seed, sizeof(seed));
-	adt_prop_str(&a, "firmware-version", "xnulinux-m2a");
+	adt_prop_str(&a, "firmware-version", "xnulinux-m2");
 	adt_prop_u32(&a, "debug-enabled", 1);
 	adt_node(&a, 1, 1);				/* /cpus */
 	adt_prop_str(&a, "name", "cpus");
@@ -164,23 +165,26 @@ static int run_m2a(void)
 	adt_prop_str(&a, "name", "arm-io");
 	adt_prop_str(&a, "device_type", "linux64-io");
 	{ u64_t ranges[3] = { 0, 0x7000000000ULL, 0x10000000ULL }; adt_prop(&a, "ranges", ranges, sizeof(ranges)); }
-	if (a.err) { logs("xnu: ADT overflow"); return -12; }
+	if (a.err) { logs("xnu: ADT overflow"); return 0; }
 	u64_t dt_len = adt_size(&a);
 
 	ba->Revision = 2; ba->Version = 2;
-	ba->virtBase = (u64_t)base;
-	ba->physBase = XNU_FAKE_PHYS;
-	ba->memSize = region;
-	ba->memSizeActual = region;
-	ba->topOfKernelData = XNU_FAKE_PHYS + ((off_dt + dt_len + 0x3fff) & ~0x3fffULL);
-	ba->deviceTreeP = base + off_dt;
+	ba->virtBase = (u64_t)base_va;
+	ba->physBase = phys;
+	ba->memSize = size;
+	ba->memSizeActual = size;
+	ba->topOfKernelData = phys + ((off_dt + dt_len + 0x3fff) & ~0x3fffULL);
+	ba->deviceTreeP = base_va + off_dt;
 	ba->deviceTreeLength = (unsigned)dt_len;
 	x_memcpy(ba->CommandLine, cmdline, x_strlen(cmdline) + 1);
 	logkv("xnu: boot args at", (u64_t)ba);
 	logkv("xnu: ADT bytes", dt_len);
-	logkv("xnu: topOfKernelData (XNU phys)", ba->topOfKernelData);
+	logkv("xnu: topOfKernelData (phys)", ba->topOfKernelData);
+	return ba;
+}
 
-	/* Slide and sign here (XNU skips its own rebase when hosted). */
+static int enter_arm_init(struct boot_args_v2 *ba)
+{
 	struct fki_pac_keys saved; unsigned long c = fki_enter(&xnu_W.xnu_keys, &saved);
 	int n = macho_rebase(&img);
 	fki_leave(c, &saved);
@@ -203,6 +207,62 @@ static int run_m2a(void)
 	return 0;
 }
 
+/* M2a: the image in a vmalloc region with synthetic physical addresses. */
+static int run_m2a(void)
+{
+	u64_t image_size = img.vmhigh - img.vmlow;
+	struct boot_args_v2 *ba = build_boot(img.region.va, XNU_FAKE_PHYS, img.region.size, 0, image_size);
+	if (!ba) return -22;
+	return enter_arm_init(ba);
+}
+
+/*
+ * M2b: XNU at its own link address in the top foreign window, on physically contiguous memory with real
+ * physical addresses, so that the page tables XNU builds can be walked by the hardware.
+ */
+#define XNU_WINDOW_BASE 0xfffffff007000000ULL	/* 2 MiB aligned, at or below the image's vmlow */
+static struct fki_region l2page;
+static unsigned long long *window_slot;
+
+static int run_m2b(void)
+{
+	u64_t image_size = img.vmhigh - img.vmlow;
+	if (img.vmlow < XNU_WINDOW_BASE || img.vmlow - XNU_WINDOW_BASE >= 0x200000) { logs("xnu: unexpected link address"); return -22; }
+	u64_t image_off = img.vmlow - XNU_WINDOW_BASE;
+	u64_t want = image_off + image_size + 0x20000 + ((u64_t)ram_mb << 20);
+	int err = fki_contig_alloc(want, &img.region);
+	if (err) { logkv("xnu: contiguous allocation failed, err", (u64_t)err); return err; }
+	logkv("xnu: contiguous DRAM at phys", img.region.pa);
+	logkv("xnu: contiguous DRAM size", img.region.size);
+	if ((img.region.pa & 0x1fffff) || img.region.size > (1ULL << 30)) { logs("xnu: region not 2 MiB aligned or above 1 GiB"); return -22; }
+
+	err = fki_contig_alloc(4096, &l2page);
+	if (err) return err;
+	unsigned long long *l2 = l2page.va;
+	unsigned first = (XNU_WINDOW_BASE >> 21) & 511;
+	for (u64_t o = 0; o < img.region.size; o += 0x200000) {
+		/* 2 MiB block: normal WB (AttrIdx 0 in Linux's MAIR), inner shareable, AF, EL1 RWX, UXN */
+		l2[first + (o >> 21)] = (img.region.pa + o) | (1ULL << 54) | (1ULL << 10) | (3ULL << 8) | 1;
+	}
+	unsigned long long *l1; fki_u64 l1pa;
+	err = fki_window_l1(XNU_WINDOW_BASE, &l1, &l1pa);
+	if (err) { logs("xnu: no L1 table for the top window"); return err; }
+	unsigned idx = (XNU_WINDOW_BASE >> 30) & 511;
+	logkv("xnu: top window L1 table at phys", l1pa);
+	logkv("xnu: L1 slot", idx);
+	if (l1[idx]) { logkv("xnu: L1 slot already used by Linux:", l1[idx]); return -16; }
+	window_slot = &l1[idx];
+	fki_window_set(window_slot, l2page.pa | 3);
+	logs("xnu: bootstrap window mapped");
+
+	unsigned char *base = (unsigned char *)XNU_WINDOW_BASE;
+	macho_copy(&img, base + image_off);
+	img.slide = 0;
+	struct boot_args_v2 *ba = build_boot(base, img.region.pa, img.region.size, image_off, image_size);
+	if (!ba) return -22;
+	return enter_arm_init(ba);
+}
+
 static int __init xnu_init(void)
 {
 	const void *data; unsigned long size;
@@ -212,22 +272,28 @@ static int __init xnu_init(void)
 		return -22;
 	err = fki_blob_get(image, &data, &size, &blob);
 	if (err) { logkv("xnu: cannot read image, err", (u64_t)err); return err; }
-	err = macho_load(&img, data, size, mode == 2 ? (unsigned long)ram_mb << 20 : 0);
+	err = macho_load(&img, data, size, mode == 3 ? ~0UL : mode == 2 ? (unsigned long)ram_mb << 20 : 0);
 	if (err) { logkv("xnu: load failed", (u64_t)err); fki_blob_put(blob); blob = 0; return err; }
 	logkv("xnu: image vmlow", img.vmlow);
 	logkv("xnu: image size", img.vmhigh - img.vmlow);
-	logkv("xnu: region at", (u64_t)img.region.va);
-	logkv("xnu: region size", img.region.size);
+	if (mode != 3) {
+		logkv("xnu: region at", (u64_t)img.region.va);
+		logkv("xnu: region size", img.region.size);
+	}
 
 	fki_random(&xnu_W.xnu_keys, sizeof(xnu_W.xnu_keys));
 	xnu_W.xnu_keys.sctlr_en = ~0ULL;
 
-	return mode == 1 ? run_m1() : run_m2a();
+	return mode == 1 ? run_m1() : mode == 3 ? run_m2b() : run_m2a();
 }
 
 static void __exit xnu_exit(void)
 {
-	if (img.region.va) fki_region_free(&img.region);
+	if (window_slot) fki_window_set(window_slot, 0);
+	if (mode == 3) {
+		if (img.region.va) fki_contig_free(&img.region);
+		if (l2page.va) fki_contig_free(&l2page);
+	} else if (img.region.va) fki_region_free(&img.region);
 	if (blob) fki_blob_put(blob);
 }
 
