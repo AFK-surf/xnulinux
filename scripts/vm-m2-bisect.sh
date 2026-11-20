@@ -9,6 +9,6 @@ for S in "$@"; do
   sudo dmesg -C
   echo ">>> stop=$S"; sync
   sudo insmod xnu-ko/xnu.ko mode=${MODE:-2} stop=$S ram_mb=${RAM_MB:-128}
-  sudo dmesg | grep -a "XNU stage\|run ended\|panic\|returned" | tail -3
+  sudo dmesg | grep -a "XNU stage\|XNU sub-stage\|run ended\|panic\|returned" | tail -3
   sudo rmmod xnu
 done
