@@ -31,6 +31,23 @@ if [ "${MODE:-launchd}" = launchd ]; then
 </dict>
 </plist>
 PL
+  sudo tee /mnt/sys/System/Library/LaunchDaemons/xnulinux.shell.plist >/dev/null <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>xnulinux.shell</string>
+	<key>ProgramArguments</key>
+	<array><string>/bin/bash</string><string>-i</string></array>
+	<key>EnvironmentVariables</key>
+	<dict><key>PATH</key><string>/bin:/usr/bin:/sbin</string><key>PS1</key><string>xnulinux# </string><key>TERM</key><string>dumb</string></dict>
+	<key>RunAtLoad</key><true/>
+	<key>StandardInPath</key><string>/dev/console</string>
+	<key>StandardOutPath</key><string>/dev/console</string>
+	<key>StandardErrorPath</key><string>/dev/console</string>
+</dict>
+</plist>
+PL
 else
   sudo cp ~/w/poc/tools/init/init /mnt/sys/sbin/launchd
 fi
