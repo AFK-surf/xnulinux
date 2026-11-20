@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/memdev.c b/bsd/dev/memdev.c
-index d24535d..d4f1cc7 100644
+index d24535d..0b13601 100644
 --- a/bsd/dev/memdev.c
 +++ b/bsd/dev/memdev.c
 @@ -95,6 +95,7 @@
@@ -18,7 +18,7 @@ index d24535d..d4f1cc7 100644
  
  int mdevBMajor = -1;
  int mdevCMajor = -1;
-@@ -180,6 +182,37 @@ static int      mdevioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct
+@@ -180,6 +182,39 @@ static int      mdevioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct
  dev_t           mdevadd(int devid, uint64_t base, unsigned int size, int phys);
  dev_t           mdevlookup(int devid);
  void            mdevremoveall(void);
@@ -29,7 +29,7 @@ index d24535d..d4f1cc7 100644
 + * stage 994 moves bytes between it and a wired kernel buffer (returns the count or -errno).
 + */
 +extern uintptr_t linux64_hook;
-+struct mdev_host_req { uint64_t write, off, len; void *buf; };
++struct mdev_host_req { uint64_t write, off, len; void *buf; long result; };	/* the hook itself must return 0 */
 +
 +static long
 +mdev_host_call(unsigned long stage, unsigned long arg)
@@ -46,8 +46,10 @@ index d24535d..d4f1cc7 100644
 +static int
 +mdev_host_io(int write, uint64_t off, void *buf, uint64_t len)
 +{
-+	struct mdev_host_req q = { .write = (uint64_t)write, .off = off, .len = len, .buf = buf };
-+	long r = mdev_host_call(994, (unsigned long)&q);
++	struct mdev_host_req q = { .write = (uint64_t)write, .off = off, .len = len, .buf = buf, .result = -EIO };
++	long r;
++	mdev_host_call(994, (unsigned long)&q);
++	r = q.result;
 +	if (r < 0) {
 +		return (int)-r;
 +	}
@@ -56,7 +58,7 @@ index d24535d..d4f1cc7 100644
  int             mdevgetrange(int devid, uint64_t *base, uint64_t *size);
  
  static  int
-@@ -228,6 +261,32 @@ mdevrw(dev_t dev, struct uio *uio, __unused int ioflag)
+@@ -228,6 +263,32 @@ mdevrw(dev_t dev, struct uio *uio, __unused int ioflag)
  	if (uio_resid(uio) < 0) {
  		return EINVAL;
  	}
@@ -89,7 +91,7 @@ index d24535d..d4f1cc7 100644
  	mdata = ((addr64_t)mdev[devid].mdBase << 12) + uio->uio_offset; /* Point to the area in "file" */
  
  	saveflag = uio->uio_segflg;                                                     /* Remember what the request is */
-@@ -299,6 +358,18 @@ mdevstrategy(struct buf *bp)
+@@ -299,6 +360,18 @@ mdevstrategy(struct buf *bp)
  		panic("ramstrategy: buf_map failed");
  	}
  
@@ -108,7 +110,7 @@ index d24535d..d4f1cc7 100644
  	fvaddr = (mdev[devid].mdBase << 12) + blkoff;           /* Point to offset into ram disk */
  
  	if (buf_flags(bp) & B_READ) {                                   /* Is this a read? */
-@@ -708,6 +779,35 @@ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
+@@ -708,6 +781,37 @@ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
  }
  
  
@@ -116,6 +118,7 @@ index d24535d..d4f1cc7 100644
 +dev_t
 +mdevadd_host(void)
 +{
++	uint64_t size = 0;
 +	long bytes;
 +	dev_t dev;
 +	int i;
@@ -123,7 +126,8 @@ index d24535d..d4f1cc7 100644
 +	if (!linux64_hook) {
 +		return -1;
 +	}
-+	bytes = mdev_host_call(995, 0);
++	mdev_host_call(995, (unsigned long)&size);
++	bytes = (long)size;
 +	if (bytes < 4096) {
 +		return -1;
 +	}

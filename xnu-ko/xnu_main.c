@@ -52,7 +52,8 @@ static int hostdisk_rw;
 module_param(hostdisk, charp, 0444);
 module_param(hostdisk_rw, int, 0444);
 static void *hd_file; static fki_u64 hd_size;
-struct xnu_hostdisk_req { u64_t write, off, len; void *buf; };
+/* hook returns must be 0 (nonzero ends the run): results come back through the request */
+struct xnu_hostdisk_req { u64_t write, off, len; void *buf; long result; };
 struct xnu_world xnu_W;
 
 static void logs(const char *s) { fki_log(s, x_strlen(s)); }
@@ -207,13 +208,17 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 
 static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2)
 {
-	if (stage == 995)		/* host disk size in bytes, 0 when there is none */
-		return hd_file ? (long)hd_size : 0;
-	if (stage == 994) {		/* host disk I/O: bytes moved or -errno */
-		const struct xnu_hostdisk_req *q = (const struct xnu_hostdisk_req *)a1;
-		if (!hd_file || !q) return -6;
-		if (q->write && !hostdisk_rw) return -30;
-		return fki_file_rw(hd_file, (int)q->write, q->buf, (unsigned long)q->len, q->off);
+	if (stage == 995) {		/* host disk size in bytes into *a1, 0 when there is none */
+		if (a1) *(u64_t *)a1 = hd_file ? hd_size : 0;
+		return 0;
+	}
+	if (stage == 994) {		/* host disk I/O: q->result = bytes moved or -errno */
+		struct xnu_hostdisk_req *q = (struct xnu_hostdisk_req *)a1;
+		if (!q) return 0;
+		if (!hd_file) q->result = -6;
+		else if (q->write && !hostdisk_rw) q->result = -30;
+		else q->result = fki_file_rw(hd_file, (int)q->write, q->buf, (unsigned long)q->len, q->off);
+		return 0;
 	}
 	if (stage == 996) {		/* XNU console bytes (/dev/console): line-buffered into the host log */
 		static char line[200]; static unsigned n;
