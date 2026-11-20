@@ -1,3 +1,149 @@
+diff --git a/bsd/dev/memdev.c b/bsd/dev/memdev.c
+index d24535d..d4f1cc7 100644
+--- a/bsd/dev/memdev.c
++++ b/bsd/dev/memdev.c
+@@ -95,6 +95,7 @@
+ #include <vm/vm_pager_xnu.h>
+ #include <mach/memory_object_types.h>
+ #include <kern/debug.h>
++#include <kern/kalloc.h>
+ 
+ #include <miscfs/devfs/devfs.h>
+ 
+@@ -172,6 +173,7 @@ struct mdev {
+ #define mdInited        0x01    /* This device defined */
+ #define mdRO            0x02    /* This device is read-only */
+ #define mdPhys          0x04    /* This device is in physical memory */
++#define mdHost          0x08    /* LINUX64 (xnulinux): backed by a host file, I/O through the host */
+ 
+ int mdevBMajor = -1;
+ int mdevCMajor = -1;
+@@ -180,6 +182,37 @@ static int      mdevioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct
+ dev_t           mdevadd(int devid, uint64_t base, unsigned int size, int phys);
+ dev_t           mdevlookup(int devid);
+ void            mdevremoveall(void);
++dev_t           mdevadd_host(void);
++
++/*
++ * LINUX64 (xnulinux): a hosted XNU's disk backed by a host file. Stage 995 returns its size in bytes (0: none),
++ * stage 994 moves bytes between it and a wired kernel buffer (returns the count or -errno).
++ */
++extern uintptr_t linux64_hook;
++struct mdev_host_req { uint64_t write, off, len; void *buf; };
++
++static long
++mdev_host_call(unsigned long stage, unsigned long arg)
++{
++	register unsigned long x0 __asm__("x0") = stage;
++	register unsigned long x1 __asm__("x1") = arg;
++	register unsigned long x2 __asm__("x2") = 0;
++	__asm__ volatile ("blr %3" : "+r"(x0), "+r"(x1), "+r"(x2) : "r"(linux64_hook)
++	    : "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++	    "x14", "x15", "x16", "x17", "x30", "cc", "memory");
++	return (long)x0;
++}
++
++static int
++mdev_host_io(int write, uint64_t off, void *buf, uint64_t len)
++{
++	struct mdev_host_req q = { .write = (uint64_t)write, .off = off, .len = len, .buf = buf };
++	long r = mdev_host_call(994, (unsigned long)&q);
++	if (r < 0) {
++		return (int)-r;
++	}
++	return (uint64_t)r == len ? 0 : EIO;
++}
+ int             mdevgetrange(int devid, uint64_t *base, uint64_t *size);
+ 
+ static  int
+@@ -228,6 +261,32 @@ mdevrw(dev_t dev, struct uio *uio, __unused int ioflag)
+ 	if (uio_resid(uio) < 0) {
+ 		return EINVAL;
+ 	}
++	if (mdev[devid].mdFlags & mdHost) {                      /* LINUX64 (xnulinux): host-file disk, through a bounce buffer */
++		uint64_t end = (uint64_t)mdev[devid].mdSize << 12;
++		int write = (uio_rw(uio) == UIO_WRITE);
++		char *bounce = kalloc_data(65536, Z_WAITOK);
++		status = bounce ? 0 : ENOMEM;
++		while (!status && uio_resid(uio) > 0 && (uint64_t)uio->uio_offset < end) {
++			uint64_t off = (uint64_t)uio->uio_offset;
++			count = (int)MIN((uint64_t)uio_resid(uio), MIN(65536ULL, end - off));
++			if (write) {
++				status = uiomove(bounce, count, uio);
++				if (!status) {
++					status = mdev_host_io(1, off, bounce, count);
++				}
++			} else {
++				status = mdev_host_io(0, off, bounce, count);
++				if (!status) {
++					status = uiomove(bounce, count, uio);
++				}
++			}
++		}
++		if (bounce) {
++			kfree_data(bounce, 65536);
++		}
++		return status;
++	}
++
+ 	mdata = ((addr64_t)mdev[devid].mdBase << 12) + uio->uio_offset; /* Point to the area in "file" */
+ 
+ 	saveflag = uio->uio_segflg;                                                     /* Remember what the request is */
+@@ -299,6 +358,18 @@ mdevstrategy(struct buf *bp)
+ 		panic("ramstrategy: buf_map failed");
+ 	}
+ 
++	if (mdev[devid].mdFlags & mdHost) {                      /* LINUX64 (xnulinux): host-file disk */
++		int err = mdev_host_io(!(buf_flags(bp) & B_READ), blkoff, (void *)vaddr, buf_count(bp));
++		buf_unmap(bp);
++		if (err) {
++			buf_seterror(bp, err);
++		} else {
++			buf_setresid(bp, 0);
++		}
++		buf_biodone(bp);
++		return;
++	}
++
+ 	fvaddr = (mdev[devid].mdBase << 12) + blkoff;           /* Point to offset into ram disk */
+ 
+ 	if (buf_flags(bp) & B_READ) {                                   /* Is this a read? */
+@@ -708,6 +779,35 @@ mdevadd(int devid, uint64_t base, unsigned int size, int phys)
+ }
+ 
+ 
++/* LINUX64 (xnulinux): add the host-file disk (if the host has one) as the first free md unit. */
++dev_t
++mdevadd_host(void)
++{
++	long bytes;
++	dev_t dev;
++	int i;
++
++	if (!linux64_hook) {
++		return -1;
++	}
++	bytes = mdev_host_call(995, 0);
++	if (bytes < 4096) {
++		return -1;
++	}
++	/* a page-number range no RAM disk can overlap: the host disk has no memory behind it */
++	dev = mdevadd(-1, 1ULL << 40, (unsigned int)((uint64_t)bytes >> 12), 0);
++	if (dev == (dev_t)-1) {
++		return dev;
++	}
++	for (i = 0; i < NB_MAX_MDEVICES; i++) {
++		if ((mdev[i].mdFlags & mdInited) && mdev[i].mdBDev == dev) {
++			mdev[i].mdFlags |= mdHost;
++		}
++	}
++	printf("LINUX64: md%x is the host disk (%ld bytes)\n", minor(dev), bytes);
++	return dev;
++}
++
+ dev_t
+ mdevlookup(int devid)
+ {
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 index 5362b32..cd43d8e 100644
 --- a/bsd/kern/bsd_init.c
@@ -182,6 +328,28 @@ index 76555f6..3fad099 100644
  	panic("Unable to find driver for this platform: \"%s\".",
  	    platform_name);
  
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index ae82fc8..3fd837c 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -65,6 +65,7 @@ extern "C" {
+ 
+ extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
+ extern dev_t mdevlookup(int devid);
++extern dev_t mdevadd_host(void);
+ extern void mdevremoveall(void);
+ extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
+ extern void di_root_ramfile(IORegistryEntry * entry);
+@@ -859,6 +860,9 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 			}
+ 			regEntry->release();                                                            /* Toss the entry */
+ 		}
++		if (mdevlookup(0) < 0) {
++			(void)mdevadd_host();                   /* LINUX64 (xnulinux): no RAM disk, maybe a host-file disk */
++		}
+ 	}
+ 
+ //
 diff --git a/libkern/crypto/corecrypto_rand.c b/libkern/crypto/corecrypto_rand.c
 index d46815b..ccd2d84 100644
 --- a/libkern/crypto/corecrypto_rand.c

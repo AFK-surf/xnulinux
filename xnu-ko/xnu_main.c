@@ -46,6 +46,13 @@ static char *bootargs;
 module_param(bootargs, charp, 0444);
 module_param(ramdisk, charp, 0444);
 static const void *rd_data; static unsigned long rd_size; static void *rd_blob;
+/* A root disk backed by a host file (an HFS+ image): XNU's memdev md0 in host mode, stages 995 (size) and 994 (I/O). */
+static char *hostdisk;
+static int hostdisk_rw;
+module_param(hostdisk, charp, 0444);
+module_param(hostdisk_rw, int, 0444);
+static void *hd_file; static fki_u64 hd_size;
+struct xnu_hostdisk_req { u64_t write, off, len; void *buf; };
 struct xnu_world xnu_W;
 
 static void logs(const char *s) { fki_log(s, x_strlen(s)); }
@@ -200,6 +207,14 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 
 static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2)
 {
+	if (stage == 995)		/* host disk size in bytes, 0 when there is none */
+		return hd_file ? (long)hd_size : 0;
+	if (stage == 994) {		/* host disk I/O: bytes moved or -errno */
+		const struct xnu_hostdisk_req *q = (const struct xnu_hostdisk_req *)a1;
+		if (!hd_file || !q) return -6;
+		if (q->write && !hostdisk_rw) return -30;
+		return fki_file_rw(hd_file, (int)q->write, q->buf, (unsigned long)q->len, q->off);
+	}
 	if (stage == 996) {		/* XNU console bytes (/dev/console): line-buffered into the host log */
 		static char line[200]; static unsigned n;
 		const char *b = (const char *)a1; unsigned long i;
@@ -430,7 +445,7 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	ba->deviceTreeP = base_va + off_dt;
 	ba->deviceTreeLength = (unsigned)dt_len;
 	x_memcpy(ba->CommandLine, cmdline, x_strlen(cmdline) + 1);
-	if (rd_size) {
+	if (rd_size || hd_file) {
 		const char *rd = " rd=md0";
 		x_memcpy(ba->CommandLine + x_strlen(ba->CommandLine), rd, x_strlen(rd) + 1);
 	}
@@ -634,6 +649,11 @@ static int __init xnu_init(void)
 		err = fki_blob_get(ramdisk, &rd_data, &rd_size, &rd_blob);
 		if (err) { logkv("xnu: cannot read the RAM disk, err", (u64_t)err); return err; }
 	}
+	if (hostdisk) {
+		hd_file = fki_file_open(hostdisk, hostdisk_rw, &hd_size);
+		if (!hd_file) { logs("xnu: cannot open the host disk"); return -2; }
+		logkv("xnu: host disk bytes", hd_size);
+	}
 	err = fki_blob_get(image, &data, &size, &blob);
 	if (err) { logkv("xnu: cannot read image, err", (u64_t)err); return err; }
 	err = macho_load(&img, data, size, mode == 3 ? ~0UL : mode == 2 ? (unsigned long)ram_mb << 20 : 0);
@@ -664,6 +684,7 @@ static void __exit xnu_exit(void)
 	} else if (img.region.va) fki_region_free(&img.region);
 	if (blob) fki_blob_put(blob);
 	if (rd_blob) fki_blob_put(rd_blob);
+	if (hd_file) fki_file_close(hd_file);
 }
 
 module_init(xnu_init);
