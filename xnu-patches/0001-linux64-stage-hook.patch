@@ -240,10 +240,26 @@ index 5362b32..cd43d8e 100644
  #if DEBUG_BSDINIT
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 2bf34ab..1be1fe1 100644
+index 2bf34ab..e7bf32a 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -8304,6 +8304,14 @@ load_init_program(proc_t p)
+@@ -2888,6 +2888,7 @@ badtoolate:
+ 			if (bootarg_execfailurereports) {
+ 				set_proc_name(imgp, current_proc());
+ 			}
++			{ if (exec_failure_reason) kprintf("linux64: exec kill (badtoolate) \"%s\" reason ns %u code 0x%llx\n", current_proc()->p_name, exec_failure_reason->osr_namespace, (unsigned long long)exec_failure_reason->osr_code); }
+ 			psignal_with_reason(current_proc(), SIGKILL, exec_failure_reason);
+ 			exec_failure_reason = OS_REASON_NULL;
+ 
+@@ -5701,6 +5702,7 @@ bad:
+ 	}
+ 
+ 	if (exec_failure_reason && !spawn_no_exec) {
++		{ if (exec_failure_reason) kprintf("linux64: exec kill (exec end) \"%s\" reason ns %u code 0x%llx\n", current_proc()->p_name, exec_failure_reason->osr_namespace, (unsigned long long)exec_failure_reason->osr_code); }
+ 		psignal_with_reason(p, SIGKILL, exec_failure_reason);
+ 		exec_failure_reason = NULL;
+ 	}
+@@ -8304,6 +8306,14 @@ load_init_program(proc_t p)
  	boot_progress_stage("root check enter");
  	int cache_error = native_owner_cache_prepare(p, (user_addr_t)scratch_addr, &init_envp);
  	boot_progress_stage("root check returned");
@@ -258,6 +274,28 @@ index 2bf34ab..1be1fe1 100644
  	if (cache_error) panic("offline owner root check failed: %d", cache_error);
  #endif
  #if defined(XNU_BOOT_PROGRESS) && XNU_BOOT_PROGRESS
+@@ -9059,6 +9069,7 @@ done:
+ 			proc_csflags_set(p, CS_KILLED);
+ 		}
+ 		/* make very sure execution fails */
++		{ if (signature_failure_reason) kprintf("linux64: exec kill (signature) \"%s\" reason ns %u code 0x%llx\n", current_proc()->p_name, signature_failure_reason->osr_namespace, (unsigned long long)signature_failure_reason->osr_code); }
+ 		if (vfexec || spawn) {
+ 			assert(signature_failure_reason != OS_REASON_NULL);
+ 			psignal_vfork_with_reason(p, proc_task(p), imgp->ip_new_thread,
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index 6e740c2..bfbdd29 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -3792,6 +3792,9 @@ exit_with_mach_exception(
+ 
+ 	printf("[%s: killed] exiting with signal %d, force exiting the process\n",
+ 	    proc_best_name(p), SIGKILL);
++	kprintf("linux64: [%s] fatal mach exception type %d code 0x%llx subcode 0x%llx reason ns %u code 0x%llx\n",
++	    proc_best_name(p), (int)exception.exception_type, (unsigned long long)exception.mx_code,
++	    (unsigned long long)exception.mx_subcode, reason->osr_namespace, (unsigned long long)reason->osr_code);
+ 
+ 	/* consumes reason */
+ 	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), NULL,
 diff --git a/bsd/kern/kern_trustcache.c b/bsd/kern/kern_trustcache.c
 index 4b1e8a9..f188eed 100644
 --- a/bsd/kern/kern_trustcache.c
@@ -1581,7 +1619,7 @@ index d10d7a1..15e2fb4 100644
  		cpc_cpu_transition(CPC_CPU_EARLY_INIT, cdp);
  #endif /* CONFIG_CPU_COUNTERS */
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
-index a191eb3..b48f1ef 100644
+index a191eb3..78c2de4 100644
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
 @@ -185,7 +185,8 @@
@@ -1644,7 +1682,7 @@ index a191eb3..b48f1ef 100644
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	load_general_registers	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
-@@ -444,3 +450,185 @@ LEXT(machine_set_current_thread)
+@@ -444,3 +450,194 @@ LEXT(machine_set_current_thread)
  
  
  /* vim: set ts=4: */
@@ -1660,7 +1698,7 @@ index a191eb3..b48f1ef 100644
 +	.align 3
 +	.globl EXT(linux64_el0_save)
 +LEXT(linux64_el0_save)
-+	.quad	0, 0, 0									// Linux's SP_EL0 (current), VBAR_EL1, x18 (its shadow call stack)
++	.quad	0, 0, 0, 0								// Linux's SP_EL0 (current), VBAR_EL1, x18 (its shadow call stack), SCTLR_EL1
 +
 +	.text
 +	.align 2
@@ -1674,6 +1712,13 @@ index a191eb3..b48f1ef 100644
 +	mrs		x10, VBAR_EL1
 +	str		x10, [x9, #8]
 +	str		x18, [x9, #16]
++	mrs		x10, SCTLR_EL1
++	str		x10, [x9, #24]
++	cbz		x1, 1f								// x1: JOP off for this thread (arm64, not arm64e): EnIA (31) and EnDA (27) off at EL0
++	mov		x11, #((1 << 31) | (1 << 27))
++	bic		x10, x10, x11
++	msr		SCTLR_EL1, x10
++1:
 +	adrp	x10, EXT(linux64_el0_vectors)@page
 +	add		x10, x10, EXT(linux64_el0_vectors)@pageoff
 +	msr		VBAR_EL1, x10
@@ -1825,6 +1870,8 @@ index a191eb3..b48f1ef 100644
 +	ldr		x10, [x9, #8]
 +	msr		VBAR_EL1, x10
 +	ldr		x18, [x9, #16]						// the host's x18 again (user code owns x18 at EL0)
++	ldr		x10, [x9, #24]						// SCTLR_EL1 as the kernels expect it (EnIA/EnDA back on)
++	msr		SCTLR_EL1, x10
 +	isb
 +	mov		x0, sp
 +	mov		x29, xzr
@@ -2308,10 +2355,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..d7a33cf 100644
+index d8f1b19..8a617e2 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,218 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,223 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2424,7 +2471,7 @@ index d8f1b19..d7a33cf 100644
 +	extern void linux64_stage_arg(unsigned long, unsigned long);
 +	thread_t thread = current_thread();
 +
-+	extern void linux64_el0_run(arm_saved_state_t *) __attribute__((noreturn));
++	extern void linux64_el0_run(arm_saved_state_t *, uint64_t) __attribute__((noreturn));
 +	static int reported;
 +
 +	(void)ml_set_interrupts_enabled(FALSE);
@@ -2438,7 +2485,12 @@ index d8f1b19..d7a33cf 100644
 +	if (reported++ == 0) {
 +		linux64_stage_arg(9100, get_saved_state_pc(thread->machine.upcb));
 +	}
-+	linux64_el0_run(thread->machine.upcb);
++	/*
++	 * An arm64 (not arm64e) process runs the arm64e system libraries with JOP off: Apple hardware disables the user
++	 * IA/DA keys for it; hosted, user code runs with SCTLR_EL1.EnIA/EnDA cleared (linux64_el0_run puts them back on
++	 * the next exception), or a blraaz on one of its unsigned function pointers fails (EXC_ARM_PAC_FAIL).
++	 */
++	linux64_el0_run(thread->machine.upcb, (thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) != 0);
 +}
 +
 +/* LINUX64: the registers linux64_el0_vectors saved for an exception taken at EL0 (cswitch.s) */
