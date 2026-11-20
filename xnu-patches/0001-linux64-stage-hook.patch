@@ -386,23 +386,65 @@ index 0cc7f6e..c07d35c 100644
  		DEBUG_INFO("region = %d\n", currentRegion->type);
  		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index 76555f6..e7e2156 100644
+index 76555f6..0e36dfd 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
-@@ -1540,6 +1540,8 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
+@@ -1540,6 +1540,43 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
  	publishResource("IONVRAM");
  }
  
 +extern "C" uintptr_t linux64_hook; /* LINUX64 (xnulinux) */
 +
++/*
++ * LINUX64 (xnulinux): a stand-in for AppleKeyStore's "AKSKernelServices" table, which AMFI requires (AKS_services()
++ * has no path without it). The entries AMFI calls are type-discriminated function pointers: 0x120 (disc 0x61fc,
++ * register for a state notification), 0x128 (0x146e, read state), 0x130 (0xd507, unregister). A hosted XNU has no
++ * keybag: the queries report unsupported, unregistering succeeds.
++ */
++#include <ptrauth.h>
++static int
++linux64_aks_unsupported(void)
++{
++	return kIOReturnUnsupported;
++}
++static int
++linux64_aks_ok(void)
++{
++	return 0;
++}
++static uintptr_t linux64_aks_table[0x40];
++static void *
++linux64_aks_services(void)
++{
++	if (!linux64_aks_table[0]) {
++		void *un = ptrauth_strip((void *)&linux64_aks_unsupported, ptrauth_key_function_pointer);
++		void *ok = ptrauth_strip((void *)&linux64_aks_ok, ptrauth_key_function_pointer);
++		for (unsigned i = 1; i < 0x40; i++) {
++			linux64_aks_table[i] = (uintptr_t)ptrauth_sign_unauthenticated(un, ptrauth_key_asia, 0);
++		}
++		linux64_aks_table[0x120 / 8] = (uintptr_t)ptrauth_sign_unauthenticated(un, ptrauth_key_asia, 0x61fc);
++		linux64_aks_table[0x128 / 8] = (uintptr_t)ptrauth_sign_unauthenticated(un, ptrauth_key_asia, 0x146e);
++		linux64_aks_table[0x130 / 8] = (uintptr_t)ptrauth_sign_unauthenticated(ok, ptrauth_key_asia, 0xd507);
++		linux64_aks_table[0] = (uintptr_t)ptrauth_sign_unauthenticated(un, ptrauth_key_asia, 0);
++	}
++	return linux64_aks_table;
++}
++
  IOReturn
  IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
      bool waitForFunction,
-@@ -1564,7 +1566,19 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
+@@ -1564,7 +1601,26 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
  	}
  
  	if (waitForFunction) {
 -		_resources = waitForService(resourceMatching(functionName));
++		if (linux64_hook && functionName->isEqualTo("AKSKernelServices")) {
++			if (param1) {
++				*(void **)param1 = linux64_aks_services();
++			}
++			IOLog("LINUX64: AKSKernelServices from the hosted stand-in\n");
++			return kIOReturnSuccess;
++		}
 +		if (linux64_hook) {
 +			/*
 +			 * LINUX64 (xnulinux): a hosted XNU has no providers for some platform functions (AppleKeyStore's, which AMFI
@@ -419,7 +461,7 @@ index 76555f6..e7e2156 100644
  	} else {
  		_resources = getResourceService();
  	}
-@@ -2341,6 +2355,8 @@ IOPlatformDevice::getResources( void )
+@@ -2341,6 +2397,8 @@ IOPlatformDevice::getResources( void )
  * the kernel with a suitable message.
  *********************************************************************/
  
@@ -428,7 +470,7 @@ index 76555f6..e7e2156 100644
  class IOPanicPlatform : IOPlatformExpert {
  	OSDeclareDefaultStructors(IOPanicPlatform);
  
-@@ -2361,6 +2377,19 @@ IOPanicPlatform::start(IOService * provider)
+@@ -2361,6 +2419,19 @@ IOPanicPlatform::start(IOService * provider)
  		platform_name = provider->getName();
  	}
  
