@@ -2065,10 +2065,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..f49fe56 100644
+index d8f1b19..26bd832 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,172 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,179 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2228,6 +2228,13 @@ index d8f1b19..f49fe56 100644
 +		long long num = (long long)f->x[16];
 +		linux64_svc_thread = thread;
 +		linux64_svc_num = num;
++		if (num == 202 && f->x[1] > 0 && f->x[1] <= 8) {	/* sysctl: the MIB and this thread's kernel stack */
++			int mib[8] = {0};
++			if (copyin((user_addr_t)f->x[0], mib, f->x[1] * sizeof(int)) == 0) {
++				kprintf("linux64: svc 202 mib %d.%d.%d.%d (len %llu) kstack 0x%llx\n", mib[0], mib[1], mib[2], mib[3], f->x[1],
++				    (uint64_t)thread->kernel_stack);
++			}
++		}
 +		if (num == 5 || num == 463 || num == 33 || num == 338 || num == 340 || num == 59 || num == 466 || num == 469) {
 +			char path[128];
 +			size_t len = 0;
