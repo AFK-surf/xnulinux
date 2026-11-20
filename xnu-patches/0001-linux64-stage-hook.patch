@@ -1658,10 +1658,10 @@ index 4224c9d..4a1fe94 100644
  #define assertf(ex, fmt, args...)  ({ \
  	if (mach_assert_enabled_expr(ex) && __builtin_expect(!(ex), 0L)) {      \
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
-index 0eae1f6..9a4e240 100644
+index 0eae1f6..3253146 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1253,6 +1253,21 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1253,6 +1253,32 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  {
  #pragma clang diagnostic pop
  
@@ -1670,8 +1670,19 @@ index 0eae1f6..9a4e240 100644
 +		/* LINUX64 (xnulinux): report the panic to the host (see arm_init.c). */
 +		extern uintptr_t linux64_hook;
 +		if (linux64_hook) {
++			/* the formatted message when there are arguments (the format string alone otherwise) */
++			static char linux64_panic_buf[512];
++			const char *msg = panic_format_str;
++			if (panic_args != NULL && panic_format_str != NULL) {
++				extern int vsnprintf(char *, size_t, const char *, va_list);
++				va_list ap;
++				va_copy(ap, *panic_args);
++				vsnprintf(linux64_panic_buf, sizeof(linux64_panic_buf), panic_format_str, ap);
++				va_end(ap);
++				msg = linux64_panic_buf;
++			}
 +			register unsigned long x0 __asm__("x0") = 999;
-+			register unsigned long x1 __asm__("x1") = (unsigned long)panic_format_str;
++			register unsigned long x1 __asm__("x1") = (unsigned long)msg;
 +			register unsigned long x2 __asm__("x2") = panic_caller;
 +			__asm__ volatile ("blr %3" : "+r"(x0), "+r"(x1), "+r"(x2) : "r"(linux64_hook)
 +			    : "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
