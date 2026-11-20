@@ -252,9 +252,9 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		logkv("xnu:   at line", a->line);
 		return assert_fatal;
 	}
-	if (stage == 9100) {		/* a new user thread is about to enter user space (not hosted yet: M3) */
-		logkv("xnu: XNU is about to enter user space; user pc", a1);
-		return 1;
+	if (stage == 9100) {		/* the first entry into user space (linux64_el0_run follows) */
+		logkv("xnu: XNU enters user space (EL0); user pc", a1);
+		return 0;
 	}
 	if (stage == 999) {
 		char m[500]; const char *f = (const char *)a1; unsigned i = 0;
