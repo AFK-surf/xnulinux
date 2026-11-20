@@ -24,6 +24,8 @@
 #include <asm/tlbflush.h>
 #include <asm/barrier.h>
 #include <linux/kprobes.h>
+#include <linux/hrtimer.h>
+#include <linux/sched.h>
 
 int fki_version(void)
 {
@@ -257,6 +259,27 @@ void fki_window_set(unsigned long long *slot, fki_u64 desc)
 	isb();
 }
 EXPORT_SYMBOL(fki_window_set);
+
+void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns)
+{
+	u64 now = __arch_counter_get_cntvct(), freq = arch_timer_get_cntfrq(), ns;
+
+	if (counter_deadline <= now)
+		return;
+	ns = div64_u64((counter_deadline - now) * 1000000ULL, freq) * 1000ULL;
+	if (ns > max_ns)
+		ns = max_ns;
+	local_irq_enable();
+	preempt_enable();
+	{
+		ktime_t t = ns_to_ktime(ns);
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule_hrtimeout_range(&t, 50000, HRTIMER_MODE_REL);
+	}
+	preempt_disable();
+	local_irq_disable();
+}
+EXPORT_SYMBOL(fki_idle_until);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Foreign kernel interface v0 (out-of-tree form for stock kernels)");

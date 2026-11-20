@@ -64,6 +64,11 @@ void fki_contig_free(struct fki_region *r);
  */
 int fki_window_l1(unsigned long va, unsigned long long **l1_va, fki_u64 *l1_pa);
 void fki_window_set(unsigned long long *slot, fki_u64 desc);
+/*
+ * Called from inside fki_enter() (preemption and IRQs off): let Linux run (IRQs and preemption on)
+ * until the counter reaches deadline or max_ns pass, then return with them off again.
+ */
+void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns);
 /* Keep the calling task on one CPU (the hosted kernel sees that CPU's MPIDR). */
 int fki_bind_cpu(int cpu);
 #ifdef __cplusplus
