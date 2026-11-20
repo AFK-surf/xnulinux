@@ -203,6 +203,53 @@ index 743117b..9dc298b 100644
  	__asm__ volatile (
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 79d0bc1..ac5b387 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2254,6 +2254,7 @@ pmap_bootstrap(
+ 	lck_grp_init(&pmap_lck_grp, "pmap", LCK_GRP_ATTR_NULL);
+ 	lck_attr_setdefault(&pmap_lck_rw_attr);
+ 	pmap_lck_rw_attr.lck_attr_val |= LCK_ATTR_RW_NO_SLEEP;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7001); }
+ 
+ #if XNU_MONITOR
+ #if (DEVELOPMENT || DEBUG) || CONFIG_CSR_FROM_DT
+@@ -2305,8 +2306,10 @@ pmap_bootstrap(
+ 	kernel_pmap->sw_asid = 0;
+ 
+ 	pmap_lock_init(kernel_pmap);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7002); }
+ 
+ 	pmap_max_asids = pmap_compute_max_asids();
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7003); }
+ #if HAS_16BIT_ASID
+ 	asid_chunk_size = MAX_HW_ASIDS;
+ #else
+@@ -2336,6 +2339,7 @@ pmap_bootstrap(
+ 	 * space for these data structures.
+ 	 */
+ 	pmap_data_bootstrap();
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7004); }
+ 
+ 	/**
+ 	 * Bootstrap any necessary SART data structures and values needed from the device tree.
+@@ -2356,6 +2360,7 @@ pmap_bootstrap(
+ 	avail_start = round_page(avail_start + asid_table_size);
+ 
+ 	memset((char *)phystokv(pmap_struct_start), 0, avail_start - pmap_struct_start);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7005); }
+ 
+ 	vm_first_phys = gPhysBase;
+ 	vm_last_phys = trunc_page(avail_end);
+@@ -2373,6 +2378,7 @@ pmap_bootstrap(
+ 	virtual_space_end = VM_MAX_KERNEL_ADDRESS;
+ 
+ 	bitmap_full(&asid_bitmap[0], pmap_max_asids);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7006); }
+ #if !HAS_16BIT_ASID
+ 	bitmap_full(&asid_plru_bitmap[0], MAX_HW_ASIDS);
+ 	// Clear the highest-order bit, which corresponds to MAX_HW_ASIDS + 1
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index f7f387e..c239600 100644
 --- a/osfmk/arm64/arm_vm_init.c
