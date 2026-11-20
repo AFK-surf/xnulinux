@@ -127,7 +127,7 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		while (f && f[i] && j < sizeof(m) - 1) { if (f[i] != '\n') m[j++] = f[i]; i++; }
 		m[j] = 0;
 		/* the per-entry startup trace is thousands of lines: count it, do not print it */
-		if (!(f && f[0] == 'k' && f[22] == '[' && f[23] >= '0' && f[23] <= '9'))
+		if (!(f && !x_strncmp(f, "kernel_startup_initialize_upto[", 31)))
 			logs(m);
 		if (kmax && ++kcount >= kmax) { logs("xnu: kprintf budget reached"); return 1; }
 		return 0;
