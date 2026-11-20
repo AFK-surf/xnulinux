@@ -166,13 +166,16 @@ static int run_m2a(void)
 	logkv("xnu: threaded fixups applied", (u64_t)n);
 	if (n < 0) return n;
 
-	u64_t a_init = macho_sym(&img, "_arm_init"), a_hook = macho_sym(&img, "_linux64_hook");
+	u64_t mh_unslid = 0;
+	int segs = macho_slide_header(&img, &mh_unslid);
+	logkv("xnu: load commands slid (segments)", (u64_t)segs);
+	u64_t a_init = macho_sym(&img, "_arm_init"), a_hook = macho_sym(&img, "_linux64_hook"),
+	      a_slide = macho_sym(&img, "_linux64_slide");
 	logkv("xnu: arm_init at", a_init);
-	if (!a_init || !a_hook) { logs("xnu: arm_init or linux64_hook missing (kernel without the LINUX64 patch?)"); return -2; }
+	if (!a_init || !a_hook || !a_slide) { logs("xnu: arm_init or linux64_hook missing (kernel without the LINUX64 patch?)"); return -2; }
 	*(u64_t *)a_hook = (u64_t)xnu_world_upcall;
+	*(u64_t *)a_slide = img.slide;
 
-	/* XNU's boot stack: the last 64 KiB of the region */
-	xnu_W.xnu_stack_top = (u64_t)(base + region - 64);
 	xnu_W.xnu_tpidr = 0;
 	logs("xnu: entering arm_init");
 	long r = xnu_world_call(a_init, (unsigned long)ba);

@@ -23,8 +23,7 @@ xnu_world_call:
 	bl	fki_enter		/* no preemption, no IRQs */
 	W(x9)
 	str	x0, [x9, #104]
-	ldr	x10, [x9, #232]
-	mov	sp, x10
+	/* XNU runs on the Linux task stack: Linux's entry code treats any other stack as overflow. */
 	mov	x0, x20
 	blr	x19
 	/* fn returned: XNU keys and thread pointer are live */
