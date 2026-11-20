@@ -386,7 +386,7 @@ index 0cc7f6e..c07d35c 100644
  		DEBUG_INFO("region = %d\n", currentRegion->type);
  		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index 76555f6..40b1630 100644
+index 76555f6..b49cb93 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
 @@ -1540,6 +1540,100 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
@@ -420,7 +420,7 @@ index 76555f6..40b1630 100644
 + * (src, dst, length, iv, direction, ...)). There is no device key to use: it copies src to dst ("encrypts" with the
 + * identity), which is all a hosted Image4 nonce store needs to stay consistent.
 + */
-+extern "C" pmap_paddr_t kvtophys(vm_offset_t va);
++extern "C" uint64_t kvtophys(vm_offset_t va);
 +extern "C" void ml_phys_write_double_64(addr64_t paddr, unsigned long long data);
 +static IOReturn
 +linux64_aes_perform(IOService *self, IOMemoryDescriptor *src, IOMemoryDescriptor *dst, uint64_t len, void *iv, int dir,
@@ -449,7 +449,7 @@ index 76555f6..40b1630 100644
 +	void *fn = ptrauth_strip((void *)&linux64_aes_perform, ptrauth_key_function_pointer);
 +	uint64_t signed_fn = (uint64_t)ptrauth_sign_unauthenticated(fn, ptrauth_key_asia,
 +	    ptrauth_blend_discriminator((void *)entry, 0x17dc));
-+	pmap_paddr_t pa = kvtophys((vm_offset_t)entry);
++	uint64_t pa = kvtophys((vm_offset_t)entry);
 +	if (pa) {
 +		ml_phys_write_double_64((addr64_t)pa, signed_fn);
 +		IOLog("LINUX64: IOAESAccelerator AES entry (vtable %p +0x890) is the hosted copy\n", (void *)vt);
