@@ -287,12 +287,12 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	mpidr &= 0xffff;	/* XNU compares Aff1:Aff0 */
 	logkv("xnu: running on MPIDR Aff1:Aff0", mpidr);
 
-	adt_init(&a, base_va + off_dt, 0x10000);
+	adt_init(&a, base_va + off_dt, 0x40000);
 	adt_node(&a, 3, 6);				/* / */
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
-	adt_node(&a, 7, 3);				/* /chosen */
+	adt_node(&a, 9, 3);				/* /chosen */
 	adt_prop_str(&a, "name", "chosen");
 	adt_prop_u64(&a, "dram-base", phys);
 	adt_prop_u64(&a, "dram-size", size);
@@ -303,6 +303,12 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 		/* the SHA-384 of the boot manifest a bootloader would pass; there is none, so zeros (27's Image4 needs the property) */
 		static const unsigned char zero48[48];
 		adt_prop(&a, "boot-manifest-hash", zero48, sizeof(zero48));
+	}
+	{
+		/* NVRAM as iBoot hands it over: the bank size and the image (blank: IODTNVRAM formats it as a CHRP store) */
+		static unsigned char nvram[0x10000];
+		adt_prop_u32(&a, "nvram-bank-size", sizeof(nvram));
+		adt_prop(&a, "nvram-proxy-data", nvram, sizeof(nvram));
 	}
 	adt_node(&a, 1, 0);				/* /chosen/memory-map: no trust caches, no AuxKC */
 	adt_prop_str(&a, "name", "memory-map");
