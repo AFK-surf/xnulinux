@@ -5,10 +5,10 @@ set -euo pipefail
 IMG=${IMG:-/var/tmp/sys.img}
 cd ~/w/poc/tools/init && bash vm-install.sh >/dev/null 2>&1 || true
 sudo umount /mnt/sys 2>/dev/null || true
-rm -f $IMG; truncate -s 6G $IMG
+rm -f $IMG; truncate -s ${SIZE:-16G} $IMG
 mkfs.hfsplus -v xnulinux-sys $IMG >/dev/null
 sudo mkdir -p /mnt/sys; sudo mount -o loop -t hfsplus $IMG /mnt/sys
-sudo tar xf /tmp/sys.tar -C /mnt/sys
+sudo tar xf /tmp/sys.tar -C /mnt/sys --warning=no-unknown-keyword
 sudo mkdir -p /mnt/sys/sbin /mnt/sys/dev /mnt/sys/private/var/select /mnt/sys/private/tmp /mnt/sys/System/Library /mnt/sys/usr/lib
 sudo ln -sf private/var /mnt/sys/var; sudo ln -sf private/tmp /mnt/sys/tmp
 sudo ln -sf /bin/bash /mnt/sys/private/var/select/sh
