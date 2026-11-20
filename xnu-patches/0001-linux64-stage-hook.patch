@@ -209,10 +209,10 @@ index d46815b..ccd2d84 100644
  	g_crypto_funcs->random_kmem_init_fn(ctx);
  }
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..d65a903 100644
+index ac1713e..45b4d94 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -228,6 +228,15 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
+@@ -228,6 +228,17 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
  extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
  extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
  
@@ -224,11 +224,13 @@ index ac1713e..d65a903 100644
 +uintptr_t linux64_slide;
 +/* LINUX64: XNU's virtual interrupt-enable state (hardware IRQs stay masked while hosted). */
 +unsigned int linux64_vint;
++/* LINUX64: debug counters, read by xnu.ko's monitor thread on another CPU while XNU runs. */
++unsigned long linux64_dbg[16];
 +
  static void
  arm_slide_rebase_and_sign_image(void)
  {
-@@ -285,10 +294,14 @@ arm_slide_rebase_and_sign_image(void)
+@@ -285,10 +296,14 @@ arm_slide_rebase_and_sign_image(void)
  		 * using hardcoded kernel link address
  		 */
  		slide = (uintptr_t)k_mh - VM_KERNEL_LINK_ADDRESS;
@@ -244,7 +246,7 @@ index ac1713e..d65a903 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +354,58 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +356,60 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
@@ -259,6 +261,7 @@ index ac1713e..d65a903 100644
 +static inline void
 +linux64_stage(unsigned long stage)
 +{
++	linux64_dbg[6] = stage;
 +	if (linux64_hook) {
 +		register unsigned long x0 __asm__("x0") = stage;
 +		__asm__ volatile ("blr %1"
@@ -281,6 +284,7 @@ index ac1713e..d65a903 100644
 +void
 +linux64_stage_arg(unsigned long stage, unsigned long arg)
 +{
++	linux64_dbg[6] = stage;
 +	if (linux64_hook) {
 +		register unsigned long x0 __asm__("x0") = stage;
 +		register unsigned long x1 __asm__("x1") = arg;
@@ -303,7 +307,7 @@ index ac1713e..d65a903 100644
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
-@@ -361,6 +426,7 @@ arm_init(
+@@ -361,6 +430,7 @@ arm_init(
  	port_crumb = 100;
  	arm_slide_rebase_and_sign_image();
  	port_crumb = 101;
@@ -311,7 +315,7 @@ index ac1713e..d65a903 100644
  
  	arm_static_if_init(args);
  	port_crumb = 102;
-@@ -382,6 +448,7 @@ arm_init(
+@@ -382,6 +452,7 @@ arm_init(
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	boot_progress_init();
@@ -319,7 +323,7 @@ index ac1713e..d65a903 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -475,6 +542,7 @@ arm_init(
+@@ -475,6 +546,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -327,7 +331,7 @@ index ac1713e..d65a903 100644
  
  
  	boot_cpu_id = ml_get_boot_cpu_number();
-@@ -511,15 +579,19 @@ arm_init(
+@@ -511,15 +583,19 @@ arm_init(
  
  	kernel_debug_string_early("kernel_startup_bootstrap");
  	kernel_startup_bootstrap();
@@ -347,7 +351,7 @@ index ac1713e..d65a903 100644
  
  	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
  		xmaxmem = (uint64_t) maxmem * (1024 * 1024);
-@@ -544,7 +616,9 @@ arm_init(
+@@ -544,7 +620,9 @@ arm_init(
  	}
  #endif /* SCHED_HYGIENE_DEBUG */
  
@@ -357,7 +361,7 @@ index ac1713e..d65a903 100644
  
  #if HAS_BP_RET
  	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
-@@ -581,10 +655,12 @@ arm_init(
+@@ -581,10 +659,12 @@ arm_init(
  		panic("%s: Unable to find 'dram-size' entry in the 'chosen' DT node", __FUNCTION__);
  	}
  
@@ -370,7 +374,7 @@ index ac1713e..d65a903 100644
  	boot_progress_stage("arm_vm_init enter");
  	port_crumb = 1;
  	arm_vm_init(xmaxmem, args);
-@@ -607,6 +683,7 @@ arm_init(
+@@ -607,6 +687,7 @@ arm_init(
  	port_crumb = 5;
  	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
  	kprintf("kprintf initialized\n");
@@ -378,7 +382,7 @@ index ac1713e..d65a903 100644
  
  	serialmode = 0;
  	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
-@@ -648,10 +725,12 @@ arm_init(
+@@ -648,10 +729,12 @@ arm_init(
  	}
  	PE_create_console();
  	port_crumb = 6;
@@ -391,7 +395,7 @@ index ac1713e..d65a903 100644
  
  #if __arm64__
  #if DEBUG
-@@ -661,9 +740,11 @@ arm_init(
+@@ -661,9 +744,11 @@ arm_init(
  
  	cpu_machine_idle_init(TRUE);
  	port_crumb = 8;
@@ -403,7 +407,7 @@ index ac1713e..d65a903 100644
  
  	/* Initialize the debug infrastructure system-wide and on the local core. */
  	pe_arm_debug_init_early(&BootCpuData);
-@@ -676,6 +757,7 @@ arm_init(
+@@ -676,6 +761,7 @@ arm_init(
  
  	ml_map_cpu_pio();
  	port_crumb = 10;
@@ -411,7 +415,7 @@ index ac1713e..d65a903 100644
  
  #if APPLE_ARM64_ARCH_FAMILY
  	configure_late_apple_regs(true);
-@@ -685,6 +767,7 @@ arm_init(
+@@ -685,6 +771,7 @@ arm_init(
  
  	cpu_timebase_init(TRUE);
  	port_crumb = 11;
@@ -419,7 +423,7 @@ index ac1713e..d65a903 100644
  
  #if KPERF
  	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
-@@ -693,6 +776,7 @@ arm_init(
+@@ -693,6 +780,7 @@ arm_init(
  
  	PE_init_cpu();
  	port_crumb = 12;
@@ -427,7 +431,7 @@ index ac1713e..d65a903 100644
  #if __arm64__
  	apt_msg_init();
  	apt_msg_init_cpu();
-@@ -717,6 +801,7 @@ arm_init(
+@@ -717,6 +805,7 @@ arm_init(
  	 */
  	__stack_chk_guard &= ~(0xFFULL << 8);
  	port_crumb = 13;
@@ -562,6 +566,18 @@ index 79d0bc1..ac5b387 100644
  #if !HAS_16BIT_ASID
  	bitmap_full(&asid_plru_bitmap[0], MAX_HW_ASIDS);
  	// Clear the highest-order bit, which corresponds to MAX_HW_ASIDS + 1
+diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
+index a17a07d..6136425 100644
+--- a/osfmk/arm/rtclock.c
++++ b/osfmk/arm/rtclock.c
+@@ -327,6 +327,7 @@ rtclock_intr(__unused unsigned int is_user_context)
+ 	struct arm_saved_state * regs;
+ 	unsigned int             user_mode;
+ 	uintptr_t                pc;
++	{ extern unsigned long linux64_dbg[16]; linux64_dbg[7]++; }	/* LINUX64 debug */
+ 
+ #if XNU_NATIVE_DWC3_CONSOLE
+ 	extern void unixnu_dwc3_poll(void);
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index f7f387e..c239600 100644
 --- a/osfmk/arm64/arm_vm_init.c
@@ -842,7 +858,7 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..6d2cc80 100644
+index d10d7a1..0052898 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -100,6 +100,7 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
@@ -866,7 +882,15 @@ index d10d7a1..6d2cc80 100644
  	if (unmask) {
  		/* Latch SW IRQ+FIQ counter prior to unmasking
  		 * interrupts.
-@@ -570,7 +577,9 @@ cpu_idle(void)
+@@ -506,6 +513,7 @@ cpu_idle(void)
+ 	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
+ 	bool idle_disallowed = false;
+ 
++	{ extern unsigned long linux64_dbg[16]; linux64_dbg[2]++; }	/* LINUX64 debug */
+ 	if (__improbable((!idle_enable))) {
+ 		idle_disallowed = true;
+ 		os_atomic_inc(&virt_idle_disallowed[0], relaxed);
+@@ -570,7 +578,9 @@ cpu_idle(void)
  		}
  	}
  
@@ -877,7 +901,7 @@ index d10d7a1..6d2cc80 100644
  		if (idle_wfe_poll && idle_proximate_timer_wfe == 1) {
  			/* Poll issuing WFEs until the expected
  			 * timer FIQ arrives.
-@@ -614,6 +623,27 @@ cpu_idle(void)
+@@ -614,6 +624,28 @@ cpu_idle(void)
  	cpc_cpu_transition(CPC_CPU_IDLE, cpu_data_ptr);
  #endif /* CONFIG_CPU_COUNTERS */
  
@@ -894,6 +918,7 @@ index d10d7a1..6d2cc80 100644
 +			if (deadline == 0 || deadline == EndOfAllTime || deadline < now) {
 +				deadline = now + 24000;	/* about 1 ms: re-check the run queue */
 +			}
++			{ extern unsigned long linux64_dbg[16]; linux64_dbg[3]++; }	/* LINUX64 debug */
 +			linux64_stage_arg(810, deadline);
 +			cpu_data_ptr->cpu_decrementer = -1;
 +			rtclock_intr(FALSE);
@@ -905,7 +930,7 @@ index d10d7a1..6d2cc80 100644
  	if (wfi) {
  #if !defined(APPLE_ARM64_ARCH_FAMILY)
  		platform_cache_idle_enter();
-@@ -735,20 +765,27 @@ cpu_idle_exit(boolean_t from_reset)
+@@ -735,20 +767,27 @@ cpu_idle_exit(boolean_t from_reset)
  void
  cpu_init(void)
  {
@@ -933,7 +958,7 @@ index d10d7a1..6d2cc80 100644
  		} else {
  			/*
  			 * We initialize non-boot CPUs here; the boot CPU is
-@@ -758,9 +795,11 @@ cpu_init(void)
+@@ -758,9 +797,11 @@ cpu_init(void)
  		}
  
  		do_cacheid();
@@ -945,7 +970,7 @@ index d10d7a1..6d2cc80 100644
  
  		cpu_info_p = cpuid_info();
  
-@@ -780,6 +819,7 @@ cpu_init(void)
+@@ -780,6 +821,7 @@ cpu_init(void)
  		}
  
  		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
@@ -1358,10 +1383,18 @@ index 13d2819..3ba4ba7 100644
  
  	mrs		x1, MPIDR_EL1
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index f456377..ef5a7f5 100644
+index f456377..1cafc2c 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -400,6 +400,15 @@ machine_idle(void)
+@@ -385,6 +385,7 @@ wfe_process_recommendation(void)
+ void
+ machine_idle(void)
+ {
++	{ extern unsigned long linux64_dbg[16]; linux64_dbg[1]++; }	/* LINUX64 debug */
+ 	/* Interrupts are expected to be masked on entry or re-entry via
+ 	 * Idle_load_context()
+ 	 */
+@@ -400,6 +401,15 @@ machine_idle(void)
  		 */
  		Idle_context();
  	}
@@ -1377,7 +1410,7 @@ index f456377..ef5a7f5 100644
  	__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
  }
  
-@@ -441,6 +450,14 @@ ml_get_interrupts_enabled(void)
+@@ -441,6 +451,14 @@ ml_get_interrupts_enabled(void)
  {
  	uint64_t        value;
  
@@ -1392,7 +1425,7 @@ index f456377..ef5a7f5 100644
  	MRS(value, "DAIF");
  	if ((value & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE) {
  		return FALSE;
-@@ -585,8 +602,12 @@ machine_lockdown(void)
+@@ -585,8 +603,12 @@ machine_lockdown(void)
  #else
  #endif
  
@@ -1405,7 +1438,7 @@ index f456377..ef5a7f5 100644
  
  #if CONFIG_KERNEL_INTEGRITY
  #if KERNEL_INTEGRITY_WT
-@@ -2529,6 +2550,13 @@ ml_set_decrementer(uint32_t dec_value)
+@@ -2529,6 +2551,13 @@ ml_set_decrementer(uint32_t dec_value)
  		}
  	}
  
@@ -1557,6 +1590,26 @@ index 2fc6931..dd59ae6 100644
  	if (fmt) {
  		struct console_printbuf_state info_data;
  
+diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
+index b2aae03..dcfaff8 100644
+--- a/osfmk/kern/sched_prim.c
++++ b/osfmk/kern/sched_prim.c
+@@ -3010,6 +3010,7 @@ thread_invoke(
+ 
+ 	thread_continue_t       continuation = self->continuation;
+ 	void                    *parameter   = self->parameter;
++	{ extern unsigned long linux64_dbg[16]; linux64_dbg[4]++; linux64_dbg[9] = (unsigned long)thread; }	/* LINUX64 debug */
+ 
+ 	struct recount_snap snap = { 0 };
+ 	recount_snapshot(&snap);
+@@ -6452,6 +6453,7 @@ processor_idle(
+ 	recount_processor_idle(&processor->pr_recount, &snap);
+ 
+ 	while (1) {
++		{ extern unsigned long linux64_dbg[16]; linux64_dbg[0]++; }	/* LINUX64 debug: idle loop */
+ 		/*
+ 		 * Ensure that updates to my processor and pset state,
+ 		 * made by the IPI source processor before sending the IPI,
 diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
 index 44b993c..d21911d 100644
 --- a/osfmk/prng/prng_random.c

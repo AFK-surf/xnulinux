@@ -290,6 +290,54 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	return ba;
 }
 
+
+/*
+ * Monitor: XNU runs with interrupts masked on its CPU, so when it spins nothing reaches Linux. A helper
+ * thread on another CPU prints XNU's debug counters (linux64_dbg, see the XNU patch) every 2 s.
+ */
+static volatile const unsigned long *xnu_dbg;
+static void *monitor;
+static int monitor_cpu = 1;
+module_param(monitor_cpu, int, 0444);
+
+static char *put_dec(char *p, unsigned long v)
+{
+	char t[24]; int n = 0;
+	do { t[n++] = '0' + v % 10; v /= 10; } while (v);
+	while (n) *p++ = t[--n];
+	return p;
+}
+
+static int monitor_fn(void *arg)
+{
+	static const char *const names[] = { "idleloop", "machine_idle", "cpu_idle", "host_idle", "invoke",
+		"-", "stage", "rtclock" };
+	int lines = 0;
+	(void)arg;
+	while (!fki_thread_should_stop()) {
+		fki_msleep(2000);
+		if (!xnu_dbg || lines >= 90)
+			continue;
+		char buf[256]; char *p = buf;
+		const char *h = "xnu: monitor";
+		while (*h) *p++ = *h++;
+		for (int i = 0; i < 8; i++) {
+			if (i == 5) continue;
+			*p++ = ' ';
+			for (const char *n = names[i]; *n; n++) *p++ = *n;
+			*p++ = '=';
+			p = put_dec(p, xnu_dbg[i]);
+		}
+		h = " thread=0x";
+		while (*h) *p++ = *h++;
+		for (int i = 44; i >= 0; i -= 4) *p++ = "0123456789abcdef"[(xnu_dbg[9] >> i) & 15];
+		*p = 0;
+		logs(buf);
+		lines++;
+	}
+	return 0;
+}
+
 static int enter_arm_init(struct boot_args_v2 *ba)
 {
 	struct fki_pac_keys saved; unsigned long c = fki_enter(&xnu_W.xnu_keys, &saved);
@@ -311,8 +359,13 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba; diag_va[3] = (u64_t)ba->deviceTreeP;
 	diag_va[4] = macho_sym(&img, "_port_crumb");
 	diag_va[5] = macho_sym(&img, "_strlen");
+	xnu_dbg = (const unsigned long *)macho_sym(&img, "_linux64_dbg");
+	if (xnu_dbg && monitor_cpu >= 0)
+		monitor = fki_thread_start(monitor_fn, 0, monitor_cpu, "xnu-monitor");
 	logs("xnu: entering arm_init");
 	long r = xnu_world_call(a_init, (unsigned long)ba);
+	fki_thread_stop(monitor);
+	monitor = 0;
 	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: arm_init returned (unexpected), r =", (u64_t)r);
 	return 0;
 }
