@@ -146,6 +146,7 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		logkv("xnu: probe boot args Version", ((volatile struct boot_args_v2 *)diag_va[2])->Version);
 		logkv("xnu: probe ADT word", *(volatile unsigned int *)diag_va[3]);
 		if (diag_va[4]) { volatile unsigned int *pc = (void *)diag_va[4]; unsigned v = *pc; *pc = v; logkv("xnu: probe port_crumb (rw)", v); }
+		if (diag_va[5]) { unsigned long l = ((unsigned long (*)(const char *))diag_va[5])("xnulinux"); logkv("xnu: probe exec strlen through XNU tables", l); }
 		logs("xnu: probes done");
 	}
 	if (stage == 999) {
@@ -274,6 +275,7 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 
 	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba; diag_va[3] = (u64_t)ba->deviceTreeP;
 	diag_va[4] = macho_sym(&img, "_port_crumb");
+	diag_va[5] = macho_sym(&img, "_strlen");
 	logs("xnu: entering arm_init");
 	long r = xnu_world_call(a_init, (unsigned long)ba);
 	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: arm_init returned (unexpected), r =", (u64_t)r);
