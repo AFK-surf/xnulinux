@@ -90,7 +90,7 @@ struct boot_args_v2 {			/* pexpert/arm64/boot.h layout */
 	u64_t bootFlags, memSizeActual;
 };
 
-static const char *cmdline = "debug=0x8 -v serial=0 startup_debug=1 vm_compression_limit=1572864";
+static const char *cmdline = "debug=0x8 -v -noprogress serial=0 startup_debug=1 vm_compression_limit=1572864";
 
 
 /* Walk XNU's kernel tables (inside its contiguous DRAM) for va and log the descriptors. */
