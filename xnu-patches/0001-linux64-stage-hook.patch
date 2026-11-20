@@ -1094,7 +1094,7 @@ index d10d7a1..15e2fb4 100644
  		cpc_cpu_transition(CPC_CPU_EARLY_INIT, cdp);
  #endif /* CONFIG_CPU_COUNTERS */
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
-index a191eb3..5017a8c 100644
+index a191eb3..127d057 100644
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
 @@ -185,7 +185,8 @@
@@ -1157,7 +1157,7 @@ index a191eb3..5017a8c 100644
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	load_general_registers	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
-@@ -444,3 +450,128 @@ LEXT(machine_set_current_thread)
+@@ -444,3 +450,126 @@ LEXT(machine_set_current_thread)
  
  
  /* vim: set ts=4: */
@@ -1243,8 +1243,6 @@ index a191eb3..5017a8c 100644
 +	add		x9, x9, _linux64_dbg@PAGEOFF
 +	mrs		x10, ESR_EL1
 +	str		x10, [x9, #112]
-+	mrs		x10, ELR_EL1
-+	str		x10, [x9, #120]
 +	b		.
 +
 +Llinux64_el0_entry:
@@ -1764,10 +1762,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..3baaa28 100644
+index d8f1b19..d340172 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,116 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,115 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1869,7 +1867,6 @@ index d8f1b19..3baaa28 100644
 +	linux64_dbg[12] = f->far;
 +	linux64_dbg[13] = f->pc;
 +	linux64_dbg[15] = 1;
-+	kprintf("linux64: EL0 exception esr 0x%llx far 0x%llx pc 0x%llx x16 %lld\n", f->esr, f->far, f->pc, f->x[16]);
 +	for (unsigned i = 0; i < 29; i++) {
 +		set_saved_state_reg(ss, i, f->x[i]);
 +	}
