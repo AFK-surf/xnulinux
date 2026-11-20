@@ -469,8 +469,8 @@ static int monitor_fn(void *arg)
 		while (*h) *p++ = *h++;
 		p = put_dec(p, xnu_dbg[10]);
 		{
-			static const char *const k[] = { " esr=0x", " far=0x", " pc=0x", " bad_esr=0x", " bad_elr=0x" };
-			for (int j = 0; j < 5; j++) {
+			static const char *const k[] = { " esr=0x", " far=0x", " pc=0x", " bad_esr=0x", " bad_elr=0x", " step=0x" };
+			for (int j = 0; j < 6; j++) {
 				for (h = k[j]; *h; h++) *p++ = *h;
 				for (int i = 44; i >= 0; i -= 4) *p++ = "0123456789abcdef"[(xnu_dbg[11 + j] >> i) & 15];
 			}
