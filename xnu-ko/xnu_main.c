@@ -124,7 +124,7 @@ static int run_m2a(void)
 
 	fki_random(seed, sizeof(seed));
 	adt_init(&a, base + off_dt, 0x10000);
-	adt_node(&a, 3, 2);				/* / */
+	adt_node(&a, 3, 3);				/* / */
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
@@ -143,6 +143,10 @@ static int run_m2a(void)
 	adt_prop_str(&a, "state", "running");
 	adt_prop_u32(&a, "reg", 0);
 	adt_prop_u64(&a, "timebase-frequency", fki_counter_frequency());
+	adt_node(&a, 3, 0);				/* /arm-io: no devices; XNU needs a nonzero SoC base */
+	adt_prop_str(&a, "name", "arm-io");
+	adt_prop_str(&a, "device_type", "linux64-io");
+	{ u64_t ranges[3] = { 0, 0x7000000000ULL, 0x10000000ULL }; adt_prop(&a, "ranges", ranges, sizeof(ranges)); }
 	if (a.err) { logs("xnu: ADT overflow"); return -12; }
 	u64_t dt_len = adt_size(&a);
 
