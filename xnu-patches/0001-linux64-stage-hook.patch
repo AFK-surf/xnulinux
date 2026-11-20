@@ -204,7 +204,7 @@ index 743117b..9dc298b 100644
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index f7f387e..58c32e1 100644
+index f7f387e..fc6b09e 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
 @@ -1089,7 +1089,9 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
@@ -364,7 +364,7 @@ index f7f387e..58c32e1 100644
  #endif
  
  #if KASAN
-@@ -2194,14 +2227,32 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2194,21 +2227,42 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	arm_vm_physmap_init(args);
  	port_crumb = 38;
@@ -384,6 +384,7 @@ index f7f387e..58c32e1 100644
 +		}
 +	}
  	port_crumb = 39;
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(6001); }
  
  #if XNU_MONITOR
  	ml_enable_monitor();
@@ -399,7 +400,40 @@ index f7f387e..58c32e1 100644
  
  	flush_mmu_tlb();
  	port_crumb = 40;
-@@ -2301,8 +2352,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(6002); }
+ 	kva_active = TRUE;
+ 	// global table pointers may need to be different due to physical aperture remapping
+ 	cpu_tte = (tt_entry_t*)(phystokv(cpu_ttep));
+ 	invalid_tte = (tt_entry_t*)(phystokv(invalid_ttep));
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(6003); }
+ 
+ 	// From here on out, we're off the bootstrap translation tables.
+ 
+@@ -2240,6 +2294,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 
+ 	/* Calculate the number of pages that belong to the kernelcache. */
+ 	vm_page_kernelcache_count = (unsigned int) (atop_64(arm_vm_kernelcache_phys_end - arm_vm_kernelcache_phys_start));
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(6004); }
+ 
+ 	if (arm_vm_auxkc_init()) {
+ 		if (segLOWESTROAuxKC < segLOWESTRO) {
+@@ -2258,6 +2313,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	}
+ 
+ 	sane_size = mem_size - (avail_start - gPhysBase);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(6005); }
+ 	max_mem = mem_size;
+ 	vm_kernel_slid_base = segLOWESTTEXT;
+ 	// vm_kernel_slide is set by arm_init()->arm_slide_rebase_and_sign_image()
+@@ -2274,6 +2330,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	}
+ 
+ 	dynamic_memory_begin = ROUND_TWIG(dynamic_memory_begin);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(6006); }
+ #if (defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR)) && defined(CONFIG_XNUPOST)
+ 	// reserve a 32MB region without permission overrides to use later for a CTRR unit test
+ 	{
+@@ -2301,8 +2358,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
      }
  #endif
  #endif
@@ -410,7 +444,7 @@ index f7f387e..58c32e1 100644
  
  	disable_preemption();
  
-@@ -2431,6 +2484,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2431,6 +2490,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	patch_low_glo_static_region(args->topOfKernelData, avail_start - args->topOfKernelData);
  	enable_preemption();
  	port_crumb = 43;

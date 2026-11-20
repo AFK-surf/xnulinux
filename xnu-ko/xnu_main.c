@@ -172,7 +172,7 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		{ 230, "arm_vm_init returned" }, { 300, "kprintf initialized" },
 	};
 	if (stage >= 1000) {
-		logkv("xnu: XNU sub-stage", stage - 5000);
+		logkv("xnu: XNU sub-stage", stage);
 		return stop >= 1000 && (long)stage >= stop;
 	}
 	const char *what = "?";
