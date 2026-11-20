@@ -1,18 +1,20 @@
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..ade9738 100644
+index ac1713e..2aac81e 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -228,6 +228,9 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
+@@ -228,6 +228,11 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
  extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
  extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
  
 +/* LINUX64 (xnulinux): set by xnu.ko; see linux64_stage(). */
 +uintptr_t linux64_hook;
++/* LINUX64: the current thread pointer (TPIDR_EL1 on Apple/BCM2837 boards). Single CPU for now. */
++unsigned long linux64_tpidr;
 +
  static void
  arm_slide_rebase_and_sign_image(void)
  {
-@@ -285,10 +288,15 @@ arm_slide_rebase_and_sign_image(void)
+@@ -285,10 +290,15 @@ arm_slide_rebase_and_sign_image(void)
  		 * using hardcoded kernel link address
  		 */
  		slide = (uintptr_t)k_mh - VM_KERNEL_LINK_ADDRESS;
@@ -29,7 +31,7 @@ index ac1713e..ade9738 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +349,27 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +351,27 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
@@ -57,7 +59,7 @@ index ac1713e..ade9738 100644
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
-@@ -361,6 +390,7 @@ arm_init(
+@@ -361,6 +392,7 @@ arm_init(
  	port_crumb = 100;
  	arm_slide_rebase_and_sign_image();
  	port_crumb = 101;
@@ -65,7 +67,7 @@ index ac1713e..ade9738 100644
  
  	arm_static_if_init(args);
  	port_crumb = 102;
-@@ -382,6 +412,7 @@ arm_init(
+@@ -382,6 +414,7 @@ arm_init(
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	boot_progress_init();
@@ -73,7 +75,7 @@ index ac1713e..ade9738 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -475,6 +506,7 @@ arm_init(
+@@ -475,6 +508,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -81,7 +83,7 @@ index ac1713e..ade9738 100644
  
  
  	boot_cpu_id = ml_get_boot_cpu_number();
-@@ -511,6 +543,7 @@ arm_init(
+@@ -511,6 +545,7 @@ arm_init(
  
  	kernel_debug_string_early("kernel_startup_bootstrap");
  	kernel_startup_bootstrap();
@@ -89,7 +91,7 @@ index ac1713e..ade9738 100644
  
  	/*
  	 * Initialize the timer callout world
-@@ -585,6 +618,7 @@ arm_init(
+@@ -585,6 +620,7 @@ arm_init(
  	gDramSize = *dram_size;
  	pmap_first_pnum = (ppnum_t)atop(gDramBase);
  
@@ -97,6 +99,479 @@ index ac1713e..ade9738 100644
  	boot_progress_stage("arm_vm_init enter");
  	port_crumb = 1;
  	arm_vm_init(xmaxmem, args);
+diff --git a/osfmk/arm/cpu_data.h b/osfmk/arm/cpu_data.h
+index 743117b..999d5bc 100644
+--- a/osfmk/arm/cpu_data.h
++++ b/osfmk/arm/cpu_data.h
+@@ -61,8 +61,9 @@ current_thread_fast(void)
+ 	 *
+ 	 * and ignores the "attribute const", so do it the "dumb" way.
+ 	 */
+-	unsigned long result;
+-	__asm__ ("mrs %0, TPIDR_EL1" : "=r" (result));
++	/* LINUX64 (xnulinux): TPIDR_EL1 belongs to Linux; the thread pointer lives in memory. */
++	extern unsigned long linux64_tpidr;
++	unsigned long result = linux64_tpidr;
+ 	return __unsafe_forge_single(thread_t, result);
+ #else
+ 	// TPIDRPRW
+@@ -100,8 +101,8 @@ current_thread_volatile(void)
+ 	 * The mrc used for arm32 should be treated as volatile however.
+ 	 */
+ #if defined(__arm64__)
+-	unsigned long result;
+-	__asm__ volatile ("mrs %0, TPIDR_EL1" : "=r" (result));
++	extern unsigned long linux64_tpidr;
++	unsigned long result = *(volatile unsigned long *)&linux64_tpidr;
+ 	return __unsafe_forge_single(thread_t, result);
+ #else
+ 	// TPIDRPRW
+diff --git a/osfmk/arm64/asm.h b/osfmk/arm64/asm.h
+index 84deb3f..767b8f8 100644
+--- a/osfmk/arm64/asm.h
++++ b/osfmk/arm64/asm.h
+@@ -135,7 +135,8 @@
+ .endmacro
+ 
+ .macro READ_THREAD
+-	mrs $0, TPIDR_EL1
++	adrp $0, _linux64_tpidr@PAGE
++	ldr $0, [$0, _linux64_tpidr@PAGEOFF]
+ .endmacro
+ 
+ .macro BRANCH_EXTERN
+diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
+index a191eb3..571ea46 100644
+--- a/osfmk/arm64/cswitch.s
++++ b/osfmk/arm64/cswitch.s
+@@ -185,7 +185,8 @@
+  *  arg2 - Scratch register
+  */
+ .macro	set_thread_registers
+-	msr		TPIDR_EL1, $0						// Write new thread pointer to TPIDR_EL1
++	adrp	$1, _linux64_tpidr@PAGE				// LINUX64: thread pointer lives in memory, not TPIDR_EL1
++	str		$0, [$1, _linux64_tpidr@PAGEOFF]
+ 	ldr		$1, [$0, ACT_CPUDATAP]
+ 	str		$0, [$1, CPU_ACTIVE_THREAD]
+ 
+@@ -333,7 +334,8 @@ LEXT(machine_load_context)
+ 
+ LEXT(Call_continuation)
+ 	ARM64_PROLOG
+-	mrs		x4, TPIDR_EL1						// Get the current thread pointer
++	adrp		x4, _linux64_tpidr@PAGE
++	ldr		x4, [x4, _linux64_tpidr@PAGEOFF]						// Get the current thread pointer
+ 
+ 	/* ARM64_TODO arm loads the kstack top instead of arg4. What should we use? */
+ 	LOAD_KERN_STACK_TOP	dst=x5, src=x4, tmp=x6
+@@ -359,7 +361,8 @@ LEXT(Call_continuation)
+ #else
+ 	blr		x20									// Branch to the continuation
+ #endif
+-	mrs		x0, TPIDR_EL1						// Get the current thread pointer
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]						// Get the current thread pointer
+ 	b		EXT(thread_terminate)				// Kill the thread
+ 
+ 
+@@ -394,7 +397,8 @@ Lswitch_threads:
+ 
+ LEXT(Shutdown_context)
+ 	ARM64_PROLOG
+-	mrs		x10, TPIDR_EL1							// Get thread pointer
++	adrp		x10, _linux64_tpidr@PAGE
++	ldr		x10, [x10, _linux64_tpidr@PAGEOFF]							// Get thread pointer
+ 	LOAD_KERN_STACK_TOP	dst=x11, src=x10, tmp=x12	// Get the top of the kernel stack
+ 	save_general_registers	x11, 12
+ 	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)	// Disable interrupts
+@@ -412,7 +416,8 @@ LEXT(Shutdown_context)
+ 
+ LEXT(Idle_context)
+ 	ARM64_PROLOG
+-	mrs		x0, TPIDR_EL1						// Get thread pointer
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]						// Get thread pointer
+ 	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
+ 	save_general_registers	x1, 2
+ 	LOAD_INT_STACK_THREAD	dst=x2, src=x0, tmp=x1
+@@ -429,7 +434,8 @@ LEXT(Idle_context)
+ 
+ LEXT(Idle_load_context)
+ 	ARM64_PROLOG
+-	mrs		x0, TPIDR_EL1						// Get thread pointer
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]						// Get thread pointer
+ 	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
+ 	load_general_registers	x1, 2
+ 	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
+diff --git a/osfmk/arm64/exception_asm.h b/osfmk/arm64/exception_asm.h
+index b0772a7..ea5e679 100644
+--- a/osfmk/arm64/exception_asm.h
++++ b/osfmk/arm64/exception_asm.h
+@@ -299,7 +299,8 @@ Lspill_registers_skip_elr_far_\@:
+  * SP0 is expected to already be selected.  Clobbers x1 and tmp.
+  */
+ .macro SWITCH_TO_INT_STACK	tmp
+-	mrs		x1, TPIDR_EL1
++	adrp		x1, _linux64_tpidr@PAGE
++	ldr		x1, [x1, _linux64_tpidr@PAGEOFF]
+ 	LOAD_INT_STACK_THREAD	dst=x1, src=x1, tmp=\tmp
+ 	mov		sp, x1			// Set the stack pointer to the interrupt stack
+ .endmacro
+diff --git a/osfmk/arm64/locore.s b/osfmk/arm64/locore.s
+index 13d2819..3ba4ba7 100644
+--- a/osfmk/arm64/locore.s
++++ b/osfmk/arm64/locore.s
+@@ -144,7 +144,8 @@
+ 
+ #endif /* DEVELOPMENT || DEBUG */
+ #if CONFIG_XNUPOST
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 	/*
+ 	 * If hitting this with a null TPIDR, it's likely that this was an unexpected
+ 	 * exception in early boot rather than an expected one as a part of a test.
+@@ -257,7 +258,8 @@ Lbegin_panic_lockdown_continue_\@:
+ 	 * Find the kernelcache table for the exception vectors by accessing
+ 	 * the per-CPU data.
+ 	 */
+-	mrs		x18, TPIDR_EL1
++	adrp		x18, _linux64_tpidr@PAGE
++	ldr		x18, [x18, _linux64_tpidr@PAGEOFF]
+ 	ldr		x18, [x18, ACT_CPUDATAP]
+ 	ldr		x18, [x18, CPU_EXC_VECTORS]
+ 
+@@ -354,7 +356,8 @@ Lbegin_panic_lockdown_continue_\@:
+ 	str		x1, [x0, #24]						// spsr
+ 	mrs		x1, SP_EL0
+ 	str		x1, [x0, #32]						// sp
+-	mrs		x1, TPIDR_EL1
++	adrp		x1, _linux64_tpidr@PAGE
++	ldr		x1, [x1, _linux64_tpidr@PAGEOFF]
+ 	str		x1, [x0, #40]						// tpidr (thread pointer)
+ 
+ 	/* Get timestamp */
+@@ -396,7 +399,8 @@ Lbegin_panic_lockdown_continue_\@:
+ 	cmp		x1, x2								// If we have a data abort, we need to
+ 	b.ne	Lvalid_stack_\@						// ...validate the stack pointer
+ 	mrs		x0, SP_EL0					// Get SP_EL0
+-	mrs		x1, TPIDR_EL1						// Get thread pointer
++	adrp		x1, _linux64_tpidr@PAGE
++	ldr		x1, [x1, _linux64_tpidr@PAGEOFF]						// Get thread pointer
+ 	/*
+ 	 * Check for either a NULL TPIDR or a NULL kernel stack, both of which
+ 	 * are expected in early boot, but will cause recursive faults if not
+@@ -490,7 +494,8 @@ Lvalid_stack_\@:
+  * Clobbers NZCV.
+  */
+ .macro CHECK_EXCEPTION_STACK invalid_stack_label
+-	mrs		x18, TPIDR_EL1					// Get thread pointer
++	adrp		x18, _linux64_tpidr@PAGE
++	ldr		x18, [x18, _linux64_tpidr@PAGEOFF]					// Get thread pointer
+ 	/*
+ 	 * The thread pointer might be invalid during early boot.
+ 	 * Return zero in x18 to indicate that we failed to execute the check.
+@@ -631,7 +636,8 @@ Lel0_serror_vector_64:
+ 	// SWITCH_TO_INT_STACK requires a clobberable tmp register, but at this
+ 	// point in the exception vector we can't spare the extra GPR.  Instead note
+ 	// that EL1_SP0_VECTOR ends with x0 == sp and use this to unclobber x0.
+-	mrs		x1, TPIDR_EL1
++	adrp		x1, _linux64_tpidr@PAGE
++	ldr		x1, [x1, _linux64_tpidr@PAGEOFF]
+ 	LOAD_INT_STACK_THREAD	dst=x1, src=x1, tmp=x0
+ 	mov		x0, sp
+ 	mov		sp, x1
+@@ -701,7 +707,8 @@ Lkernel_stack_valid:
+ 	 * Slow path: check/map redzone.
+ 	 * Skip redzone mapping if preemption is disabled (e.g. possibly in SPTM context)
+ 	 */
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 	ldr		w0, [x0, ACT_PREEMPT_CNT]
+ 	cbnz		w0, Lel1_sp0_redzone_done_\@			// Preemption disabled, skip redzone
+ 
+@@ -822,7 +829,8 @@ Lel1_sp1_synchronous_vector_continue:
+ 	 *
+ 	 * Ensure that we actually performed the check on a legitmate value now.
+ 	 */
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 	LOAD_EXCEP_STACK_THREAD dst=x0, src=x0, tmp=x1
+ 	cmp		x0, x18
+ 	/* If we aren't equal, something is very wrong and we should lockdown. */
+@@ -875,7 +883,8 @@ LEXT(el1_sp1_synchronous_vector_long_spill_failed)
+ 	/* Macro returns x0=1 if it performed a simulated lockdown */
+ 	cbz		x0, 0f
+ 	/* This was a test; return to fault handler so they can fixup the system. */
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 	ldr		x16, [x0, TH_EXPECTED_FAULT_HANDLER]
+ #if __has_feature(ptrauth_calls)
+ 	movk	x17, #TH_EXPECTED_FAULT_HANDLER_DIVERSIFIER
+@@ -944,7 +953,8 @@ el1_sp1_serror_vector_long:
+ #if __ARM_KERNEL_PROTECT__
+ 	mov		x18, #0 						// Zero x18 to avoid leaking data to user SS
+ #endif
+-	mrs		x0, TPIDR_EL1						// Load the thread register
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]						// Load the thread register
+ 	LOAD_USER_PCB	dst=x0, src=x0, tmp=x1		// Load the user context pointer
+ 	mrs		x1, SP_EL0							// Load the user stack pointer
+ 	str		x1, [x0, SS64_SP]					// Store the user stack pointer in the user PCB
+@@ -953,7 +963,8 @@ el1_sp1_serror_vector_long:
+ 	msr		SPSel, #0							// Switch to SP0
+ 	stp		x0, x1, [sp, SS64_X0]				// Save x0, x1 to the user PCB
+ 	stp		x2, x3, [sp, SS64_X2]				// Save x2, x3 to the user PCB
+-	mrs		x1, TPIDR_EL1						// Load the thread register
++	adrp		x1, _linux64_tpidr@PAGE
++	ldr		x1, [x1, _linux64_tpidr@PAGEOFF]						// Load the thread register
+ 
+ 
+ 
+@@ -1321,7 +1332,8 @@ Lblocked_user_sync_exception:
+  *  sp - Interrupt stack for the current CPU
+  */
+ .macro BEGIN_INTERRUPT_HANDLER
+-	mrs		x22, TPIDR_EL1
++	adrp		x22, _linux64_tpidr@PAGE
++	ldr		x22, [x22, _linux64_tpidr@PAGEOFF]
+ 	ldr		x23, [x22, ACT_CPUDATAP]			// Get current cpu
+ 	/* Update IRQ count; CPU_STAT_IRQ.* is required to be accurate for the WFE idle sequence  */
+ 	ldr		w1, [x23, CPU_STAT_IRQ]
+@@ -1529,7 +1541,8 @@ LEXT(fleh_check_map_redzone)
+ 	PUSH_FRAME
+ 
+ 	/* Check if we have a valid thread */
+-	mrs		x1, TPIDR_EL1
++	adrp		x1, _linux64_tpidr@PAGE
++	ldr		x1, [x1, _linux64_tpidr@PAGEOFF]
+ 	cbz		x1, Lfleh_check_map_redzone_skip
+ 
+ 	/* Get kernel stack bottom */
+@@ -1671,7 +1684,8 @@ Lfleh_synchronous_sp1_skip_panic_lockdown:
+ 	 * still on init_thread) and we try to panic(), we'll end up in an infinite
+ 	 * nested exception, so just stop here instead to preserve the call stack.
+ 	 */
+-	mrs		x9, TPIDR_EL1
++	adrp		x9, _linux64_tpidr@PAGE
++	ldr		x9, [x9, _linux64_tpidr@PAGEOFF]
+ 	cbz		x9, 0f
+ 	ldr		x9, [x9, TH_KSTACKPTR]
+ 	cbz		x9, 0f
+@@ -1742,7 +1756,8 @@ LEXT(xnu_return_to_gl2)
+ 	 * If thread->txm_thread_stack is set, we need to tell SPTM dispatch to 
+ 	 * resume the TXM thread in x0.
+ 	 */
+-	mrs		x8, TPIDR_EL1
++	adrp		x8, _linux64_tpidr@PAGE
++	ldr		x8, [x8, _linux64_tpidr@PAGEOFF]
+ 	ldr		x8, [x8, TH_TXM_THREAD_STACK]
+ 	cbz		x8, 1f
+ 	mov		x0, x8
+@@ -1756,7 +1771,8 @@ LEXT(xnu_return_to_gl2)
+ 	 * we need to tell SPTM dispatch to resume the SK thread.
+ 	 */
+ 1:
+-	mrs		x8, TPIDR_EL1
++	adrp		x8, _linux64_tpidr@PAGE
++	ldr		x8, [x8, _linux64_tpidr@PAGEOFF]
+ 	ldr		x9, [x8, TH_EXCLAVES_INTSTATE]
+ 	and		x9, x9, TH_EXCLAVES_EXECUTION
+ 	cbz		x9, 1f
+@@ -1783,7 +1799,8 @@ LEXT(return_to_kernel)
+ 	UNWIND_PROLOGUE
+ 	RETURN_TO_KERNEL_UNWIND
+ 	tbnz	w0, #DAIF_IRQF_SHIFT, exception_return  // Skip AST check if IRQ disabled
+-	mrs		x3, TPIDR_EL1                           // Load thread pointer
++	adrp		x3, _linux64_tpidr@PAGE
++	ldr		x3, [x3, _linux64_tpidr@PAGEOFF]                           // Load thread pointer
+ 	ldr		w1, [x3, ACT_PREEMPT_CNT]               // Load preemption count
+ 	msr		DAIFSet, #DAIFSC_ALL                    // Disable exceptions
+ 	cbnz	x1, exception_return_unint_tpidr_x3     // If preemption disabled, skip AST check
+@@ -1816,7 +1833,8 @@ LEXT(thread_bootstrap_return)
+ 	.globl EXT(arm64_thread_exception_return)
+ LEXT(arm64_thread_exception_return)
+ 	ARM64_PROLOG
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 	LOAD_USER_PCB	dst=x21, src=x0, tmp=x28
+ 	mov		x28, xzr
+ 
+@@ -1835,7 +1853,8 @@ check_user_asts:
+ 	bl		EXT(__asan_handle_no_return)
+ 	POP_FRAME_WITHOUT_LR
+ #endif /* KASAN_TBI */
+-	mrs		x3, TPIDR_EL1					// Load thread pointer
++	adrp		x3, _linux64_tpidr@PAGE
++	ldr		x3, [x3, _linux64_tpidr@PAGEOFF]					// Load thread pointer
+ 
+ 	movn		w2, #0
+ 	str		w2, [x3, TH_IOTIER_OVERRIDE]			// Reset IO tier override to -1 before returning to user
+@@ -1927,7 +1946,8 @@ no_asts:
+ 	PUSH_FRAME
+ 	bl		EXT(arm_debug_set)					// Establish thread debug state in live regs
+ 	POP_FRAME_WITHOUT_LR
+-	mrs		x3, TPIDR_EL1						// Reload thread pointer
++	adrp		x3, _linux64_tpidr@PAGE
++	ldr		x3, [x3, _linux64_tpidr@PAGEOFF]						// Reload thread pointer
+ 	ldr		x4, [x3, ACT_CPUDATAP]				// Reload CPU data pointer
+ L_skip_user_set_debug_state:
+ 
+@@ -1937,7 +1957,8 @@ L_skip_user_set_debug_state:
+ exception_return:
+ 	msr		DAIFSet, #DAIFSC_ALL				// Disable exceptions
+ exception_return_unint:
+-	mrs		x3, TPIDR_EL1					// Load thread pointer
++	adrp		x3, _linux64_tpidr@PAGE
++	ldr		x3, [x3, _linux64_tpidr@PAGEOFF]					// Load thread pointer
+ exception_return_unint_tpidr_x3:
+ 	mov		sp, x21						// Reload the pcb pointer
+ 
+@@ -2006,7 +2027,9 @@ Lexception_return_restore_registers:
+ 	// SPSR_EL1.M != EL0: no SME state to restore
+ 	bne		Lno_sme_saved_state
+ 
+-	mrs		x3, TPIDR_EL1
++	adrp		x3, _linux64_tpidr@PAGE
++
++	ldr		x3, [x3, _linux64_tpidr@PAGEOFF]
+ 	add		x3, x3, ACT_UMATRIX_HDR
+ 	ldr		x2, [x3]
+ 	cbz		x2, Lno_sme_saved_state
+@@ -2071,7 +2094,8 @@ Lno_gcr_mask_el0_reset:
+ #endif /* HAS_MTE */
+ 	// If sync_on_cswitch and ERET is not a CSE, issue an ISB now. Unconditionally clear the
+ 	// sync_on_cswitch flag.
+-	mrs		x1, TPIDR_EL1
++	adrp		x1, _linux64_tpidr@PAGE
++	ldr		x1, [x1, _linux64_tpidr@PAGEOFF]
+ 	ldr		x1, [x1, ACT_CPUDATAP]
+ 
+ 	// Redefined for backporting.
+@@ -2095,7 +2119,8 @@ Lno_gcr_mask_el0_reset:
+ 	mrs		x2, SPSR_EL1
+ 	tst		x2, #(PSR64_MODE_EL_MASK)
+ 	b.ne	1f
+-	mrs		x2, TPIDR_EL1
++	adrp		x2, _linux64_tpidr@PAGE
++	ldr		x2, [x2, _linux64_tpidr@PAGEOFF]
+ 	ldr		w2, [x2, TH_ARM_MACHINE_FLAGS]
+ 	tbz		w2, #ARM_MACHINE_THREAD_DISABLE_USER_JOP_SHIFT, 1f
+ 	mrs		x2, SCTLR_EL1
+@@ -2184,7 +2209,8 @@ user_take_ast:
+ 	.text
+ 	.align 2
+ preempt_underflow:
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 	str		x0, [sp, #-16]!						// We'll print thread pointer
+ 	adr		x0, L_underflow_str					// Format string
+ 	CALL_EXTERN panic							// Game over
+@@ -2197,7 +2223,8 @@ L_underflow_str:
+ 	.text
+ 	.align 2
+ preempt_count_notzero:
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 	str		x0, [sp, #-16]!						// We'll print thread pointer
+ 	ldr		w0, [x0, ACT_PREEMPT_CNT]
+ 	str		w0, [sp, #8]
+@@ -2457,7 +2484,8 @@ ppl_exit:
+ 	add		x15, x15, x10, lsl #32
+ 
+ 	/* Load the preemption count. */
+-	mrs		x10, TPIDR_EL1
++	adrp		x10, _linux64_tpidr@PAGE
++	ldr		x10, [x10, _linux64_tpidr@PAGEOFF]
+ 	ldr		w12, [x10, ACT_PREEMPT_CNT]
+ 
+ 	/* Detect underflow */
+@@ -2493,7 +2521,8 @@ Lno_preempt_underflow:
+ 	mov		w12, #0
+ 
+ 	/* Restore the thread pointer into x10. */
+-	mrs		x10, TPIDR_EL1
++	adrp		x10, _linux64_tpidr@PAGE
++	ldr		x10, [x10, _linux64_tpidr@PAGEOFF]
+ 
+ Lskip_collect_measurement:
+ #endif /* SCHED_HYGIENE_DEBUG */
+@@ -2743,7 +2772,8 @@ LEXT(_sptm_pre_entry_hook)
+ 	stp		x6, x7, [sp, #0x30]
+ 
+ 	/* Increase the preemption count. */
+-	mrs		x9, TPIDR_EL1
++	adrp		x9, _linux64_tpidr@PAGE
++	ldr		x9, [x9, _linux64_tpidr@PAGEOFF]
+ 	cbz		x9, Lskip_preemption_check_sptmhook
+ 	ldr		w10, [x9, ACT_PREEMPT_CNT]
+ 	add		w10, w10, #1
+@@ -2803,7 +2833,8 @@ LEXT(_sptm_post_exit_hook)
+ 
+ 
+ 	/* Load the preemption count. */
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 	cbz		x0, Lsptm_skip_ast_taken_sptmhook
+ 	ldr		w12, [x0, ACT_PREEMPT_CNT]
+ 
+@@ -2834,7 +2865,8 @@ Lno_preempt_underflow_sptmhook:
+ 	mov		w12, #0
+ 
+ 	/* Restore x0 as the thread pointer */
+-	mrs		x0, TPIDR_EL1
++	adrp		x0, _linux64_tpidr@PAGE
++	ldr		x0, [x0, _linux64_tpidr@PAGEOFF]
+ 
+ Lskip_collect_measurement_sptmhook:
+ #endif /* SCHED_HYGIENE_DEBUG */
+@@ -2916,7 +2948,9 @@ LEXT(panic_lockdown_record_debug_data)
+ 	mov		x1, sp
+ 	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_SP]
+ 
+-	mrs		x1, TPIDR_EL1
++	adrp		x1, _linux64_tpidr@PAGE
++
++	ldr		x1, [x1, _linux64_tpidr@PAGEOFF]
+ 	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_TPIDR]
+ 
+ 	mrs		x1, MPIDR_EL1
+diff --git a/osfmk/arm64/machine_routines_asm.s b/osfmk/arm64/machine_routines_asm.s
+index 96650a0..54d80e5 100644
+--- a/osfmk/arm64/machine_routines_asm.s
++++ b/osfmk/arm64/machine_routines_asm.s
+@@ -95,7 +95,8 @@ Lcre_start_\@:
+ 
+ 
+ .macro LOAD_CPU_JOP_KEY	dst, tmp
+-	mrs		\tmp, TPIDR_EL1
++	adrp		\tmp, _linux64_tpidr@PAGE
++	ldr		\tmp, [\tmp, _linux64_tpidr@PAGEOFF]
+ 	ldr		\tmp, [\tmp, ACT_CPUDATAP]
+ 	ldr		\dst, [\tmp, CPU_JOP_KEY]
+ .endmacro
+diff --git a/osfmk/arm64/pac_asm.h b/osfmk/arm64/pac_asm.h
+index d211433..dc247da 100644
+--- a/osfmk/arm64/pac_asm.h
++++ b/osfmk/arm64/pac_asm.h
+@@ -216,7 +216,8 @@
+  * Expects interrupts to be disabled.
+  */
+ .macro PACGA_IRG_RESEED x, y, z
+-	mrs     \x, TPIDR_EL1
++	adrp     \x, _linux64_tpidr@PAGE
++	ldr     \x, [\x, _linux64_tpidr@PAGEOFF]
+ 	ldr     \x, [\x, ACT_CPUDATAP]
+ 
+ 	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 index 0eae1f6..9a4e240 100644
 --- a/osfmk/kern/debug.c
