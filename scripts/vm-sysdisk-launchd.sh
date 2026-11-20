@@ -3,7 +3,8 @@
 # local) at /sbin/launchd of the system disk; MODE=test puts the test init back.
 set -euo pipefail
 IMG=${IMG:-/var/tmp/sys.img}
-sudo mkdir -p /mnt/sys; sudo mount -o loop -t hfsplus $IMG /mnt/sys
+sudo fsck.hfsplus -fy $IMG 2>&1 | tail -1
+sudo mkdir -p /mnt/sys; sudo mount -o loop,rw -t hfsplus $IMG /mnt/sys
 if [ "${MODE:-launchd}" = launchd ]; then
   sudo tar xf /var/tmp/launchd.tar -C /mnt/sys --warning=no-unknown-keyword
   sudo mkdir -p /mnt/sys/private/var/db /mnt/sys/private/var/run /mnt/sys/private/var/log /mnt/sys/private/etc /mnt/sys/Library
