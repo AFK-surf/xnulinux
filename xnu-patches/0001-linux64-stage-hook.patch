@@ -1581,6 +1581,49 @@ index d211433..dc247da 100644
  	ldr     \x, [\x, ACT_CPUDATAP]
  
  	// No need for atomic - These are per CPU and interrupts are disabled
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index d8f1b19..29daae4 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -3646,3 +3646,38 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+ }
+ __SECURITY_STACK_DISALLOWED_POP
+ #endif /* CONFIG_SPTM */
++
++/*
++ * LINUX64 (xnulinux): a data or instruction abort on an XNU kernel address, taken in Linux's vectors and forwarded by
++ * the host (xnu.ko through FKI). Does what handle_kernel_abort does for a kernel-map fault: the pmap fast path for
++ * permission/access-flag faults, then vm_fault. Returns KERN_SUCCESS when the access can be retried.
++ */
++kern_return_t linux64_kernel_fault(uint64_t far, uint64_t esr);
++kern_return_t
++linux64_kernel_fault(uint64_t far, uint64_t esr)
++{
++	uint32_t ec = (uint32_t)((esr >> 26) & 0x3f);
++	fault_status_t fault_code = (fault_status_t)(esr & 0x3f);
++	vm_prot_t fault_type = VM_PROT_READ;
++	kern_return_t result = KERN_FAILURE;
++
++	if (ec == 0x21) {               /* instruction abort, current EL */
++		fault_type = VM_PROT_READ | VM_PROT_EXECUTE;
++	} else if (ec == 0x25) {        /* data abort, current EL */
++		if (esr & (1u << 6)) {  /* WnR */
++			fault_type = VM_PROT_READ | VM_PROT_WRITE;
++		}
++	} else {
++		return KERN_FAILURE;
++	}
++	if (!is_vm_fault(fault_code) || !VM_KERNEL_ADDRESS(far)) {
++		return KERN_FAILURE;
++	}
++	if (!is_translation_fault(fault_code)) {
++		result = arm_fast_fault(kernel_map->pmap, far, fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), FALSE);
++		if (result == KERN_SUCCESS) {
++			return result;
++		}
++	}
++	return vm_fault(kernel_map, far, fault_type, FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0);
++}
 diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
 index 4224c9d..4a1fe94 100644
 --- a/osfmk/kern/assert.h
@@ -1776,6 +1819,64 @@ index b2aae03..3b2058f 100644
 +		}
 +	}
 +}
+diff --git a/osfmk/kern/stack.c b/osfmk/kern/stack.c
+index 1111ccf..7a3c00b 100644
+--- a/osfmk/kern/stack.c
++++ b/osfmk/kern/stack.c
+@@ -185,6 +185,24 @@ STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, stack_init);
+  *	block.
+  */
+ 
++/*
++ * LINUX64 (xnulinux): an exception taken on an XNU kernel stack enters Linux's vectors, whose overflow check wants
++ * bit THREAD_SHIFT (14) of sp clear, as on Linux's 2*THREAD_SIZE-aligned stacks. Hosted, each stack starts on a
++ * 32 KiB boundary: the allocation is 32 KiB aligned and the stack sits 32 KiB above its start (guard pages first,
++ * then unused wired pages, then the stack, then the upper guard page).
++ */
++extern uintptr_t linux64_hook;
++static inline vm_offset_t
++linux64_stack_lead(void)
++{
++	return linux64_hook ? 0x8000 : ptoa(2);
++}
++static inline vm_offset_t
++linux64_stack_mask(void)
++{
++	return linux64_hook ? (stack_addr_mask | 0x7fff) : stack_addr_mask;
++}
++
+ static vm_offset_t
+ stack_alloc_internal(void)
+ {
+@@ -218,7 +236,7 @@ stack_alloc_internal(void)
+ 		 */
+ 
+ 		kernel_memory_allocate(kernel_map, &stack,
+-		    kernel_stack_size + ptoa(3), stack_addr_mask,
++		    kernel_stack_size + linux64_stack_lead() + ptoa(1), linux64_stack_mask(),
+ 		    flags, VM_KERN_MEMORY_STACK);
+ 
+ 		/*
+@@ -226,7 +244,7 @@ stack_alloc_internal(void)
+ 		 * guard pages.  Skip past them to get the actual stack base address.
+ 		 */
+ 
+-		stack += ptoa(2);
++		stack += linux64_stack_lead();
+ 	}
+ 	return stack;
+ }
+@@ -389,8 +407,8 @@ stack_collect(void)
+ 			stack = (vm_offset_t)vm_map_trunc_page(
+ 				stack,
+ 				VM_MAP_PAGE_MASK(kernel_map));
+-			stack -= ptoa(2);
+-			kmem_free(kernel_map, stack, kernel_stack_size + ptoa(3),
++			stack -= linux64_stack_lead();
++			kmem_free(kernel_map, stack, kernel_stack_size + linux64_stack_lead() + ptoa(1),
+ 			    KMF_GUARD_FIRST | KMF_GUARD_LAST | KMF_GUARD_STACK);
+ 			stack = 0;
+ 
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
 index a004862..8d4f8a1 100644
 --- a/osfmk/kern/startup.c
