@@ -277,6 +277,8 @@ unsigned long fki_regs_lr(void *regs) { return ((struct pt_regs *)regs)->regs[30
 EXPORT_SYMBOL(fki_regs_lr);
 void fki_regs_set_pc(void *regs, unsigned long pc) { instruction_pointer_set((struct pt_regs *)regs, pc); }
 EXPORT_SYMBOL(fki_regs_set_pc);
+void fki_regs_set_reg(void *regs, unsigned int n, unsigned long v) { if (n < 31) ((struct pt_regs *)regs)->regs[n] = v; }
+EXPORT_SYMBOL(fki_regs_set_reg);
 
 static struct kprobe fki_fault_kp = { .symbol_name = "__do_kernel_fault", .pre_handler = fki_fault_pre };
 static int fki_fault_registered;
