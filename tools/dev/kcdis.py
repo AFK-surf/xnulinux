@@ -13,7 +13,7 @@ for _ in range(ncmds):
             words = struct.unpack('<%dI' % (len(code) // 4), code)
             src = ''.join('0x%02x 0x%02x 0x%02x 0x%02x\n' % (w & 255, (w >> 8) & 255, (w >> 16) & 255, w >> 24) for w in words)
             out = subprocess.run(['xcrun', 'llvm-mc', '--disassemble', '-triple=arm64e-apple-macos', '-mattr=+v8.5a,+pauth'],
-                                 input=src, capture_output=True, text=True).stdout.splitlines()
+                                 input=src, capture_output=True, text=True); sys.stderr.write(out.stderr[:2000]); out = out.stdout.splitlines()
             ins = [l for l in out if l.strip() and not l.strip().startswith('.')]
             for i, l in enumerate(ins):
                 print('%x %s' % (va + 4 * i, l.strip()))
