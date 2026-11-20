@@ -1640,6 +1640,32 @@ index 0eae1f6..9a4e240 100644
  #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
  	read_lbr();
  #endif
+diff --git a/osfmk/kern/link_compat.c b/osfmk/kern/link_compat.c
+index e494eab..fc40514 100644
+--- a/osfmk/kern/link_compat.c
++++ b/osfmk/kern/link_compat.c
+@@ -65,3 +65,21 @@ native_verified_block_manifest_sha384(unsigned int device, const char *uuid, uin
+ }
+ 
+ #endif
++
++/*
++ * LINUX64 (xnulinux): macOS 27 kernel functions that 27.2's RTBuddy kext imports and xnu-12377 does not have.
++ * The hosted kernel has no coprocessors; both are no-ops.
++ */
++int os_log_coprocessor_with_handle(void);
++int
++os_log_coprocessor_with_handle(void)
++{
++	return 0;
++}
++
++int os_metric_coprocessor(void);
++int
++os_metric_coprocessor(void)
++{
++	return 0;
++}
 diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
 index 2fc6931..dd59ae6 100644
 --- a/osfmk/kern/printf.c
