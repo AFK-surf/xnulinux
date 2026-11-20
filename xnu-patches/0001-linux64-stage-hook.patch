@@ -386,10 +386,10 @@ index 0cc7f6e..c07d35c 100644
  		DEBUG_INFO("region = %d\n", currentRegion->type);
  		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index 76555f6..d56d67f 100644
+index 76555f6..40b1630 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
-@@ -1540,6 +1540,59 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
+@@ -1540,6 +1540,100 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
  	publishResource("IONVRAM");
  }
  
@@ -414,6 +414,47 @@ index 76555f6..d56d67f 100644
 +}
 +static uintptr_t linux64_aks_table[0x40];
 +
++
++/*
++ * LINUX64 (xnulinux): the stand-in IOAESAccelerator's AES operation (vtable +0x890, called by AppleImage4 with
++ * (src, dst, length, iv, direction, ...)). There is no device key to use: it copies src to dst ("encrypts" with the
++ * identity), which is all a hosted Image4 nonce store needs to stay consistent.
++ */
++extern "C" pmap_paddr_t kvtophys(vm_offset_t va);
++extern "C" void ml_phys_write_double_64(addr64_t paddr, unsigned long long data);
++static IOReturn
++linux64_aes_perform(IOService *self, IOMemoryDescriptor *src, IOMemoryDescriptor *dst, uint64_t len, void *iv, int dir,
++    void *a6, void *a7)
++{
++	(void)self; (void)iv; (void)dir; (void)a6; (void)a7;
++	if (!src || !dst || len > 65536) {
++		return kIOReturnBadArgument;
++	}
++	void *buf = IOMallocData((vm_size_t)len);
++	if (!buf) {
++		return kIOReturnNoMemory;
++	}
++	IOByteCount got = src->readBytes(0, buf, (IOByteCount)len);
++	IOByteCount put = dst->writeBytes(0, buf, got);
++	IOFreeData(buf, (vm_size_t)len);
++	return (got == len && put == len) ? kIOReturnSuccess : kIOReturnIOError;
++}
++
++static void
++linux64_patch_aes_vtable(OSObject *aes)
++{
++	uintptr_t vt = (uintptr_t)ptrauth_auth_data(*(void **)aes, ptrauth_key_asda,
++	    ptrauth_blend_discriminator(aes, 0xcda1));
++	uintptr_t entry = vt + 0x890;
++	void *fn = ptrauth_strip((void *)&linux64_aes_perform, ptrauth_key_function_pointer);
++	uint64_t signed_fn = (uint64_t)ptrauth_sign_unauthenticated(fn, ptrauth_key_asia,
++	    ptrauth_blend_discriminator((void *)entry, 0x17dc));
++	pmap_paddr_t pa = kvtophys((vm_offset_t)entry);
++	if (pa) {
++		ml_phys_write_double_64((addr64_t)pa, signed_fn);
++		IOLog("LINUX64: IOAESAccelerator AES entry (vtable %p +0x890) is the hosted copy\n", (void *)vt);
++	}
++}
 +
 +static void
 +linux64_register_stand_in(IOService *parent, IOService *s, const char *name)
@@ -449,7 +490,7 @@ index 76555f6..d56d67f 100644
  IOReturn
  IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
      bool waitForFunction,
-@@ -1564,7 +1617,47 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
+@@ -1564,7 +1658,48 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
  	}
  
  	if (waitForFunction) {
@@ -473,6 +514,7 @@ index 76555f6..d56d67f 100644
 +				OSObject *aes = OSMetaClass::allocClassWithName("IOAESAccelerator");
 +				IOService *aess = OSDynamicCast(IOService, aes);
 +				if (aess) {
++					linux64_patch_aes_vtable(aess);
 +					linux64_register_stand_in(this, aess, "IOAESAccelerator");
 +				} else {
 +					IOLog("LINUX64: cannot make an IOAESAccelerator (%p)\n", aes);
@@ -498,7 +540,7 @@ index 76555f6..d56d67f 100644
  	} else {
  		_resources = getResourceService();
  	}
-@@ -2341,6 +2434,8 @@ IOPlatformDevice::getResources( void )
+@@ -2341,6 +2476,8 @@ IOPlatformDevice::getResources( void )
  * the kernel with a suitable message.
  *********************************************************************/
  
@@ -507,7 +549,7 @@ index 76555f6..d56d67f 100644
  class IOPanicPlatform : IOPlatformExpert {
  	OSDeclareDefaultStructors(IOPanicPlatform);
  
-@@ -2361,6 +2456,19 @@ IOPanicPlatform::start(IOService * provider)
+@@ -2361,6 +2498,19 @@ IOPanicPlatform::start(IOService * provider)
  		platform_name = provider->getName();
  	}
  
