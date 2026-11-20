@@ -703,3 +703,33 @@ index 0eae1f6..9a4e240 100644
  #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
  	read_lbr();
  #endif
+diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
+index fea9411..217500a 100644
+--- a/pexpert/arm/pe_kprintf.c
++++ b/pexpert/arm/pe_kprintf.c
+@@ -107,6 +107,25 @@ kprintf(const char *fmt, ...)
+ 	boolean_t       state;
+ 	void           *caller = __builtin_return_address(0);
+ 
++	{
++		/* LINUX64 (xnulinux): hosted XNU prints through the host (dmesg). */
++		extern uintptr_t linux64_hook;
++		if (linux64_hook) {
++			char buf[256];
++			va_start(listp, fmt);
++			vsnprintf(buf, sizeof(buf), fmt, listp);
++			va_end(listp);
++			register unsigned long x0 __asm__("x0") = 998;
++			register unsigned long x1 __asm__("x1") = (unsigned long)buf;
++			register unsigned long x2 __asm__("x2") = 0;
++			__asm__ volatile ("blr %3" : "+r"(x0), "+r"(x1), "+r"(x2) : "r"(linux64_hook)
++			    : "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++			    "x14", "x15", "x16", "x17", "x30", "cc", "memory");
++			(void)caller;
++			return;
++		}
++	}
++
+ 	if (!disable_serial_output && !disable_kprintf_output) {
+ 		va_start(listp, fmt);
+ 		va_copy(listp2, listp);
