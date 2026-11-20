@@ -16,6 +16,8 @@
 #include <linux/printk.h>
 #include <linux/random.h>
 #include <linux/slab.h>
+#include <linux/sched.h>
+#include <linux/cpumask.h>
 #include <linux/vmalloc.h>
 #include <asm/arch_timer.h>
 #include <asm/sysreg.h>
@@ -180,6 +182,14 @@ void fki_random(void *buf, unsigned long len)
 	get_random_bytes(buf, len);
 }
 EXPORT_SYMBOL(fki_random);
+
+int fki_bind_cpu(int cpu)
+{
+	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
+		return -EINVAL;
+	return set_cpus_allowed_ptr(current, cpumask_of(cpu));
+}
+EXPORT_SYMBOL(fki_bind_cpu);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Foreign kernel interface v0 (out-of-tree form for stock kernels)");

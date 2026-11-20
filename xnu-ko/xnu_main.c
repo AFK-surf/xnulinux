@@ -133,6 +133,12 @@ static int run_m2a(void)
 	static unsigned char seed[256];
 
 	fki_random(seed, sizeof(seed));
+	/* XNU identifies its CPU by MPIDR: run on CPU 0 and describe exactly that CPU. */
+	int berr = fki_bind_cpu(0);
+	if (berr) { logkv("xnu: cannot bind to cpu0, err", (u64_t)berr); return berr; }
+	u64_t mpidr; __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+	mpidr &= 0xffff;	/* XNU compares Aff1:Aff0 */
+	logkv("xnu: running on MPIDR Aff1:Aff0", mpidr);
 	adt_init(&a, base + off_dt, 0x10000);
 	adt_node(&a, 3, 3);				/* / */
 	adt_prop_str(&a, "name", "device-tree");
@@ -151,7 +157,7 @@ static int run_m2a(void)
 	adt_prop_str(&a, "name", "cpu0");
 	adt_prop_str(&a, "device_type", "cpu");
 	adt_prop_str(&a, "state", "running");
-	adt_prop_u32(&a, "reg", 0);
+	adt_prop_u32(&a, "reg", (unsigned)mpidr);
 	adt_prop_u64(&a, "timebase-frequency", fki_counter_frequency());
 	adt_node(&a, 3, 0);				/* /arm-io: no devices; XNU needs a nonzero SoC base */
 	adt_prop_str(&a, "name", "arm-io");
