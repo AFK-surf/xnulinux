@@ -30,6 +30,7 @@
 #include <linux/err.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
+#include <asm/stacktrace.h>
 
 int fki_version(void)
 {
@@ -381,24 +382,82 @@ void fki_window_set(unsigned long long *slot, fki_u64 desc)
 }
 EXPORT_SYMBOL(fki_window_set);
 
+/*
+ * Letting Linux run (IRQs on, maybe a reschedule) from inside fki_enter() happens on whatever stack the foreign kernel
+ * is on. Linux's exception entry takes a stack whose bit THREAD_SHIFT is set at sp for an overflow and panics, so
+ * from a stack that is not this task's, the work runs on a stack of our own laid out like Linux's (the lower half of a
+ * 2 * THREAD_SIZE aligned block, which the linear map gives an order-aligned page block).
+ */
+static void *fki_alt_stack[NR_CPUS];
+
+asm(
+"	.pushsection .text\n"
+"	.type	fki_run_on_stack, %function\n"
+"fki_run_on_stack:\n"
+"	hint	#34\n"
+"	stp	x29, x30, [sp, #-16]!\n"
+"	mov	x29, sp\n"
+"	mov	x9, sp\n"
+"	mov	sp, x2\n"
+"	stp	x9, xzr, [sp, #-16]!\n"
+"	mov	x9, x0\n"
+"	mov	x0, x1\n"
+"	blr	x9\n"
+"	ldp	x9, xzr, [sp], #16\n"
+"	mov	sp, x9\n"
+"	ldp	x29, x30, [sp], #16\n"
+"	ret\n"
+"	.size	fki_run_on_stack, . - fki_run_on_stack\n"
+"	.popsection\n");
+void fki_run_on_stack(void (*fn)(void *), void *arg, void *top);	/* x0 = fn, x1 = arg, x2 = stack top */
+
+static void fki_linux_runs(void (*fn)(void *), void *arg)
+{
+	unsigned long sp = current_stack_pointer;
+	int cpu = smp_processor_id();
+
+	if (on_task_stack(current, sp, 1)) {
+		fn(arg);
+		return;
+	}
+	if (!fki_alt_stack[cpu]) {
+		struct page *pg = alloc_pages(GFP_ATOMIC, get_order(2 * THREAD_SIZE));
+		if (!pg) {
+			fn(arg);	/* no memory: take the chance */
+			return;
+		}
+		fki_alt_stack[cpu] = page_address(pg);
+	}
+	fki_run_on_stack(fn, arg, (char *)fki_alt_stack[cpu] + THREAD_SIZE);
+}
+
+struct fki_idle_args { fki_u64 ns; };
+
+static void fki_idle_body(void *p)
+{
+	struct fki_idle_args *a = p;
+	ktime_t t = ns_to_ktime(a->ns);
+
+	local_irq_enable();
+	preempt_enable();
+	set_current_state(TASK_UNINTERRUPTIBLE);
+	schedule_hrtimeout_range(&t, 50000, HRTIMER_MODE_REL);
+	preempt_disable();
+	local_irq_disable();
+}
+
 void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns)
 {
 	u64 now = __arch_counter_get_cntvct(), freq = arch_timer_get_cntfrq(), ns;
+	struct fki_idle_args a;
 
 	if (counter_deadline <= now)
 		return;
 	ns = div64_u64((counter_deadline - now) * 1000000ULL, freq) * 1000ULL;
 	if (ns > max_ns)
 		ns = max_ns;
-	local_irq_enable();
-	preempt_enable();
-	{
-		ktime_t t = ns_to_ktime(ns);
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_hrtimeout_range(&t, 50000, HRTIMER_MODE_REL);
-	}
-	preempt_disable();
-	local_irq_disable();
+	a.ns = ns;
+	fki_linux_runs(fki_idle_body, &a);
 }
 EXPORT_SYMBOL(fki_idle_until);
 
@@ -419,15 +478,32 @@ EXPORT_SYMBOL(fki_file_open);
 
 #define FKI_FILE_CHUNK (256UL << 10)
 
+static long fki_file_rw_body(void *file, int write, void *buf, unsigned long len, fki_u64 off);
+struct fki_file_args { void *file; int write; void *buf; unsigned long len; fki_u64 off; long ret; };
+static void fki_file_rw_thunk(void *p)
+{
+	struct fki_file_args *a = p;
+	a->ret = fki_file_rw_body(a->file, a->write, a->buf, a->len, a->off);
+}
+
 long fki_file_rw(void *file, int write, void *buf, unsigned long len, fki_u64 off)
+{
+	struct fki_file_args a = { file, write, buf, len, off, -EIO };
+
+	if (!file)
+		return -EBADF;
+	fki_linux_runs(fki_file_rw_thunk, &a);
+	return a.ret;
+}
+EXPORT_SYMBOL(fki_file_rw);
+
+static long fki_file_rw_body(void *file, int write, void *buf, unsigned long len, fki_u64 off)
 {
 	struct file *f = file;
 	unsigned long done = 0;
 	long ret = 0;
 	void *bounce;
 
-	if (!f)
-		return -EBADF;
 	local_irq_enable();
 	preempt_enable();
 	bounce = kvmalloc(min(len, FKI_FILE_CHUNK), GFP_KERNEL);
@@ -464,7 +540,7 @@ long fki_file_rw(void *file, int write, void *buf, unsigned long len, fki_u64 of
 	local_irq_disable();
 	return ret < 0 && !done ? ret : (long)done;
 }
-EXPORT_SYMBOL(fki_file_rw);
+
 
 void fki_file_close(void *file)
 {
