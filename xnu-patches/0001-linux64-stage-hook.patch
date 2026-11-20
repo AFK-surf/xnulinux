@@ -1764,10 +1764,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..4fef008 100644
+index d8f1b19..3baaa28 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,111 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,116 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1868,15 +1868,20 @@ index d8f1b19..4fef008 100644
 +	linux64_dbg[11] = f->esr;
 +	linux64_dbg[12] = f->far;
 +	linux64_dbg[13] = f->pc;
++	linux64_dbg[15] = 1;
++	kprintf("linux64: EL0 exception esr 0x%llx far 0x%llx pc 0x%llx x16 %lld\n", f->esr, f->far, f->pc, f->x[16]);
 +	for (unsigned i = 0; i < 29; i++) {
 +		set_saved_state_reg(ss, i, f->x[i]);
 +	}
++	linux64_dbg[15] = 2;
 +	set_saved_state_fp(ss, f->x[29]);
 +	set_saved_state_lr(ss, f->x[30]);
 +	set_saved_state_sp(ss, f->sp);
 +	set_saved_state_pc(ss, f->pc);
 +	set_saved_state_cpsr(ss, (uint32_t)f->cpsr);
++	linux64_dbg[15] = 3;
 +	sleh_synchronous(thread->machine.contextData, f->esr, (vm_offset_t)f->far, false);
++	linux64_dbg[15] = 4;
 +	thread_exception_return();
 +}
 diff --git a/osfmk/arm64/status.c b/osfmk/arm64/status.c
