@@ -209,7 +209,7 @@ index d46815b..ccd2d84 100644
  	g_crypto_funcs->random_kmem_init_fn(ctx);
  }
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..96b959a 100644
+index ac1713e..d65a903 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -228,6 +228,15 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
@@ -244,7 +244,7 @@ index ac1713e..96b959a 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +354,50 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +354,58 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
@@ -292,10 +292,18 @@ index ac1713e..96b959a 100644
 +	}
 +}
 +
++/* LINUX64: a failed assert() while hosted (see kern/assert.h); the host may end the run. */
++void
++linux64_assert_report(const char *file, int line, const char *expr)
++{
++	struct { const char *file; long line; const char *expr; } a = { file, line, expr };
++	linux64_stage_arg(997, (unsigned long)&a);
++}
++
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
-@@ -361,6 +418,7 @@ arm_init(
+@@ -361,6 +426,7 @@ arm_init(
  	port_crumb = 100;
  	arm_slide_rebase_and_sign_image();
  	port_crumb = 101;
@@ -303,7 +311,7 @@ index ac1713e..96b959a 100644
  
  	arm_static_if_init(args);
  	port_crumb = 102;
-@@ -382,6 +440,7 @@ arm_init(
+@@ -382,6 +448,7 @@ arm_init(
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	boot_progress_init();
@@ -311,7 +319,7 @@ index ac1713e..96b959a 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -475,6 +534,7 @@ arm_init(
+@@ -475,6 +542,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -319,7 +327,7 @@ index ac1713e..96b959a 100644
  
  
  	boot_cpu_id = ml_get_boot_cpu_number();
-@@ -511,15 +571,19 @@ arm_init(
+@@ -511,15 +579,19 @@ arm_init(
  
  	kernel_debug_string_early("kernel_startup_bootstrap");
  	kernel_startup_bootstrap();
@@ -339,7 +347,7 @@ index ac1713e..96b959a 100644
  
  	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
  		xmaxmem = (uint64_t) maxmem * (1024 * 1024);
-@@ -544,7 +608,9 @@ arm_init(
+@@ -544,7 +616,9 @@ arm_init(
  	}
  #endif /* SCHED_HYGIENE_DEBUG */
  
@@ -349,7 +357,7 @@ index ac1713e..96b959a 100644
  
  #if HAS_BP_RET
  	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
-@@ -581,10 +647,12 @@ arm_init(
+@@ -581,10 +655,12 @@ arm_init(
  		panic("%s: Unable to find 'dram-size' entry in the 'chosen' DT node", __FUNCTION__);
  	}
  
@@ -362,7 +370,7 @@ index ac1713e..96b959a 100644
  	boot_progress_stage("arm_vm_init enter");
  	port_crumb = 1;
  	arm_vm_init(xmaxmem, args);
-@@ -607,6 +675,7 @@ arm_init(
+@@ -607,6 +683,7 @@ arm_init(
  	port_crumb = 5;
  	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
  	kprintf("kprintf initialized\n");
@@ -370,7 +378,7 @@ index ac1713e..96b959a 100644
  
  	serialmode = 0;
  	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
-@@ -648,10 +717,12 @@ arm_init(
+@@ -648,10 +725,12 @@ arm_init(
  	}
  	PE_create_console();
  	port_crumb = 6;
@@ -383,7 +391,7 @@ index ac1713e..96b959a 100644
  
  #if __arm64__
  #if DEBUG
-@@ -661,9 +732,11 @@ arm_init(
+@@ -661,9 +740,11 @@ arm_init(
  
  	cpu_machine_idle_init(TRUE);
  	port_crumb = 8;
@@ -395,7 +403,7 @@ index ac1713e..96b959a 100644
  
  	/* Initialize the debug infrastructure system-wide and on the local core. */
  	pe_arm_debug_init_early(&BootCpuData);
-@@ -676,6 +749,7 @@ arm_init(
+@@ -676,6 +757,7 @@ arm_init(
  
  	ml_map_cpu_pio();
  	port_crumb = 10;
@@ -403,7 +411,7 @@ index ac1713e..96b959a 100644
  
  #if APPLE_ARM64_ARCH_FAMILY
  	configure_late_apple_regs(true);
-@@ -685,6 +759,7 @@ arm_init(
+@@ -685,6 +767,7 @@ arm_init(
  
  	cpu_timebase_init(TRUE);
  	port_crumb = 11;
@@ -411,7 +419,7 @@ index ac1713e..96b959a 100644
  
  #if KPERF
  	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
-@@ -693,6 +768,7 @@ arm_init(
+@@ -693,6 +776,7 @@ arm_init(
  
  	PE_init_cpu();
  	port_crumb = 12;
@@ -419,7 +427,7 @@ index ac1713e..96b959a 100644
  #if __arm64__
  	apt_msg_init();
  	apt_msg_init_cpu();
-@@ -717,6 +793,7 @@ arm_init(
+@@ -717,6 +801,7 @@ arm_init(
  	 */
  	__stack_chk_guard &= ~(0xFFULL << 8);
  	port_crumb = 13;
@@ -1419,6 +1427,33 @@ index d211433..dc247da 100644
  	ldr     \x, [\x, ACT_CPUDATAP]
  
  	// No need for atomic - These are per CPU and interrupts are disabled
+diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
+index 4224c9d..6e4aa1c 100644
+--- a/osfmk/kern/assert.h
++++ b/osfmk/kern/assert.h
+@@ -193,9 +193,22 @@ STATIC_IF_KEY_DECLARE_TRUE(mach_assert);
+ #define mach_assert_enabled_expr(ex) \
+ 	(mach_assert_enabled() || __builtin_constant_p(!(ex)))
+ 
++#if defined(XNU_KERNEL_PRIVATE) && defined(__arm64__)
++/*
++ * LINUX64 (xnulinux): hosted inside Linux there is no XNU exception vector for the assert brk, so a
++ * failed assert() is reported to the host, which decides whether XNU continues or the run ends.
++ */
++extern unsigned long linux64_hook;
++extern void linux64_assert_report(const char *file, int line, const char *expr);
++#define assert(ex) \
++	(mach_assert_enabled_expr(ex) && !(ex) \
++	? (linux64_hook ? linux64_assert_report(__FILE_NAME__, __LINE__, #ex) \
++	: (void)mach_assert_abort(#ex)) : (void)0)
++#else
+ #define assert(ex) \
+ 	(mach_assert_enabled_expr(ex) && !(ex) \
+ 	? (void)mach_assert_abort(#ex) : (void)0)
++#endif
+ 
+ #define assertf(ex, fmt, args...)  ({ \
+ 	if (mach_assert_enabled_expr(ex) && __builtin_expect(!(ex), 0L)) {      \
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 index 0eae1f6..9a4e240 100644
 --- a/osfmk/kern/debug.c
