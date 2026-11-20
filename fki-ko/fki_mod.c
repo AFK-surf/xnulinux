@@ -284,6 +284,29 @@ EXPORT_SYMBOL(fki_regs_set_reg);
 static struct kprobe fki_fault_kp = { .symbol_name = "__do_kernel_fault", .pre_handler = fki_fault_pre };
 static int fki_fault_registered;
 
+/*
+ * Other kernel-mode exceptions the foreign kernel takes (an FPAC authentication failure, an undefined instruction, a
+ * BTI fault) end in die(str, regs, err): offered to the same handler with far 0 and the ESR, before Linux oopses.
+ */
+static int fki_die_pre(struct kprobe *p, struct pt_regs *kregs)
+{
+	struct pt_regs *regs = (struct pt_regs *)kregs->regs[1];
+	unsigned long esr = kregs->regs[2];
+	int (*h)(unsigned long, unsigned long, void *) = READ_ONCE(fki_fault_handler);
+
+	if (!h || !regs || user_mode(regs))
+		return 0;
+	if (instruction_pointer(regs) < fki_fault_lo || instruction_pointer(regs) >= fki_fault_hi)
+		return 0;
+	if (h(0, esr, regs))
+		return 0;
+	instruction_pointer_set(kregs, kregs->regs[30]);	/* die returns at once */
+	return 1;
+}
+NOKPROBE_SYMBOL(fki_die_pre);
+static struct kprobe fki_die_kp = { .symbol_name = "die", .pre_handler = fki_die_pre };
+static int fki_die_registered;
+
 int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsigned long far, unsigned long esr, void *regs))
 {
 	int err;
@@ -299,6 +322,9 @@ int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsign
 		return err;
 	}
 	fki_fault_registered = 1;
+	fki_die_registered = register_kprobe(&fki_die_kp) == 0;	/* best effort */
+	if (!fki_die_registered)
+		pr_warn("fki: no die() probe: foreign non-abort exceptions oops\n");
 	return 0;
 }
 EXPORT_SYMBOL(fki_fault_register);
@@ -308,6 +334,13 @@ void fki_fault_unregister(void)
 	if (!fki_fault_registered)
 		return;
 	unregister_kprobe(&fki_fault_kp);
+	if (fki_die_registered) {
+		unregister_kprobe(&fki_die_kp);
+		fki_die_registered = 0;
+		memset(&fki_die_kp, 0, sizeof(fki_die_kp));
+		fki_die_kp.symbol_name = "die";
+		fki_die_kp.pre_handler = fki_die_pre;
+	}
 	WRITE_ONCE(fki_fault_handler, NULL);
 	fki_fault_registered = 0;
 	/* a fresh kprobe struct for the next registration */
