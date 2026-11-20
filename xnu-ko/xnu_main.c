@@ -204,10 +204,10 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		return assert_fatal;
 	}
 	if (stage == 999) {
-		char m[200]; const char *f = (const char *)a1; unsigned i = 0;
+		char m[500]; const char *f = (const char *)a1; unsigned i = 0;
 		while (f && f[i] && i < sizeof(m) - 1) { m[i] = f[i]; i++; }
 		m[i] = 0;
-		logs("xnu: XNU panic, format string:");
+		logs("xnu: XNU panic:");
 		logs(m);
 		logkv("xnu: panic caller", a2);
 		return 1;
