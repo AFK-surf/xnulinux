@@ -204,10 +204,21 @@ index 743117b..9dc298b 100644
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index f7f387e..0e4cbba 100644
+index f7f387e..58c32e1 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
-@@ -1404,16 +1404,20 @@ arm_vm_prot_init(__unused boot_args * args)
+@@ -1089,7 +1089,9 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
+ 				/*
+ 				 * Set the 'guarded page' flag to enable ARM BTI enforcement.
+ 				 */
+-				if (guarded) {
++				extern uintptr_t linux64_hook;
++				/* LINUX64: Linux enables SCTLR_EL1.BT1, and this kernel is not built with BTI landing pads. */
++				if (guarded && !linux64_hook) {
+ 					ptmp |= ARM_PTE_GP;
+ 				}
+ #endif /* BTI_ENFORCED */
+@@ -1404,16 +1406,20 @@ arm_vm_prot_init(__unused boot_args * args)
  	 * it and apply fixups (after we're off the bootstrap translation
  	 * tables).
  	 */
@@ -228,7 +239,7 @@ index f7f387e..0e4cbba 100644
  	arm_vm_page_granular_ROX(segPLKTEXTEXECB, segSizePLKTEXTEXEC, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_GUARDED); // Refined in OSKext::readPrelinkedExtensions
  
  	/* if new segments not present, set space between PRELINK_TEXT and xnu TEXT to RWNX
-@@ -1443,48 +1447,68 @@ noAuxKC:
+@@ -1443,48 +1449,68 @@ noAuxKC:
  	 *
  	 * TEXT segment contains mach headers and other non-executable data. This will become RONX later.
  	 */
@@ -297,7 +308,7 @@ index f7f387e..0e4cbba 100644
  	arm_vm_page_granular_RWNX(segPRELINKINFOB, segSizePRELINKINFO, 0); /* PreLinkInfoDictionary */
  
  	/* Record the bounds of the kernelcache. */
-@@ -1883,6 +1907,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1883,6 +1909,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	// Slide the physical aperture to a random page-aligned location within the slide range
  	port_crumb = 50;
@@ -305,7 +316,7 @@ index f7f387e..0e4cbba 100644
  	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
  	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
  	port_crumb = 51;
-@@ -1937,6 +1962,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1937,6 +1964,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	boot_tte = (tt_entry_t *)&bootstrap_pagetables;
  	boot_ttep = kvtophys((vm_offset_t)boot_tte);
  	port_crumb = 52;
@@ -313,7 +324,7 @@ index f7f387e..0e4cbba 100644
  
  #if DEVELOPMENT || DEBUG
  	/* Sanity check - assert that BOOTSTRAP_TABLE_SIZE is sufficiently-large to
-@@ -1972,6 +1998,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1972,6 +2000,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	invalid_tte = (tt_entry_t *)alloc_ptpage(TRUE);
  	invalid_ttep = kvtophys((vm_offset_t)invalid_tte);
  	port_crumb = 53;
@@ -321,7 +332,7 @@ index f7f387e..0e4cbba 100644
  	bzero(invalid_tte, ARM_PGBYTES);
  
  	/*
-@@ -1998,6 +2025,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1998,6 +2027,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	 */
  	init_ptpages(cpu_tte, gVirtBase, dynamic_memory_begin, TRUE, ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
  	port_crumb = 32;
@@ -329,7 +340,7 @@ index f7f387e..0e4cbba 100644
  
  #if defined(ARM_LARGE_MEMORY)
  	/*
-@@ -2117,6 +2145,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2117,6 +2147,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	vm_set_page_size();
  	port_crumb = 35;
@@ -337,7 +348,7 @@ index f7f387e..0e4cbba 100644
  
  	vm_kernel_base = segTEXTB;
  	vm_kernel_top = (vm_offset_t) &last_kernel_symbol;
-@@ -2152,6 +2181,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2152,6 +2183,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	arm_vm_prot_init(args);
  	port_crumb = 36;
@@ -345,7 +356,7 @@ index f7f387e..0e4cbba 100644
  
  	/*
  	 * Initialize the page tables for the low globals:
-@@ -2183,6 +2213,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2183,6 +2215,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	 */
  	init_ptpages(cpu_tte, dynamic_memory_begin, VM_MAX_KERNEL_ADDRESS, TRUE, ARM_DYNAMIC_TABLE_XN | ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
  	port_crumb = 37;
@@ -353,7 +364,7 @@ index f7f387e..0e4cbba 100644
  #endif
  
  #if KASAN
-@@ -2194,14 +2225,32 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2194,14 +2227,32 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	arm_vm_physmap_init(args);
  	port_crumb = 38;
@@ -388,7 +399,7 @@ index f7f387e..0e4cbba 100644
  
  	flush_mmu_tlb();
  	port_crumb = 40;
-@@ -2301,8 +2350,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2301,8 +2352,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
      }
  #endif
  #endif
@@ -399,7 +410,7 @@ index f7f387e..0e4cbba 100644
  
  	disable_preemption();
  
-@@ -2431,6 +2482,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2431,6 +2484,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	patch_low_glo_static_region(args->topOfKernelData, avail_start - args->topOfKernelData);
  	enable_preemption();
  	port_crumb = 43;
