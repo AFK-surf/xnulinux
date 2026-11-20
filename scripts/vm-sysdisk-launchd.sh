@@ -23,7 +23,7 @@ if [ "${MODE:-launchd}" = launchd ]; then
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>echo "hello from a launchd job (pid $$, parent $PPID)"; uname -sr; for i in 1 2 3; do echo "tick $i"; sleep 1; done; echo "job done"</string>
+		<string>echo "hello from a launchd job (pid $$, parent $PPID)"; uname -sr; for i in 1 2 3; do echo "tick $i"; done; ls /System/Library/LaunchDaemons; echo "job done"</string>
 	</array>
 	<key>RunAtLoad</key><true/>
 	<key>StandardOutPath</key><string>/dev/console</string>
