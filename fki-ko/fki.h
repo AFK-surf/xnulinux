@@ -52,6 +52,8 @@ void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save);
 fki_u64 fki_counter_frequency(void);
 fki_u64 fki_counter(void);
 void fki_random(void *buf, unsigned long len);
+/* Keep the calling task on one CPU (the hosted kernel sees that CPU's MPIDR). */
+int fki_bind_cpu(int cpu);
 #ifdef __cplusplus
 }
 #endif
