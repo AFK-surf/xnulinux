@@ -41,6 +41,9 @@ UP
 <key>users</key><array><string>root</string></array><key>generateduid</key><array><string>ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000000</string></array></dict></plist>
 GP
     sudo chmod -R go-rwx /mnt/sys/private/var/db/dslocal
+    # flat files for libinfo's file module
+    printf 'root:*:0:0:System Administrator:/var/root:/bin/sh\ndaemon:*:1:1:System Services:/var/root:/usr/bin/false\nnobody:*:-2:-2:Unprivileged User:/var/empty:/usr/bin/false\n' | sudo tee /mnt/sys/private/etc/passwd >/dev/null
+    printf 'wheel:*:0:root\ndaemon:*:1:root\nnobody:*:-2:\nstaff:*:20:root\n' | sudo tee /mnt/sys/private/etc/group >/dev/null
   fi
   sudo tee /mnt/sys/System/Library/LaunchDaemons/xnulinux.hello.plist >/dev/null <<'PL'
 <?xml version="1.0" encoding="UTF-8"?>
