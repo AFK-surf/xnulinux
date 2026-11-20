@@ -90,6 +90,8 @@ unsigned long fki_regs_lr(void *regs);
 void fki_regs_set_pc(void *regs, unsigned long pc);
 int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsigned long far, unsigned long esr, void *regs));
 void fki_fault_unregister(void);
+/* Read 8 bytes of RAM by physical address (debugging: walking a foreign page table). */
+fki_u64 fki_phys_peek(fki_u64 pa);
 #ifdef __cplusplus
 }
 #endif

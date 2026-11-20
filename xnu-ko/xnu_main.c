@@ -149,8 +149,24 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 		/* the same address faulting over and over: vm_fault says yes, the hardware still says no */
 		if (repeats < 64 && xnu_kfault(far, esr) == 0)
 			return 0;
-		if (repeats >= 64)
+		if (repeats >= 64) {
+			unsigned long long ttbr0, tcr;
+			__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
+			__asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
 			logs("xnu: the same address keeps faulting after vm_fault resolved it");
+			logkv("xnu:   TTBR0", ttbr0);
+			logkv("xnu:   TCR  ", tcr);
+			/* walk it as the hardware does with this TCR (4K granule, T0SZ from TCR) */
+			unsigned t0sz = tcr & 0x3f, level = t0sz > 24 ? 1 : 0;
+			u64_t table = ttbr0 & 0x0000fffffffff000ULL;
+			for (; level <= 3; level++) {
+				unsigned shift = 39 - 9 * level;
+				u64_t d = fki_phys_peek(table + ((far >> shift) & 511) * 8);
+				logkv(level == 0 ? "xnu:   L0" : level == 1 ? "xnu:   L1" : level == 2 ? "xnu:   L2" : "xnu:   L3", d);
+				if ((d & 3) != 3 || level == 3) break;
+				table = d & 0x0000fffffffff000ULL;
+			}
+		}
 	}
 	/*
 	 * An XNU fault nothing resolves (a bug, or a NULL dereference): report it and end the run instead of letting Linux
