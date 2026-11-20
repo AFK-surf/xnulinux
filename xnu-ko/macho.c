@@ -41,6 +41,27 @@ int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsi
 	}
 	if (img->vmhigh <= img->vmlow)
 		return -ENOEXEC;
+	img->filetype = mh->filetype;
+	if (mh->filetype == MH_FILESET) {
+		/*
+		 * A kernel collection: a flat image (file offset = vmaddr - base) whose pointers are chained fixups that XNU's
+		 * arm_init applies itself (kernel_collection_slide). The kernel's symbols are in its own entry's LC_SYMTAB.
+		 */
+		img->symtab = 0;
+		FOR_EACH_LC(img, l) {
+			if (l->cmd != LC_FILESET_ENTRY) continue;
+			const struct fileset_entry_lc *fe = (const void *)l;
+			if (fe->entry_id >= fe->cmdsize || x_strcmp((const char *)fe + fe->entry_id, "com.apple.kernel")) continue;
+			if (fe->fileoff + sizeof(struct mh64) > size) return -ENOEXEC;
+			img->kernel_mh = fe->vmaddr;
+			const struct mh64 *kh = (const void *)((const char *)file + fe->fileoff);
+			const struct lc *kl = (const void *)(kh + 1);
+			for (u32_t i = 0; i < kh->ncmds; i++, kl = (const void *)((const char *)kl + kl->cmdsize))
+				if (kl->cmd == LC_SYMTAB) img->symtab = (const void *)kl;
+		}
+		if (!img->kernel_mh || !img->symtab)
+			return -ENOEXEC;
+	}
 	if (extra == ~0UL)		/* parse only: the caller places the image (macho_copy) */
 		return 0;
 	err = fki_region_alloc(img->vmhigh - img->vmlow + extra, &img->region);
