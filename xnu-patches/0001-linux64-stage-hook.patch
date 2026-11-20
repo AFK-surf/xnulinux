@@ -386,10 +386,10 @@ index 0cc7f6e..c07d35c 100644
  		DEBUG_INFO("region = %d\n", currentRegion->type);
  		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index 76555f6..34d8b8f 100644
+index 76555f6..e496969 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
-@@ -1540,6 +1540,43 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
+@@ -1540,6 +1540,68 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
  	publishResource("IONVRAM");
  }
  
@@ -413,6 +413,31 @@ index 76555f6..34d8b8f 100644
 +	return 0;
 +}
 +static uintptr_t linux64_aks_table[0x40];
++
++/*
++ * LINUX64 (xnulinux): no AES engine either. AppleImage4's finalize waits for an "IOAESAccelerator" service (it only
++ * waits, then releases it); a class of that name, registered, matches by class and by name.
++ */
++class IOAESAccelerator : public IOService
++{
++	OSDeclareDefaultStructors(IOAESAccelerator);
++};
++OSDefineMetaClassAndStructors(IOAESAccelerator, IOService);
++
++static void
++linux64_register_stand_in(IOService *parent, IOService *s, const char *name)
++{
++	if (s && s->init()) {
++		s->setName(name);
++		if (s->attach(parent)) {
++			s->registerService();
++			IOLog("LINUX64: stand-in %s registered\n", name);
++		}
++	}
++	if (s) {
++		s->release();
++	}
++}
 +static void *
 +linux64_aks_services(void)
 +{
@@ -433,7 +458,7 @@ index 76555f6..34d8b8f 100644
  IOReturn
  IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
      bool waitForFunction,
-@@ -1564,7 +1601,43 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
+@@ -1564,7 +1626,36 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
  	}
  
  	if (waitForFunction) {
@@ -449,15 +474,8 @@ index 76555f6..34d8b8f 100644
 +				 * launchd's first AMFI sysctl waits on that thread). A plain registered service of that name.
 +				 */
 +				scrd_done = true;
-+				IOService *scrd = OSTypeAlloc(IOService);
-+				if (scrd && scrd->init()) {
-+					scrd->setName("sep-endpoint,scrd");
-+					if (scrd->attach(this)) {
-+						scrd->registerService();
-+						IOLog("LINUX64: stand-in sep-endpoint,scrd registered\n");
-+					}
-+					scrd->release();
-+				}
++				linux64_register_stand_in(this, OSTypeAlloc(IOService), "sep-endpoint,scrd");
++				linux64_register_stand_in(this, OSTypeAlloc(IOAESAccelerator), "IOAESAccelerator");
 +			}
 +			IOLog("LINUX64: AKSKernelServices from the hosted stand-in\n");
 +			return kIOReturnSuccess;
@@ -478,7 +496,7 @@ index 76555f6..34d8b8f 100644
  	} else {
  		_resources = getResourceService();
  	}
-@@ -2341,6 +2414,8 @@ IOPlatformDevice::getResources( void )
+@@ -2341,6 +2432,8 @@ IOPlatformDevice::getResources( void )
  * the kernel with a suitable message.
  *********************************************************************/
  
@@ -487,7 +505,7 @@ index 76555f6..34d8b8f 100644
  class IOPanicPlatform : IOPlatformExpert {
  	OSDeclareDefaultStructors(IOPanicPlatform);
  
-@@ -2361,6 +2436,19 @@ IOPanicPlatform::start(IOService * provider)
+@@ -2361,6 +2454,19 @@ IOPanicPlatform::start(IOService * provider)
  		platform_name = provider->getName();
  	}
  
