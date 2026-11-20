@@ -386,10 +386,40 @@ index 0cc7f6e..c07d35c 100644
  		DEBUG_INFO("region = %d\n", currentRegion->type);
  		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index 76555f6..3fad099 100644
+index 76555f6..e7e2156 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
-@@ -2341,6 +2341,8 @@ IOPlatformDevice::getResources( void )
+@@ -1540,6 +1540,8 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
+ 	publishResource("IONVRAM");
+ }
+ 
++extern "C" uintptr_t linux64_hook; /* LINUX64 (xnulinux) */
++
+ IOReturn
+ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
+     bool waitForFunction,
+@@ -1564,7 +1566,19 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
+ 	}
+ 
+ 	if (waitForFunction) {
+-		_resources = waitForService(resourceMatching(functionName));
++		if (linux64_hook) {
++			/*
++			 * LINUX64 (xnulinux): a hosted XNU has no providers for some platform functions (AppleKeyStore's, which AMFI
++			 * waits for): wait a while, then report the function unsupported instead of blocking its caller forever.
++			 */
++			mach_timespec_t t = { 2, 0 };
++			_resources = waitForService(resourceMatching(functionName), &t);
++			if (_resources == NULL) {
++				IOLog("LINUX64: platform function %s has no provider; unsupported\n", functionName->getCStringNoCopy());
++			}
++		} else {
++			_resources = waitForService(resourceMatching(functionName));
++		}
+ 	} else {
+ 		_resources = getResourceService();
+ 	}
+@@ -2341,6 +2355,8 @@ IOPlatformDevice::getResources( void )
  * the kernel with a suitable message.
  *********************************************************************/
  
@@ -398,7 +428,7 @@ index 76555f6..3fad099 100644
  class IOPanicPlatform : IOPlatformExpert {
  	OSDeclareDefaultStructors(IOPanicPlatform);
  
-@@ -2361,6 +2363,19 @@ IOPanicPlatform::start(IOService * provider)
+@@ -2361,6 +2377,19 @@ IOPanicPlatform::start(IOService * provider)
  		platform_name = provider->getName();
  	}
  
