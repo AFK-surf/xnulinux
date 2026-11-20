@@ -858,7 +858,7 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..0052898 100644
+index d10d7a1..0d4079d 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -100,6 +100,7 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
@@ -882,15 +882,36 @@ index d10d7a1..0052898 100644
  	if (unmask) {
  		/* Latch SW IRQ+FIQ counter prior to unmasking
  		 * interrupts.
-@@ -506,6 +513,7 @@ cpu_idle(void)
+@@ -506,6 +513,28 @@ cpu_idle(void)
  	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
  	bool idle_disallowed = false;
  
 +	{ extern unsigned long linux64_dbg[16]; linux64_dbg[2]++; }	/* LINUX64 debug */
++	{
++		/*
++		 * LINUX64 (xnulinux): hosted, idle goes straight to the host. idle_enable stays FALSE without the
++		 * CPU kext (cpu_machine_init never runs), and no WFE/WFI or timer interrupt applies here.
++		 */
++		extern uintptr_t linux64_hook;
++		extern void linux64_stage_arg(unsigned long, unsigned long);
++		if (linux64_hook) {
++			uint64_t now = mach_absolute_time();
++			uint64_t deadline = cpu_data_ptr->rtcPop;
++			if (deadline == 0 || deadline == EndOfAllTime || deadline < now) {
++				deadline = now + 24000;	/* about 1 ms: re-check the run queue */
++			}
++			{ extern unsigned long linux64_dbg[16]; linux64_dbg[3]++; }	/* LINUX64 debug */
++			linux64_stage_arg(810, deadline);
++			cpu_data_ptr->cpu_decrementer = -1;
++			rtclock_intr(FALSE);
++			ClearIdlePop(TRUE);
++			cpu_idle_exit(FALSE);
++		}
++	}
  	if (__improbable((!idle_enable))) {
  		idle_disallowed = true;
  		os_atomic_inc(&virt_idle_disallowed[0], relaxed);
-@@ -570,7 +578,9 @@ cpu_idle(void)
+@@ -570,7 +599,9 @@ cpu_idle(void)
  		}
  	}
  
@@ -901,7 +922,7 @@ index d10d7a1..0052898 100644
  		if (idle_wfe_poll && idle_proximate_timer_wfe == 1) {
  			/* Poll issuing WFEs until the expected
  			 * timer FIQ arrives.
-@@ -614,6 +624,28 @@ cpu_idle(void)
+@@ -614,6 +645,28 @@ cpu_idle(void)
  	cpc_cpu_transition(CPC_CPU_IDLE, cpu_data_ptr);
  #endif /* CONFIG_CPU_COUNTERS */
  
@@ -930,7 +951,7 @@ index d10d7a1..0052898 100644
  	if (wfi) {
  #if !defined(APPLE_ARM64_ARCH_FAMILY)
  		platform_cache_idle_enter();
-@@ -735,20 +767,27 @@ cpu_idle_exit(boolean_t from_reset)
+@@ -735,20 +788,27 @@ cpu_idle_exit(boolean_t from_reset)
  void
  cpu_init(void)
  {
@@ -958,7 +979,7 @@ index d10d7a1..0052898 100644
  		} else {
  			/*
  			 * We initialize non-boot CPUs here; the boot CPU is
-@@ -758,9 +797,11 @@ cpu_init(void)
+@@ -758,9 +818,11 @@ cpu_init(void)
  		}
  
  		do_cacheid();
@@ -970,7 +991,7 @@ index d10d7a1..0052898 100644
  
  		cpu_info_p = cpuid_info();
  
-@@ -780,6 +821,7 @@ cpu_init(void)
+@@ -780,6 +842,7 @@ cpu_init(void)
  		}
  
  		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
