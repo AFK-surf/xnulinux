@@ -244,9 +244,9 @@ void fki_msleep(unsigned int ms)
 EXPORT_SYMBOL(fki_msleep);
 
 /*
- * Foreign kernel faults. Out of tree, the hook is a kprobe on do_bad_area(far, esr, regs), where Linux's abort path
+ * Foreign kernel faults. Out of tree, the hook is a kprobe on __do_kernel_fault(far, esr, regs), where Linux's abort path
  * goes for a kernel address it has no mapping for (do_mem_abort and do_translation_fault cannot be probed). When
- * the handler resolves the fault, do_bad_area is skipped (return to its caller), and the exception returns to retry
+ * the handler resolves the fault, __do_kernel_fault is skipped (return to its caller), and the exception returns to retry
  * the access. The in-tree patch calls the hook from do_translation_fault/do_page_fault directly.
  */
 static unsigned long fki_fault_lo, fki_fault_hi;
@@ -262,12 +262,12 @@ static int fki_fault_pre(struct kprobe *p, struct pt_regs *kregs)
 		return 0;
 	if (h(far, esr, regs))
 		return 0;
-	instruction_pointer_set(kregs, kregs->regs[30]);	/* do_bad_area returns at once */
+	instruction_pointer_set(kregs, kregs->regs[30]);	/* __do_kernel_fault returns at once */
 	return 1;
 }
 NOKPROBE_SYMBOL(fki_fault_pre);
 
-static struct kprobe fki_fault_kp = { .symbol_name = "do_bad_area", .pre_handler = fki_fault_pre };
+static struct kprobe fki_fault_kp = { .symbol_name = "__do_kernel_fault", .pre_handler = fki_fault_pre };
 static int fki_fault_registered;
 
 int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsigned long far, unsigned long esr, void *regs))
@@ -298,7 +298,7 @@ void fki_fault_unregister(void)
 	fki_fault_registered = 0;
 	/* a fresh kprobe struct for the next registration */
 	memset(&fki_fault_kp, 0, sizeof(fki_fault_kp));
-	fki_fault_kp.symbol_name = "do_bad_area";
+	fki_fault_kp.symbol_name = "__do_kernel_fault";
 	fki_fault_kp.pre_handler = fki_fault_pre;
 }
 EXPORT_SYMBOL(fki_fault_unregister);
