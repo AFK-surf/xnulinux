@@ -117,3 +117,31 @@ u64_t macho_sym(struct xnu_image *img, const char *name)
 	}
 	return 0;
 }
+
+/* As iBoot does for a static kernelcache: slide the load commands of the in-memory Mach-O header. */
+int macho_slide_header(struct xnu_image *img, u64_t *mh_unslid)
+{
+	u64_t mh_vm = 0;
+	FOR_EACH_LC(img, l) {
+		if (l->cmd == LC_SEGMENT_64 && !x_strncmp(((const struct seg64 *)l)->segname, "__TEXT", 16) &&
+		    ((const struct seg64 *)l)->fileoff == 0)
+			mh_vm = ((const struct seg64 *)l)->vmaddr;
+	}
+	if (!mh_vm)
+		return -ENOEXEC;
+	*mh_unslid = mh_vm;
+	unsigned char *mh = (unsigned char *)(mh_vm + img->slide);
+	const struct mh64 *h = (const void *)mh;
+	struct lc *l = (void *)(mh + sizeof(struct mh64)), *e = (void *)(mh + sizeof(struct mh64) + h->sizeofcmds);
+	int n = 0;
+	for (; l < e; l = (void *)((char *)l + l->cmdsize)) {
+		if (l->cmd != LC_SEGMENT_64) continue;
+		struct seg64 *sg = (void *)l;
+		if (!sg->vmsize) continue;
+		sg->vmaddr += img->slide;
+		struct sect64 *sc = (void *)(sg + 1);
+		for (u32_t i = 0; i < sg->nsects; i++) sc[i].addr += img->slide;
+		n++;
+	}
+	return n;
+}

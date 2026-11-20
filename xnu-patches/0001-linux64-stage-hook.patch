@@ -1,8 +1,8 @@
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..2aac81e 100644
+index ac1713e..bd92789 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -228,6 +228,11 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
+@@ -228,6 +228,13 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
  extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
  extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
  
@@ -10,18 +10,19 @@ index ac1713e..2aac81e 100644
 +uintptr_t linux64_hook;
 +/* LINUX64: the current thread pointer (TPIDR_EL1 on Apple/BCM2837 boards). Single CPU for now. */
 +unsigned long linux64_tpidr;
++/* LINUX64: the slide xnu.ko applied. */
++uintptr_t linux64_slide;
 +
  static void
  arm_slide_rebase_and_sign_image(void)
  {
-@@ -285,10 +290,15 @@ arm_slide_rebase_and_sign_image(void)
+@@ -285,10 +292,14 @@ arm_slide_rebase_and_sign_image(void)
  		 * using hardcoded kernel link address
  		 */
  		slide = (uintptr_t)k_mh - VM_KERNEL_LINK_ADDRESS;
 +		if (linux64_hook) {
-+			/* LINUX64: xnu.ko loaded, slid and signed the image already. */
-+			seg = (kernel_segment_command_t *)((uintptr_t)k_mh + sizeof(*k_mh));
-+			slide = (uintptr_t)k_mh - seg->vmaddr;
++			/* LINUX64: xnu.ko loaded, slid (load commands too) and signed the image already. */
++			slide = linux64_slide;
 +		}
  
  		/* rebase and sign jops */
@@ -31,7 +32,7 @@ index ac1713e..2aac81e 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +351,27 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +352,27 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
@@ -59,7 +60,7 @@ index ac1713e..2aac81e 100644
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
-@@ -361,6 +392,7 @@ arm_init(
+@@ -361,6 +393,7 @@ arm_init(
  	port_crumb = 100;
  	arm_slide_rebase_and_sign_image();
  	port_crumb = 101;
@@ -67,7 +68,7 @@ index ac1713e..2aac81e 100644
  
  	arm_static_if_init(args);
  	port_crumb = 102;
-@@ -382,6 +414,7 @@ arm_init(
+@@ -382,6 +415,7 @@ arm_init(
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	boot_progress_init();
@@ -75,7 +76,7 @@ index ac1713e..2aac81e 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -475,6 +508,7 @@ arm_init(
+@@ -475,6 +509,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -83,7 +84,7 @@ index ac1713e..2aac81e 100644
  
  
  	boot_cpu_id = ml_get_boot_cpu_number();
-@@ -511,6 +545,7 @@ arm_init(
+@@ -511,6 +546,7 @@ arm_init(
  
  	kernel_debug_string_early("kernel_startup_bootstrap");
  	kernel_startup_bootstrap();
@@ -91,7 +92,7 @@ index ac1713e..2aac81e 100644
  
  	/*
  	 * Initialize the timer callout world
-@@ -585,6 +620,7 @@ arm_init(
+@@ -585,6 +621,7 @@ arm_init(
  	gDramSize = *dram_size;
  	pmap_first_pnum = (ppnum_t)atop(gDramBase);
  
