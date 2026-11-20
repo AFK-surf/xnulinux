@@ -501,11 +501,14 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	if (xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
 		logs("xnu: kernel faults on XNU addresses go to XNU's vm_fault");
 	{
-		/* XNU's user half starts as Linux's TTBR0 under XNU's T0SZ (25: 39-bit user VA, 3-level 4K tables) */
+		/*
+		 * XNU's user half starts as Linux's TTBR0. Its TCR stays Linux's (T0SZ 16, 4-level): a 4K XNU user pmap's
+		 * hardware root (hw_ttep) is an L0 table whose first entry points at its L1 (ttep), as the walk showed.
+		 */
 		unsigned long long tcr, ttbr0;
 		__asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
 		__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-		xnu_W.xnu_tcr = (tcr & ~0x3fULL) | 25;
+		xnu_W.xnu_tcr = tcr;
 		xnu_W.xnu_ttbr0 = ttbr0;
 	}
 	logs("xnu: entering arm_init");
