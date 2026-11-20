@@ -19,7 +19,7 @@ The two sides are kept apart by license and only meet at the FKI (foreign kernel
 ## Status
 
 - **M1 (done, 2026-11-20).** A source-built XNU (`xnu-12377.121.6` plus the macOS-DroidVM patch series, arm64e) is loaded by `xnu.ko` into a stock Ubuntu 24.04 kernel (`7.0.0-43-generic`, 4K pages, PAC). It is slid and PAC-signed with XNU's own kernel keys, and XNU code runs inside Linux. XNU's `strlen` and `crc32` results match a reference computation.
-- **M2 (in progress).** Boot XNU in the module up to `bsd_init`, through the `osfmk/linux64` machine layer.
+- **M2a (done, 2026-11-20).** `arm_init` runs inside the module from `xnu.ko`'s boot args and ADT up to `arm_vm_init` (stage 199), with XNU's `kprintf` in dmesg. Next is M2b: a LINUX64 `arm_vm_init` and pmap on FKI.
 
 ## Running M1
 
