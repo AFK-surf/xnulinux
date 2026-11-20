@@ -23,6 +23,10 @@ xnu_world_call:
 	bl	fki_enter		/* no preemption, no IRQs */
 	W(x9)
 	str	x0, [x9, #104]
+	mrs	x10, tpidr_el0		/* XNU writes the user TLS registers of the thread it believes current */
+	str	x10, [x9, #216]
+	mrs	x10, tpidrro_el0
+	str	x10, [x9, #224]
 	/* XNU runs on the Linux task stack: Linux's entry code treats any other stack as overflow. */
 	mov	x0, x20
 	blr	x19
@@ -33,7 +37,11 @@ xnu_world_call:
 xnu_world_abort:			/* from the upcall: Linux keys and TPIDR are live */
 	W(x9)
 	mov	x19, #1
-2:	ldr	x10, [x9, #96]
+2:	ldr	x10, [x9, #216]
+	msr	tpidr_el0, x10
+	ldr	x10, [x9, #224]
+	msr	tpidrro_el0, x10
+	ldr	x10, [x9, #96]
 	mov	sp, x10
 	ldr	x0, [x9, #104]
 	add	x1, x9, #240
