@@ -4,8 +4,8 @@
 struct xnu_world {
 	unsigned long long linux_regs[14];	/* 0: x19..x28, x29, x30, sp, irq cookie */
 	unsigned long long xnu_regs[13];	/* 112: x19..x28, x29, x30, sp */
-	unsigned long long linux_tpidr;		/* 216 */
-	unsigned long long xnu_tpidr;		/* 224 */
+	unsigned long long linux_tpidr0;		/* 216: TPIDR_EL0 */
+	unsigned long long linux_tpidrro0;	/* 224: TPIDRRO_EL0 */
 	unsigned long long xnu_stack_top;	/* 232 */
 	struct fki_pac_keys linux_keys;		/* 240 */
 	struct fki_pac_keys xnu_keys;		/* 328 */
