@@ -2216,10 +2216,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..affd44d 100644
+index d8f1b19..5779087 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,194 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,196 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2337,7 +2337,8 @@ index d8f1b19..affd44d 100644
 +	ast_taken_user();
 +	if (linux64_svc_thread == thread && linux64_tracing()) {	/* LINUX64 debug: what the system call returned (C set: x0 is errno) */
 +		linux64_svc_thread = NULL;
-+		kprintf("linux64: svc %lld -> x0 0x%llx x1 0x%llx%s\n", linux64_svc_num, get_saved_state_reg(thread->machine.upcb, 0),
++		extern int proc_selfpid(void);
++		kprintf("linux64: [%d] svc %lld -> x0 0x%llx x1 0x%llx%s\n", proc_selfpid(), linux64_svc_num, get_saved_state_reg(thread->machine.upcb, 0),
 +		    get_saved_state_reg(thread->machine.upcb, 1), (get_saved_state_cpsr(thread->machine.upcb) & PSR64_C) ? " (error)" : "");
 +	}
 +	if (reported++ == 0) {
@@ -2406,7 +2407,8 @@ index d8f1b19..affd44d 100644
 +			size_t len = 0;
 +			uint64_t ua = (num == 463 || num == 466 || num == 469 || num == 244) ? f->x[1] : f->x[0];
 +			if (copyinstr((user_addr_t)ua, path, sizeof(path), &len) == 0) {
-+				kprintf("linux64: svc %lld path \"%s\"\n", num, path);
++				extern int proc_selfpid(void);
++				kprintf("linux64: [%d] svc %lld path \"%s\"\n", proc_selfpid(), num, path);
 +			}
 +		}
 +	}
