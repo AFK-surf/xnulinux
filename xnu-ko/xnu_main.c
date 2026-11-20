@@ -340,15 +340,21 @@ static int monitor_fn(void *arg)
 
 static int enter_arm_init(struct boot_args_v2 *ba)
 {
-	struct fki_pac_keys saved; unsigned long c = fki_enter(&xnu_W.xnu_keys, &saved);
-	int n = macho_rebase(&img);
-	fki_leave(c, &saved);
-	logkv("xnu: threaded fixups applied", (u64_t)n);
-	if (n < 0) return n;
+	if (img.filetype == MH_FILESET) {
+		/* kernel collection at its link address: XNU applies the chained fixups itself; nothing slides */
+		if (img.slide) { logs("xnu: a kernel collection must not slide"); return -22; }
+		logs("xnu: kernel collection: XNU applies its chained fixups (kernel_collection_slide)");
+	} else {
+		struct fki_pac_keys saved; unsigned long c = fki_enter(&xnu_W.xnu_keys, &saved);
+		int n = macho_rebase(&img);
+		fki_leave(c, &saved);
+		logkv("xnu: threaded fixups applied", (u64_t)n);
+		if (n < 0) return n;
 
-	u64_t mh_unslid = 0;
-	int segs = macho_slide_header(&img, &mh_unslid);
-	logkv("xnu: load commands slid (segments)", (u64_t)segs);
+		u64_t mh_unslid = 0;
+		int segs = macho_slide_header(&img, &mh_unslid);
+		logkv("xnu: load commands slid (segments)", (u64_t)segs);
+	}
 	u64_t a_init = macho_sym(&img, "_arm_init"), a_hook = macho_sym(&img, "_linux64_hook"),
 	      a_slide = macho_sym(&img, "_linux64_slide");
 	logkv("xnu: arm_init at", a_init);
@@ -383,12 +389,12 @@ static int run_m2a(void)
  * M2b: XNU at its own link address in the top foreign window, on physically contiguous memory with real
  * physical addresses, so that the page tables XNU builds can be walked by the hardware.
  */
-#define XNU_WINDOW_BASE 0xfffffff007000000ULL	/* 2 MiB aligned, at or below the image's vmlow */
+#define XNU_WINDOW_BASE (img.vmlow & ~0x1fffffULL)	/* 2 MiB aligned, at or below the image's vmlow */
 
 static int run_m2b(void)
 {
 	u64_t image_size = img.vmhigh - img.vmlow;
-	if (img.vmlow < XNU_WINDOW_BASE || img.vmlow - XNU_WINDOW_BASE >= 0x200000) { logs("xnu: unexpected link address"); return -22; }
+	if (img.vmlow < 0xffffffe000000000ULL) { logs("xnu: unexpected link address"); return -22; }
 	u64_t image_off = img.vmlow - XNU_WINDOW_BASE;
 	u64_t want = image_off + image_size + 0x20000 + ((u64_t)ram_mb << 20);
 	int err = fki_contig_alloc(want, &img.region);
@@ -401,6 +407,8 @@ static int run_m2b(void)
 	if (err) return err;
 	unsigned long long *l2 = l2page.va;
 	unsigned first = (XNU_WINDOW_BASE >> 21) & 511;
+	if (first + (img.region.size >> 21) > 512) { logs("xnu: image and DRAM cross a 1 GiB L1 slot (one bootstrap L2 table only)"); return -22; }
+	logkv("xnu: bootstrap window base", XNU_WINDOW_BASE);
 	for (u64_t o = 0; o < img.region.size; o += 0x200000) {
 		/* 2 MiB block: normal WB (AttrIdx 0 in Linux's MAIR), inner shareable, AF, EL1 RWX, UXN */
 		l2[first + (o >> 21)] = (img.region.pa + o) | (1ULL << 54) | (1ULL << 10) | (3ULL << 8) | 1;

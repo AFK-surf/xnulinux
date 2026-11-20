@@ -8,6 +8,8 @@ typedef unsigned long long u64_t;
 #define LC_SEGMENT_64 0x19
 #define LC_SYMTAB 0x2
 #define LC_UNIXTHREAD 0x5
+#define LC_FILESET_ENTRY 0x80000035
+#define MH_FILESET 12
 
 struct mh64 { u32_t magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved; };
 struct lc { u32_t cmd, cmdsize; };
@@ -24,7 +26,10 @@ struct xnu_image {
 	const struct symtab_lc *symtab;
 	u64_t thread_starts, thread_starts_size;	/* unslid vmaddr */
 	u64_t entry;			/* unslid */
+	u32_t filetype;			/* MH_EXECUTE kernel or MH_FILESET kernel collection */
+	u64_t kernel_mh;		/* MH_FILESET: the com.apple.kernel entry's header (unslid vmaddr) */
 };
+struct fileset_entry_lc { u32_t cmd, cmdsize; u64_t vmaddr, fileoff; u32_t entry_id, reserved; };
 
 int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsigned long extra);
 int macho_copy(struct xnu_image *img, void *dst);
