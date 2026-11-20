@@ -25,6 +25,9 @@
 #include <asm/barrier.h>
 #include <linux/kprobes.h>
 #include <linux/hrtimer.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
+#include <linux/err.h>
 #include <linux/sched.h>
 
 int fki_version(void)
@@ -202,6 +205,43 @@ int fki_bind_cpu(int cpu)
 	return set_cpus_allowed_ptr(current, cpumask_of(cpu));
 }
 EXPORT_SYMBOL(fki_bind_cpu);
+
+void *fki_thread_start(int (*fn)(void *), void *arg, int cpu, const char *name)
+{
+	struct task_struct *t;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
+		return NULL;
+	t = kthread_create(fn, arg, "%s", name);
+	if (IS_ERR(t))
+		return NULL;
+	kthread_bind(t, cpu);
+	get_task_struct(t);
+	wake_up_process(t);
+	return t;
+}
+EXPORT_SYMBOL(fki_thread_start);
+
+void fki_thread_stop(void *thread)
+{
+	if (thread) {
+		kthread_stop(thread);
+		put_task_struct(thread);
+	}
+}
+EXPORT_SYMBOL(fki_thread_stop);
+
+int fki_thread_should_stop(void)
+{
+	return kthread_should_stop();
+}
+EXPORT_SYMBOL(fki_thread_should_stop);
+
+void fki_msleep(unsigned int ms)
+{
+	msleep(ms);
+}
+EXPORT_SYMBOL(fki_msleep);
 
 /* ---- contiguous memory and the top foreign window ---- */
 

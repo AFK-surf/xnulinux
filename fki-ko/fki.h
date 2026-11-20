@@ -71,6 +71,14 @@ void fki_window_set(unsigned long long *slot, fki_u64 desc);
 void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns);
 /* Keep the calling task on one CPU (the hosted kernel sees that CPU's MPIDR). */
 int fki_bind_cpu(int cpu);
+/*
+ * A helper kernel thread bound to one CPU: fn(arg) runs until it returns or fki_thread_stop() is called;
+ * fn should loop on !fki_thread_should_stop() and sleep with fki_msleep().
+ */
+void *fki_thread_start(int (*fn)(void *), void *arg, int cpu, const char *name);
+void fki_thread_stop(void *thread);
+int fki_thread_should_stop(void);
+void fki_msleep(unsigned int ms);
 #ifdef __cplusplus
 }
 #endif
