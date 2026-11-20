@@ -1151,10 +1151,29 @@ index 0eae1f6..9a4e240 100644
  	read_lbr();
  #endif
 diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
-index b7134a6..7848b62 100644
+index b7134a6..e7d1c99 100644
 --- a/pexpert/arm/pe_init.c
 +++ b/pexpert/arm/pe_init.c
-@@ -410,12 +410,15 @@ PE_init_iokit(void)
+@@ -292,8 +292,10 @@ PE_init_iokit(void)
+ 	uint32_t        populate_registry_time_value = 0;
+ 
+ 	PE_init_printf(TRUE);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7900); }
+ 
+ 	printf("iBoot version: %s\n", iBoot_version);
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7901); }
+ #if defined(TARGET_OS_OSX) && defined(__arm64__)
+ 	printf("iBoot Stage 2 version: %s\n", iBoot_Stage_2_version);
+ #endif /* defined(TARGET_OS_OSX) && defined(__arm64__) */
+@@ -316,6 +318,7 @@ PE_init_iokit(void)
+ 	}
+ 
+ 	pe_prepare_images();
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(7903); }
+ 
+ 	scale = PE_state.video.v_scale;
+ 	flip = 1;
+@@ -410,12 +413,15 @@ PE_init_iokit(void)
  #endif
  	}
  
