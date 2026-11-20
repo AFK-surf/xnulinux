@@ -69,6 +69,11 @@ void fki_window_set(unsigned long long *slot, fki_u64 desc);
  * until the counter reaches deadline or max_ns pass, then return with them off again.
  */
 void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns);
+/*
+ * Called from inside fki_enter() while the hosted kernel is busy: let Linux take its pending interrupts and
+ * reschedule if it must (RCU, other tasks on this CPU), then return with IRQs and preemption off again.
+ */
+void fki_yield(void);
 /* Keep the calling task on one CPU (the hosted kernel sees that CPU's MPIDR). */
 int fki_bind_cpu(int cpu);
 /*
@@ -87,6 +92,7 @@ void fki_msleep(unsigned int ms);
  */
 unsigned long fki_regs_pc(void *regs);
 unsigned long fki_regs_lr(void *regs);
+unsigned long fki_regs_pstate(void *regs);	/* the interrupted PSTATE (SPSR) */
 void fki_regs_set_pc(void *regs, unsigned long pc);
 void fki_regs_set_reg(void *regs, unsigned int n, unsigned long v);	/* x0..x30 */
 int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsigned long far, unsigned long esr, void *regs));
