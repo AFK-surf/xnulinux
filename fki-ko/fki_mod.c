@@ -156,6 +156,13 @@ __attribute__((target("branch-protection=none"))) void fki_leave(unsigned long c
 }
 EXPORT_SYMBOL(fki_leave);
 
+__attribute__((target("branch-protection=none"))) void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save)
+{
+	keys_read(save);
+	keys_write(load);
+}
+EXPORT_SYMBOL(fki_pac_swap);
+
 fki_u64 fki_counter_frequency(void)
 {
 	return arch_timer_get_cntfrq();

@@ -47,6 +47,8 @@ void fki_blob_put(void *handle);
 /* Enter and leave a foreign context on this CPU: no preemption, no interrupts, foreign PAC keys. */
 unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved);
 void fki_leave(unsigned long cookie, const struct fki_pac_keys *saved);
+/* Swap PAC keys only (caller already in a foreign context): save current into *save, load *load. */
+void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save);
 fki_u64 fki_counter_frequency(void);
 fki_u64 fki_counter(void);
 void fki_random(void *buf, unsigned long len);

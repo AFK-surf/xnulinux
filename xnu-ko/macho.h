@@ -26,6 +26,6 @@ struct xnu_image {
 	u64_t entry;			/* unslid */
 };
 
-int macho_load(struct xnu_image *img, const void *file, unsigned long size);
+int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsigned long extra);
 int macho_rebase(struct xnu_image *img);
 u64_t macho_sym(struct xnu_image *img, const char *name);	/* runtime address or 0 */
