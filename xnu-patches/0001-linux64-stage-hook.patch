@@ -337,10 +337,10 @@ index e5e58b5..6e6596d 100644
  }
  
 diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
-index d8fd4af..2954d8c 100644
+index d8fd4af..dd071cb 100644
 --- a/bsd/vm/vm_unix.c
 +++ b/bsd/vm/vm_unix.c
-@@ -1917,6 +1917,21 @@ _shared_region_map_and_slide(
+@@ -1917,6 +1917,31 @@ _shared_region_map_and_slide(
  		    proc_getpid(p), p->p_comm, kr));
  	}
  
@@ -355,6 +355,16 @@ index d8fd4af..2954d8c 100644
 +				int e2 = copyin((user_addr_t)m->sms_file_offset, src, sizeof(src));
 +				kprintf("linux64: shared region data mapping at 0x%llx size 0x%llx from 0x%llx: sees %d %016llx %016llx %016llx, source %d %016llx %016llx\n",
 +				    m->sms_address, m->sms_size, m->sms_file_offset, e1, w[0], w[1], w[2], e2, src[0], src[1]);
++				{
++					extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
++					extern vm_offset_t phystokv(pmap_paddr_t);
++					pmap_t upmap = get_task_pmap(current_task());
++					ppnum_t pn = pmap_find_phys(upmap, (addr64_t)m->sms_file_offset);
++					uint64_t pa = ((uint64_t)pn << PAGE_SHIFT) | (m->sms_file_offset & PAGE_MASK);
++					uint64_t *kv = pn ? (uint64_t *)phystokv(pa) : NULL;
++					kprintf("linux64:   source pn 0x%x pa 0x%llx via physmap %016llx %016llx; PAR after AT S1E0R: 0x%llx\n", pn, pa,
++					    kv ? kv[0] : 0, kv ? kv[1] : 0, ({ uint64_t par; __asm__ volatile ("at s1e0r, %1\n isb\n mrs %0, par_el1" : "=r"(par) : "r"(m->sms_file_offset)); par; }));
++				}
 +			}
 +		}
 +	}
@@ -1344,7 +1354,7 @@ index d10d7a1..15e2fb4 100644
  		cpc_cpu_transition(CPC_CPU_EARLY_INIT, cdp);
  #endif /* CONFIG_CPU_COUNTERS */
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
-index a191eb3..9e745b5 100644
+index a191eb3..5c56160 100644
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
 @@ -185,7 +185,8 @@
@@ -1407,7 +1417,7 @@ index a191eb3..9e745b5 100644
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	load_general_registers	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
-@@ -444,3 +450,128 @@ LEXT(machine_set_current_thread)
+@@ -444,3 +450,171 @@ LEXT(machine_set_current_thread)
  
  
  /* vim: set ts=4: */
@@ -1447,6 +1457,28 @@ index a191eb3..9e745b5 100644
 +	ldr		w10, [x0, SS64_CPSR]
 +	orr		w10, w10, #0xc0						// IRQ and FIQ stay masked at EL0 while hosted
 +	msr		SPSR_EL1, x10
++	// the user's NEON/FP state (arm_context_t ns, right after ss): upcalls may let Linux schedule, which reuses the registers
++	add		x9, x0, NS64_Q0
++	ldp		q0, q1, [x9, #0]
++	ldp		q2, q3, [x9, #32]
++	ldp		q4, q5, [x9, #64]
++	ldp		q6, q7, [x9, #96]
++	ldp		q8, q9, [x9, #128]
++	ldp		q10, q11, [x9, #160]
++	ldp		q12, q13, [x9, #192]
++	ldp		q14, q15, [x9, #224]
++	ldp		q16, q17, [x9, #256]
++	ldp		q18, q19, [x9, #288]
++	ldp		q20, q21, [x9, #320]
++	ldp		q22, q23, [x9, #352]
++	ldp		q24, q25, [x9, #384]
++	ldp		q26, q27, [x9, #416]
++	ldp		q28, q29, [x9, #448]
++	ldp		q30, q31, [x9, #480]
++	ldr		w10, [x9, #512]
++	msr		FPSR, x10
++	ldr		w10, [x9, #516]
++	msr		FPCR, x10
 +	// the next exception from EL0 starts from the top of this thread's kernel stack
 +	adrp	x11, _linux64_tpidr@PAGE
 +	ldr		x11, [x11, _linux64_tpidr@PAGEOFF]
@@ -1497,7 +1529,7 @@ index a191eb3..9e745b5 100644
 +	b		.
 +
 +Llinux64_el0_entry:
-+	sub		sp, sp, #(36 * 8)
++	sub		sp, sp, #(36 * 8 + 528)
 +	stp		x0, x1, [sp, #0]
 +	stp		x2, x3, [sp, #16]
 +	stp		x4, x5, [sp, #32]
@@ -1524,6 +1556,27 @@ index a191eb3..9e745b5 100644
 +	str		x0, [sp, #272]
 +	mrs		x0, FAR_EL1
 +	str		x0, [sp, #280]
++	add		x9, sp, #288						// the user's NEON/FP registers (linux64_el0_exception keeps them in uNeon)
++	stp		q0, q1, [x9, #0]
++	stp		q2, q3, [x9, #32]
++	stp		q4, q5, [x9, #64]
++	stp		q6, q7, [x9, #96]
++	stp		q8, q9, [x9, #128]
++	stp		q10, q11, [x9, #160]
++	stp		q12, q13, [x9, #192]
++	stp		q14, q15, [x9, #224]
++	stp		q16, q17, [x9, #256]
++	stp		q18, q19, [x9, #288]
++	stp		q20, q21, [x9, #320]
++	stp		q22, q23, [x9, #352]
++	stp		q24, q25, [x9, #384]
++	stp		q26, q27, [x9, #416]
++	stp		q28, q29, [x9, #448]
++	stp		q30, q31, [x9, #480]
++	mrs		x10, FPSR
++	str		w10, [x9, #512]
++	mrs		x10, FPCR
++	str		w10, [x9, #516]
 +	adrp	x9, EXT(linux64_el0_save)@page
 +	add		x9, x9, EXT(linux64_el0_save)@pageoff
 +	ldr		x10, [x9, #0]
@@ -2014,10 +2067,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..be334a5 100644
+index d8f1b19..f49fe56 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,161 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,172 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2133,7 +2186,12 @@ index d8f1b19..be334a5 100644
 +struct linux64_el0_frame {
 +	uint64_t x[31];
 +	uint64_t sp, pc, cpsr, esr, far;
++	uint64_t neon[64];			/* q0..q31 */
++	uint32_t fpsr, fpcr;
++	uint64_t pad;
 +};
++_Static_assert(__builtin_offsetof(struct linux64_el0_frame, neon) == 288, "linux64_el0_frame layout");
++_Static_assert(sizeof(struct linux64_el0_frame) == 36 * 8 + 528, "linux64_el0_frame size");
 +
 +void linux64_el0_exception(struct linux64_el0_frame *f) __attribute__((noreturn));
 +void
@@ -2161,6 +2219,12 @@ index d8f1b19..be334a5 100644
 +	/* EL0 runs with IRQ/FIQ masked while hosted (no XNU interrupts at EL0 yet); XNU must see the user's own PSTATE,
 +	 * or its abort path takes the user fault for one from a non-interruptible context */
 +	set_saved_state_cpsr(ss, (uint32_t)f->cpsr & ~(uint32_t)0x3c0);
++	{
++		arm_neon_saved_state_t *ns = thread->machine.uNeon;
++		memcpy(&ns->ns_64.v.q[0], f->neon, sizeof(f->neon));
++		ns->ns_64.fpsr = f->fpsr;
++		ns->ns_64.fpcr = f->fpcr;
++	}
 +	linux64_dbg[15] = 3;
 +	if (ESR_EC(f->esr) == ESR_EC_SVC_64) {
 +		long long num = (long long)f->x[16];
