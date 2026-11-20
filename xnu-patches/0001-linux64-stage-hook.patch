@@ -1640,6 +1640,30 @@ index 0eae1f6..9a4e240 100644
  #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
  	read_lbr();
  #endif
+diff --git a/osfmk/kern/kext_alloc.c b/osfmk/kern/kext_alloc.c
+index 119c6c7..0ad3136 100644
+--- a/osfmk/kern/kext_alloc.c
++++ b/osfmk/kern/kext_alloc.c
+@@ -218,6 +218,19 @@ check_reachable:
+ 	}
+ #endif
+ 
++	{
++		/*
++		 * LINUX64 (xnulinux): hosted XNU has no page-fault path of its own yet (Linux takes the abort), so kext
++		 * memory is wired up front instead of faulted in on first touch.
++		 */
++		extern uintptr_t linux64_hook;
++		if (linux64_hook) {
++			kern_return_t wr = vm_map_wire_kernel(g_kext_map, addr, addr + size, VM_PROT_DEFAULT, VM_KERN_MEMORY_KEXT, FALSE);
++			if (wr != KERN_SUCCESS) {
++				printf("linux64: kext_alloc wire failed %d\n", wr);
++			}
++		}
++	}
+ 	/* Check that the memory is reachable by kernel text */
+ 	if ((addr + size) > kext_alloc_max) {
+ 		kext_free((vm_offset_t)addr, size);
 diff --git a/osfmk/kern/link_compat.c b/osfmk/kern/link_compat.c
 index e494eab..fc40514 100644
 --- a/osfmk/kern/link_compat.c
