@@ -2,20 +2,24 @@
 // open("/dev/console", O_WRONLY), write a line, fork; the child writes its own line and exits 7,
 // the child then execve()s /sbin/hello (which writes its line and exits 7); the parent wait4()s for it, writes a closing line and exits 42.
 // Darwin reports a failed syscall with the carry flag set and errno in x0. Exit codes on failure:
-// open 64+errno, write 128+errno, short write 3, fork 4, wait4 5, child status not 7 6 (8: execve failed, 9: /sbin/hello failed).
+// open 64+errno, write 128+errno, short write 3, fork 4, wait4 5, child status not 7 or 0: 16+status (8: execve failed, 9: /sbin/hello failed).
 	.text
 	.globl	_start
 	.p2align 2
 _start:
 	mov	x9, sp			// the kernel hands over sp at the Mach-O stack's argc slot (8-aligned); EL0 checks SP alignment
 	and	sp, x9, #~15
+	mov	x22, #3			// /dev/console as fds 0, 1, 2 (stdin, stdout, stderr for what the child execs)
+Lopen_again:
 	adr	x0, Lpath
-	mov	x1, #1			// O_WRONLY
+	mov	x1, #2			// O_RDWR
 	mov	x2, #0
 	mov	x16, #5			// SYS_open
 	svc	#0x80
 	b.cs	Lopen_failed
-	mov	x19, x0			// fd
+	subs	x22, x22, #1
+	b.ne	Lopen_again
+	mov	x19, #1			// write to stdout
 	adr	x1, Lmsg
 	mov	x2, #(Lmsg_end - Lmsg)
 	bl	Lwrite
@@ -35,7 +39,9 @@ _start:
 	ldr	w0, [sp]
 	lsr	w0, w0, #8		// WEXITSTATUS
 	and	w0, w0, #0xff
-	cmp	w0, #7
+	mov	x23, x0
+	cmp	w0, #7			// /sbin/hello exits 7, /bin/echo 0
+	ccmp	w0, #0, #4, ne
 	b.ne	Lbad_status
 	adr	x1, Lmsg3
 	mov	x2, #(Lmsg3_end - Lmsg3)
@@ -49,7 +55,16 @@ Lchild:
 	adr	x1, Lmsg2
 	mov	x2, #(Lmsg2_end - Lmsg2)
 	bl	Lwrite
-	adr	x0, Lhello		// execve("/sbin/hello", {"/sbin/hello", NULL}, {NULL}); /sbin/hello exits 7
+	adr	x0, Lecho		// execve("/bin/echo", {"echo", "hello from /bin/echo ...", NULL}, {NULL}): Apple's dynamically
+	adr	x1, Lechoarg		// linked echo through dyld and the shared cache, where the root has them
+	stp	x1, xzr, [sp, #-16]!
+	adr	x1, Lecho0
+	stp	xzr, x1, [sp, #-16]!	// sp+0: envp NULL, sp+8: argv[0], sp+16: argv[1], sp+24: NULL
+	add	x1, sp, #8
+	mov	x2, sp
+	mov	x16, #59		// SYS_execve
+	svc	#0x80
+	adr	x0, Lhello		// no /bin/echo: execve("/sbin/hello", {"/sbin/hello", NULL}, {NULL}); /sbin/hello exits 7
 	stp	x0, xzr, [sp, #-16]!
 	mov	x1, sp
 	add	x2, sp, #8
@@ -83,7 +98,7 @@ Lwait_failed:
 	mov	x0, #5
 	b	Lexit
 Lbad_status:
-	mov	x0, #6
+	add	x0, x23, #16		// 16 + the child's exit status
 	b	Lexit
 Lpath:
 	.asciz	"/dev/console"
@@ -95,6 +110,12 @@ Lmsg2:
 Lmsg2_end:
 Lhello:
 	.asciz	"/sbin/hello"
+Lecho:
+	.asciz	"/bin/echo"
+Lecho0:
+	.asciz	"echo"
+Lechoarg:
+	.asciz	"hello from Apple's /bin/echo (dyld + dyld shared cache) on Linux"
 Lmsg3:
-	.ascii	"parent: child exited with 7\n"
+	.ascii	"parent: child exited with 7 or 0\n"
 Lmsg3_end:
