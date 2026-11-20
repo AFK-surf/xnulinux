@@ -88,6 +88,33 @@ index 4b1e8a9..f188eed 100644
  	/* Nothing to do when the runtime isn't set */
  	if (trust_cache_rt == NULL) {
  		return;
+diff --git a/bsd/pthread/pthread_shims.c b/bsd/pthread/pthread_shims.c
+index e5e58b5..6e6596d 100644
+--- a/bsd/pthread/pthread_shims.c
++++ b/bsd/pthread/pthread_shims.c
+@@ -316,6 +316,12 @@ void
+ pthread_init(void)
+ {
+ 	if (!pthread_functions) {
++		/* LINUX64 (xnulinux): hosted without pthread.kext until kexts load (M2e); continue without it. */
++		extern uintptr_t linux64_hook;
++		if (linux64_hook) {
++			printf("linux64: pthread kext not loaded, pthread support skipped\n");
++			return;
++		}
+ 		panic("pthread kernel extension not loaded (function table is NULL).");
+ 	}
+ 	pthread_functions->pthread_init();
+@@ -324,6 +330,9 @@ pthread_init(void)
+ void
+ pth_proc_hashinit(proc_t p)
+ {
++	if (!pthread_functions) {
++		return;	/* LINUX64: hosted without pthread.kext */
++	}
+ 	pthread_functions->pth_proc_hashinit(p);
+ }
+ 
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
 index 76555f6..3fad099 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
