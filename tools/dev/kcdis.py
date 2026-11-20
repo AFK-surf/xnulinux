@@ -11,12 +11,17 @@ for _ in range(ncmds):
         if vmaddr <= va < vmaddr + filesize:
             fo = fileoff + (va - vmaddr); code = d[fo:fo + n]
             words = struct.unpack('<%dI' % (len(code) // 4), code)
-            src = ''.join('0x%02x 0x%02x 0x%02x 0x%02x\n' % (w & 255, (w >> 8) & 255, (w >> 16) & 255, w >> 24) for w in words)
-            out = subprocess.run(['xcrun', 'llvm-mc', '--disassemble', '-triple=arm64e-apple-macos', '-mattr=+v8.5a,+pauth'],
-                                 input=src, capture_output=True, text=True); sys.stderr.write(out.stderr[:2000]); out = out.stdout.splitlines()
-            ins = [l for l in out if l.strip() and not l.strip().startswith('.')]
-            for i, l in enumerate(ins):
-                print('%x %s' % (va + 4 * i, l.strip()))
+            import tempfile, os
+            t = tempfile.mkdtemp()
+            open(t + '/c.s', 'w').write('.text\n.globl _x\n_x:\n' + ''.join('.inst 0x%08x\n' % w for w in words))
+            subprocess.run(['xcrun', 'clang', '-arch', 'arm64e', '-c', t + '/c.s', '-o', t + '/c.o'], check=True)
+            out = subprocess.run(['xcrun', 'llvm-objdump', '-d', '--no-show-raw-insn', '--mattr=+v8.5a,+pauth', t + '/c.o'],
+                                 capture_output=True, text=True).stdout.splitlines()
+            k = 0
+            for l in out:
+                l = l.strip()
+                if ':' in l and l.split(':')[0].strip().isalnum() and '\t' in l:
+                    print('%x %s' % (va + 4 * k, l.split(':', 1)[1].strip())); k += 1
             sys.exit(0)
     off += sz
 print('va not found')
