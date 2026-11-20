@@ -190,7 +190,6 @@ static int run_m2a(void)
 	*(u64_t *)a_hook = (u64_t)xnu_world_upcall;
 	*(u64_t *)a_slide = img.slide;
 
-	xnu_W.xnu_tpidr = 0;
 	logs("xnu: entering arm_init");
 	long r = xnu_world_call(a_init, (unsigned long)ba);
 	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: arm_init returned (unexpected), r =", (u64_t)r);
