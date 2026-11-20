@@ -1153,7 +1153,7 @@ index b0772a7..ea5e679 100644
  	mov		sp, x1			// Set the stack pointer to the interrupt stack
  .endmacro
 diff --git a/osfmk/arm64/locore.s b/osfmk/arm64/locore.s
-index 13d2819..3ba4ba7 100644
+index 13d2819..5f4700f 100644
 --- a/osfmk/arm64/locore.s
 +++ b/osfmk/arm64/locore.s
 @@ -144,7 +144,8 @@
@@ -1326,7 +1326,20 @@ index 13d2819..3ba4ba7 100644
  	ldr		w1, [x3, ACT_PREEMPT_CNT]               // Load preemption count
  	msr		DAIFSet, #DAIFSC_ALL                    // Disable exceptions
  	cbnz	x1, exception_return_unint_tpidr_x3     // If preemption disabled, skip AST check
-@@ -1816,7 +1833,8 @@ LEXT(thread_bootstrap_return)
+@@ -1802,6 +1819,12 @@ LEXT(return_to_kernel)
+ 	.globl EXT(thread_bootstrap_return)
+ LEXT(thread_bootstrap_return)
+ 	ARM64_PROLOG
++	// LINUX64 (xnulinux): hosted, a new user thread's first return goes through C (user space is not hosted yet)
++	adrp	x9, _linux64_hook@PAGE
++	ldr		x9, [x9, _linux64_hook@PAGEOFF]
++	cbz		x9, 1f
++	b		EXT(linux64_thread_bootstrap_return)
++1:
+ #if CONFIG_DTRACE
+ 	bl		EXT(dtrace_thread_bootstrap)
+ #endif
+@@ -1816,7 +1839,8 @@ LEXT(thread_bootstrap_return)
  	.globl EXT(arm64_thread_exception_return)
  LEXT(arm64_thread_exception_return)
  	ARM64_PROLOG
@@ -1336,7 +1349,7 @@ index 13d2819..3ba4ba7 100644
  	LOAD_USER_PCB	dst=x21, src=x0, tmp=x28
  	mov		x28, xzr
  
-@@ -1835,7 +1853,8 @@ check_user_asts:
+@@ -1835,7 +1859,8 @@ check_user_asts:
  	bl		EXT(__asan_handle_no_return)
  	POP_FRAME_WITHOUT_LR
  #endif /* KASAN_TBI */
@@ -1346,7 +1359,7 @@ index 13d2819..3ba4ba7 100644
  
  	movn		w2, #0
  	str		w2, [x3, TH_IOTIER_OVERRIDE]			// Reset IO tier override to -1 before returning to user
-@@ -1927,7 +1946,8 @@ no_asts:
+@@ -1927,7 +1952,8 @@ no_asts:
  	PUSH_FRAME
  	bl		EXT(arm_debug_set)					// Establish thread debug state in live regs
  	POP_FRAME_WITHOUT_LR
@@ -1356,7 +1369,7 @@ index 13d2819..3ba4ba7 100644
  	ldr		x4, [x3, ACT_CPUDATAP]				// Reload CPU data pointer
  L_skip_user_set_debug_state:
  
-@@ -1937,7 +1957,8 @@ L_skip_user_set_debug_state:
+@@ -1937,7 +1963,8 @@ L_skip_user_set_debug_state:
  exception_return:
  	msr		DAIFSet, #DAIFSC_ALL				// Disable exceptions
  exception_return_unint:
@@ -1366,7 +1379,7 @@ index 13d2819..3ba4ba7 100644
  exception_return_unint_tpidr_x3:
  	mov		sp, x21						// Reload the pcb pointer
  
-@@ -2006,7 +2027,9 @@ Lexception_return_restore_registers:
+@@ -2006,7 +2033,9 @@ Lexception_return_restore_registers:
  	// SPSR_EL1.M != EL0: no SME state to restore
  	bne		Lno_sme_saved_state
  
@@ -1377,7 +1390,7 @@ index 13d2819..3ba4ba7 100644
  	add		x3, x3, ACT_UMATRIX_HDR
  	ldr		x2, [x3]
  	cbz		x2, Lno_sme_saved_state
-@@ -2071,7 +2094,8 @@ Lno_gcr_mask_el0_reset:
+@@ -2071,7 +2100,8 @@ Lno_gcr_mask_el0_reset:
  #endif /* HAS_MTE */
  	// If sync_on_cswitch and ERET is not a CSE, issue an ISB now. Unconditionally clear the
  	// sync_on_cswitch flag.
@@ -1387,7 +1400,7 @@ index 13d2819..3ba4ba7 100644
  	ldr		x1, [x1, ACT_CPUDATAP]
  
  	// Redefined for backporting.
-@@ -2095,7 +2119,8 @@ Lno_gcr_mask_el0_reset:
+@@ -2095,7 +2125,8 @@ Lno_gcr_mask_el0_reset:
  	mrs		x2, SPSR_EL1
  	tst		x2, #(PSR64_MODE_EL_MASK)
  	b.ne	1f
@@ -1397,7 +1410,7 @@ index 13d2819..3ba4ba7 100644
  	ldr		w2, [x2, TH_ARM_MACHINE_FLAGS]
  	tbz		w2, #ARM_MACHINE_THREAD_DISABLE_USER_JOP_SHIFT, 1f
  	mrs		x2, SCTLR_EL1
-@@ -2184,7 +2209,8 @@ user_take_ast:
+@@ -2184,7 +2215,8 @@ user_take_ast:
  	.text
  	.align 2
  preempt_underflow:
@@ -1407,7 +1420,7 @@ index 13d2819..3ba4ba7 100644
  	str		x0, [sp, #-16]!						// We'll print thread pointer
  	adr		x0, L_underflow_str					// Format string
  	CALL_EXTERN panic							// Game over
-@@ -2197,7 +2223,8 @@ L_underflow_str:
+@@ -2197,7 +2229,8 @@ L_underflow_str:
  	.text
  	.align 2
  preempt_count_notzero:
@@ -1417,7 +1430,7 @@ index 13d2819..3ba4ba7 100644
  	str		x0, [sp, #-16]!						// We'll print thread pointer
  	ldr		w0, [x0, ACT_PREEMPT_CNT]
  	str		w0, [sp, #8]
-@@ -2457,7 +2484,8 @@ ppl_exit:
+@@ -2457,7 +2490,8 @@ ppl_exit:
  	add		x15, x15, x10, lsl #32
  
  	/* Load the preemption count. */
@@ -1427,7 +1440,7 @@ index 13d2819..3ba4ba7 100644
  	ldr		w12, [x10, ACT_PREEMPT_CNT]
  
  	/* Detect underflow */
-@@ -2493,7 +2521,8 @@ Lno_preempt_underflow:
+@@ -2493,7 +2527,8 @@ Lno_preempt_underflow:
  	mov		w12, #0
  
  	/* Restore the thread pointer into x10. */
@@ -1437,7 +1450,7 @@ index 13d2819..3ba4ba7 100644
  
  Lskip_collect_measurement:
  #endif /* SCHED_HYGIENE_DEBUG */
-@@ -2743,7 +2772,8 @@ LEXT(_sptm_pre_entry_hook)
+@@ -2743,7 +2778,8 @@ LEXT(_sptm_pre_entry_hook)
  	stp		x6, x7, [sp, #0x30]
  
  	/* Increase the preemption count. */
@@ -1447,7 +1460,7 @@ index 13d2819..3ba4ba7 100644
  	cbz		x9, Lskip_preemption_check_sptmhook
  	ldr		w10, [x9, ACT_PREEMPT_CNT]
  	add		w10, w10, #1
-@@ -2803,7 +2833,8 @@ LEXT(_sptm_post_exit_hook)
+@@ -2803,7 +2839,8 @@ LEXT(_sptm_post_exit_hook)
  
  
  	/* Load the preemption count. */
@@ -1457,7 +1470,7 @@ index 13d2819..3ba4ba7 100644
  	cbz		x0, Lsptm_skip_ast_taken_sptmhook
  	ldr		w12, [x0, ACT_PREEMPT_CNT]
  
-@@ -2834,7 +2865,8 @@ Lno_preempt_underflow_sptmhook:
+@@ -2834,7 +2871,8 @@ Lno_preempt_underflow_sptmhook:
  	mov		w12, #0
  
  	/* Restore x0 as the thread pointer */
@@ -1467,7 +1480,7 @@ index 13d2819..3ba4ba7 100644
  
  Lskip_collect_measurement_sptmhook:
  #endif /* SCHED_HYGIENE_DEBUG */
-@@ -2916,7 +2948,9 @@ LEXT(panic_lockdown_record_debug_data)
+@@ -2916,7 +2954,9 @@ LEXT(panic_lockdown_record_debug_data)
  	mov		x1, sp
  	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_SP]
  
@@ -1597,10 +1610,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..29daae4 100644
+index d8f1b19..cac79d3 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,38 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,56 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1638,6 +1651,24 @@ index d8f1b19..29daae4 100644
 +		}
 +	}
 +	return vm_fault(kernel_map, far, fault_type, FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0);
++}
++
++/*
++ * LINUX64 (xnulinux): the first return of a new user thread (thread_bootstrap_return) while hosted. The pending ASTs
++ * run as on the way to user space (for the first BSD thread: bsdinit_task, which execs launchd); then the host is told
++ * where user space would start. Entering EL0 is M3.
++ */
++void linux64_thread_bootstrap_return(void) __attribute__((noreturn));
++void
++linux64_thread_bootstrap_return(void)
++{
++	extern void linux64_stage_arg(unsigned long, unsigned long);
++	thread_t thread = current_thread();
++
++	(void)ml_set_interrupts_enabled(FALSE);
++	ast_taken_user();
++	linux64_stage_arg(9100, get_saved_state_pc(thread->machine.upcb));
++	panic("linux64: user space entry is not hosted yet");
 +}
 diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
 index 4224c9d..4a1fe94 100644
