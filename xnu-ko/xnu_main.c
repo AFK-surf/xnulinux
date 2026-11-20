@@ -95,6 +95,8 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 	static const struct { unsigned long s; const char *what; } names[] = {
 		{ 101, "image slid, structors signed" }, { 110, "PE_init_platform: ADT parsed" },
 		{ 120, "ml_parse_cpu_topology" }, { 130, "kernel_startup_bootstrap returned" },
+		{ 140, "timer_call_init" }, { 150, "cpu_init" }, { 160, "processor_bootstrap" },
+		{ 170, "boot-arg parsing" }, { 175, "nanoseconds_to_absolutetime" }, { 180, "/chosen dram-base/size" },
 		{ 199, "arm_init reached arm_vm_init" },
 	};
 	const char *what = "?";
