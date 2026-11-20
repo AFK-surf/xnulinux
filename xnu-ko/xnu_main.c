@@ -41,6 +41,9 @@ static u64_t diag_va[6];
 static void *blob;
 /* A root RAM disk (firmware blob): placed in XNU's DRAM after the ADT, /chosen/memory-map RAMDisk, boot-arg rd=md0. */
 static char *ramdisk;
+/* Extra XNU boot arguments, appended to the built-in command line */
+static char *bootargs;
+module_param(bootargs, charp, 0444);
 module_param(ramdisk, charp, 0444);
 static const void *rd_data; static unsigned long rd_size; static void *rd_blob;
 struct xnu_world xnu_W;
@@ -411,7 +414,12 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	x_memcpy(ba->CommandLine, cmdline, x_strlen(cmdline) + 1);
 	if (rd_size) {
 		const char *rd = " rd=md0";
-		x_memcpy(ba->CommandLine + x_strlen(cmdline), rd, x_strlen(rd) + 1);
+		x_memcpy(ba->CommandLine + x_strlen(ba->CommandLine), rd, x_strlen(rd) + 1);
+	}
+	if (bootargs && x_strlen(ba->CommandLine) + 1 + x_strlen(bootargs) < sizeof(ba->CommandLine)) {
+		char *e = ba->CommandLine + x_strlen(ba->CommandLine);
+		*e++ = ' ';
+		x_memcpy(e, bootargs, x_strlen(bootargs) + 1);
 	}
 	logkv("xnu: boot args at", (u64_t)ba);
 	logkv("xnu: ADT bytes", dt_len);
