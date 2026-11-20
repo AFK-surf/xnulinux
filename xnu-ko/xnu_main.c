@@ -96,7 +96,7 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		logs(m);
 		return 0;
 	}
-	if (stage == 200 && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
+	if (stage == 210 && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
 		const unsigned long long *tte = (const unsigned long long *)a1;
 		int n = 0, last = -1;
 		for (int i = XNU_L1_FIRST; i <= XNU_L1_LAST; i++) {
@@ -122,8 +122,11 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		{ 140, "timer_call_init" }, { 150, "cpu_init" }, { 160, "processor_bootstrap" },
 		{ 170, "boot-arg parsing" }, { 175, "nanoseconds_to_absolutetime" }, { 180, "/chosen dram-base/size" },
 		{ 199, "arm_init reached arm_vm_init" },
-		{ 200, "arm_vm_init: XNU's kernel L1 entries installed in Linux's table" },
-		{ 210, "arm_vm_init: running on XNU's own page tables" }, { 220, "pmap_bootstrap returned" },
+		{ 201, "arm_vm_init: memory sizes" }, { 202, "arm_vm_init: physmap placed" }, { 203, "arm_vm_init: invalid_tte" },
+		{ 204, "arm_vm_init: kernel tables (init_ptpages)" }, { 205, "arm_vm_init: segments, page size" },
+		{ 206, "arm_vm_prot_init" }, { 207, "arm_vm_init: dynamic tables" }, { 208, "arm_vm_physmap_init" },
+		{ 210, "arm_vm_init: XNU's kernel L1 entries installed in Linux's table" },
+		{ 215, "arm_vm_init: running on XNU's own page tables" }, { 220, "pmap_bootstrap returned" },
 		{ 230, "arm_vm_init returned" }, { 300, "kprintf initialized" },
 	};
 	const char *what = "?";
