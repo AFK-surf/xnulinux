@@ -243,6 +243,66 @@ void fki_msleep(unsigned int ms)
 }
 EXPORT_SYMBOL(fki_msleep);
 
+/*
+ * Foreign kernel faults. Out of tree, the hook is a kprobe on do_bad_area(far, esr, regs), where Linux's abort path
+ * goes for a kernel address it has no mapping for (do_mem_abort and do_translation_fault cannot be probed). When
+ * the handler resolves the fault, do_bad_area is skipped (return to its caller), and the exception returns to retry
+ * the access. The in-tree patch calls the hook from do_translation_fault/do_page_fault directly.
+ */
+static unsigned long fki_fault_lo, fki_fault_hi;
+static int (*fki_fault_handler)(unsigned long far, unsigned long esr, void *regs);
+
+static int fki_fault_pre(struct kprobe *p, struct pt_regs *kregs)
+{
+	unsigned long far = kregs->regs[0], esr = kregs->regs[1];
+	struct pt_regs *regs = (struct pt_regs *)kregs->regs[2];
+	int (*h)(unsigned long, unsigned long, void *) = READ_ONCE(fki_fault_handler);
+
+	if (!h || far < fki_fault_lo || far >= fki_fault_hi || user_mode(regs))
+		return 0;
+	if (h(far, esr, regs))
+		return 0;
+	instruction_pointer_set(kregs, kregs->regs[30]);	/* do_bad_area returns at once */
+	return 1;
+}
+NOKPROBE_SYMBOL(fki_fault_pre);
+
+static struct kprobe fki_fault_kp = { .symbol_name = "do_bad_area", .pre_handler = fki_fault_pre };
+static int fki_fault_registered;
+
+int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsigned long far, unsigned long esr, void *regs))
+{
+	int err;
+
+	if (fki_fault_registered)
+		return -EBUSY;
+	fki_fault_lo = lo;
+	fki_fault_hi = hi;
+	WRITE_ONCE(fki_fault_handler, handler);
+	err = register_kprobe(&fki_fault_kp);
+	if (err) {
+		WRITE_ONCE(fki_fault_handler, NULL);
+		return err;
+	}
+	fki_fault_registered = 1;
+	return 0;
+}
+EXPORT_SYMBOL(fki_fault_register);
+
+void fki_fault_unregister(void)
+{
+	if (!fki_fault_registered)
+		return;
+	unregister_kprobe(&fki_fault_kp);
+	WRITE_ONCE(fki_fault_handler, NULL);
+	fki_fault_registered = 0;
+	/* a fresh kprobe struct for the next registration */
+	memset(&fki_fault_kp, 0, sizeof(fki_fault_kp));
+	fki_fault_kp.symbol_name = "do_bad_area";
+	fki_fault_kp.pre_handler = fki_fault_pre;
+}
+EXPORT_SYMBOL(fki_fault_unregister);
+
 /* ---- contiguous memory and the top foreign window ---- */
 
 int fki_contig_alloc(unsigned long size, struct fki_region *r)
