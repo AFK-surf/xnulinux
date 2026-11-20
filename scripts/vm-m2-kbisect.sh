@@ -9,7 +9,7 @@ sudo rmmod xnu 2>/dev/null; sudo rmmod fki 2>/dev/null; sudo insmod fki-ko/fki.k
 for K in "$@"; do
   sudo dmesg -C
   echo ">>> kmax=$K"; sync
-  sudo insmod xnu-ko/xnu.ko mode=3 stop=899 kmax=$K idle_max=${IDLE_MAX:-200} ram_mb=${RAM_MB:-128} ${IMAGE:+image=$IMAGE} ${RAMDISK:+ramdisk=$RAMDISK} ${HOSTDISK:+hostdisk=$HOSTDISK hostdisk_rw=1} ${BOOTARGS:+bootargs=\"$BOOTARGS\"}
+  sudo insmod xnu-ko/xnu.ko mode=3 stop=899 kmax=$K idle_max=${IDLE_MAX:-200} ram_mb=${RAM_MB:-128} ${IMAGE:+image=$IMAGE} ${RAMDISK:+ramdisk=$RAMDISK} ${HOSTDISK:+hostdisk=$HOSTDISK hostdisk_rw=1} ${CONSOLE_IN:+console_in=$CONSOLE_IN} ${BOOTARGS:+bootargs=\"$BOOTARGS\"}
   echo "lines: $(sudo dmesg | grep -ac 'xnu\]')"
   sudo dmesg | grep -a "xnu\]\|XNU stage 4\|budget\|panic\|run ended" | tail -${SHOW:-4}
   sudo rmmod xnu

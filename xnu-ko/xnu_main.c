@@ -52,6 +52,11 @@ static int hostdisk_rw;
 module_param(hostdisk, charp, 0444);
 module_param(hostdisk_rw, int, 0444);
 static void *hd_file; static fki_u64 hd_size;
+/* Console input for XNU's /dev/console: bytes appended to this host file are typed in (stage 993) */
+static char *console_in;
+module_param(console_in, charp, 0444);
+static void *ci_file; static fki_u64 ci_off;
+struct xnu_cons_req { void *buf; u64_t len; long result; };
 /* hook returns must be 0 (nonzero ends the run): results come back through the request */
 struct xnu_hostdisk_req { u64_t write, off, len; void *buf; long result; };
 struct xnu_world xnu_W;
@@ -229,6 +234,16 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 
 static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2)
 {
+	if (stage == 993) {		/* console input: new bytes of console_in */
+		struct xnu_cons_req *q = (struct xnu_cons_req *)a1;
+		if (!q) return 0;
+		q->result = 0;
+		if (ci_file) {
+			long n = fki_file_rw(ci_file, 0, q->buf, (unsigned long)q->len, ci_off);
+			if (n > 0) { ci_off += n; q->result = n; }
+		}
+		return 0;
+	}
 	if (stage == 995) {		/* host disk size in bytes into *a1, 0 when there is none */
 		if (a1) *(u64_t *)a1 = hd_file ? hd_size : 0;
 		return 0;
@@ -676,6 +691,12 @@ static int __init xnu_init(void)
 		err = fki_blob_get(ramdisk, &rd_data, &rd_size, &rd_blob);
 		if (err) { logkv("xnu: cannot read the RAM disk, err", (u64_t)err); return err; }
 	}
+	if (console_in) {
+		fki_u64 sz = 0;
+		ci_file = fki_file_open(console_in, 0, &sz);
+		ci_off = sz;	/* only what is written after the load */
+		if (!ci_file) logs("xnu: cannot open console_in");
+	}
 	if (hostdisk) {
 		hd_file = fki_file_open(hostdisk, hostdisk_rw, &hd_size);
 		if (!hd_file) { logs("xnu: cannot open the host disk"); return -2; }
@@ -712,6 +733,7 @@ static void __exit xnu_exit(void)
 	if (blob) fki_blob_put(blob);
 	if (rd_blob) fki_blob_put(rd_blob);
 	if (hd_file) fki_file_close(hd_file);
+	if (ci_file) fki_file_close(ci_file);
 }
 
 module_init(xnu_init);
