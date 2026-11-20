@@ -704,10 +704,10 @@ index 0eae1f6..9a4e240 100644
  	read_lbr();
  #endif
 diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
-index fea9411..217500a 100644
+index fea9411..af15540 100644
 --- a/pexpert/arm/pe_kprintf.c
 +++ b/pexpert/arm/pe_kprintf.c
-@@ -107,6 +107,25 @@ kprintf(const char *fmt, ...)
+@@ -107,6 +107,26 @@ kprintf(const char *fmt, ...)
  	boolean_t       state;
  	void           *caller = __builtin_return_address(0);
  
@@ -715,6 +715,7 @@ index fea9411..217500a 100644
 +		/* LINUX64 (xnulinux): hosted XNU prints through the host (dmesg). */
 +		extern uintptr_t linux64_hook;
 +		if (linux64_hook) {
++			extern int vsnprintf(char *, size_t, const char *, va_list);
 +			char buf[256];
 +			va_start(listp, fmt);
 +			vsnprintf(buf, sizeof(buf), fmt, listp);
