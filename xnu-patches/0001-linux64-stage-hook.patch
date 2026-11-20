@@ -1293,7 +1293,7 @@ index 13d2819..3ba4ba7 100644
  
  	mrs		x1, MPIDR_EL1
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index f456377..b4c18c1 100644
+index f456377..4568231 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
 @@ -441,6 +441,14 @@ ml_get_interrupts_enabled(void)
@@ -1311,7 +1311,20 @@ index f456377..b4c18c1 100644
  	MRS(value, "DAIF");
  	if ((value & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE) {
  		return FALSE;
-@@ -2529,6 +2537,13 @@ ml_set_decrementer(uint32_t dec_value)
+@@ -585,8 +593,12 @@ machine_lockdown(void)
+ #else
+ #endif
+ 
++	extern void linux64_stage_ext(unsigned long stage);
++	linux64_stage_ext(8101);
+ 	arm_vm_prot_finalize(PE_state.bootArgs);
++	linux64_stage_ext(8102);
+ 	ml_release_deferred_pages();
++	linux64_stage_ext(8103);
+ 
+ #if CONFIG_KERNEL_INTEGRITY
+ #if KERNEL_INTEGRITY_WT
+@@ -2529,6 +2541,13 @@ ml_set_decrementer(uint32_t dec_value)
  		}
  	}
  
@@ -1326,7 +1339,7 @@ index f456377..b4c18c1 100644
  		cdp->cpu_set_decrementer_func((uint32_t)counter_value);
  	} else {
 diff --git a/osfmk/arm64/machine_routines_asm.s b/osfmk/arm64/machine_routines_asm.s
-index 96650a0..54d80e5 100644
+index 96650a0..8986f4f 100644
 --- a/osfmk/arm64/machine_routines_asm.s
 +++ b/osfmk/arm64/machine_routines_asm.s
 @@ -95,7 +95,8 @@ Lcre_start_\@:
@@ -1339,6 +1352,26 @@ index 96650a0..54d80e5 100644
  	ldr		\tmp, [\tmp, ACT_CPUDATAP]
  	ldr		\dst, [\tmp, CPU_JOP_KEY]
  .endmacro
+@@ -1748,6 +1749,11 @@ LEXT(arm64_force_wfi_clock_gate)
+ LEXT(arm64_replace_bootstack)
+ 	ARM64_STACK_PROLOG
+ 	PUSH_FRAME
++	// LINUX64 (xnulinux): hosted, SP_EL1 is Linux's kernel stack and SP_EL0 is Linux's `current`;
++	// XNU must not touch either. Its exception stacks are unused while hosted.
++	adrp	x9, _linux64_hook@PAGE
++	ldr		x9, [x9, _linux64_hook@PAGEOFF]
++	cbnz	x9, Lreplace_bootstack_hosted
+ 	// Set the exception stack pointer
+ 	ldr		x0, [x0, CPU_EXCEPSTACK_TOP]
+ 	mrs		x4, DAIF					// Load current DAIF; use x4 as pinst may trash x1-x3
+@@ -1763,6 +1769,7 @@ LEXT(arm64_replace_bootstack)
+ 	mov		sp, x0
+ 	msr		SPSel, #0
+ 	msr		DAIF, x4					// Restore interrupt state
++Lreplace_bootstack_hosted:
+ 	POP_FRAME
+ 	ARM64_STACK_EPILOG EXT(arm64_replace_bootstack)
+ 
 diff --git a/osfmk/arm64/pac_asm.h b/osfmk/arm64/pac_asm.h
 index d211433..dc247da 100644
 --- a/osfmk/arm64/pac_asm.h
