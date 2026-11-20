@@ -455,7 +455,7 @@ static int monitor_fn(void *arg)
 		fki_msleep(2000);
 		if (!xnu_dbg || lines >= 90)
 			continue;
-		char buf[256]; char *p = buf;
+		char buf[420]; char *p = buf;
 		const char *h = "xnu: monitor";
 		while (*h) *p++ = *h++;
 		for (int i = 0; i < 8; i++) {
@@ -464,6 +464,16 @@ static int monitor_fn(void *arg)
 			for (const char *n = names[i]; *n; n++) *p++ = *n;
 			*p++ = '=';
 			p = put_dec(p, xnu_dbg[i]);
+		}
+		h = " el0exc=";
+		while (*h) *p++ = *h++;
+		p = put_dec(p, xnu_dbg[10]);
+		{
+			static const char *const k[] = { " esr=0x", " far=0x", " pc=0x", " bad_esr=0x", " bad_elr=0x" };
+			for (int j = 0; j < 5; j++) {
+				for (h = k[j]; *h; h++) *p++ = *h;
+				for (int i = 44; i >= 0; i -= 4) *p++ = "0123456789abcdef"[(xnu_dbg[11 + j] >> i) & 15];
+			}
 		}
 		h = " thread=0x";
 		while (*h) *p++ = *h++;
