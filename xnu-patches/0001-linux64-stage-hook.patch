@@ -1094,7 +1094,7 @@ index d10d7a1..15e2fb4 100644
  		cpc_cpu_transition(CPC_CPU_EARLY_INIT, cdp);
  #endif /* CONFIG_CPU_COUNTERS */
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
-index a191eb3..fe8bf4e 100644
+index a191eb3..5017a8c 100644
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
 @@ -185,7 +185,8 @@
@@ -1157,7 +1157,7 @@ index a191eb3..fe8bf4e 100644
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	load_general_registers	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
-@@ -444,3 +450,119 @@ LEXT(machine_set_current_thread)
+@@ -444,3 +450,128 @@ LEXT(machine_set_current_thread)
  
  
  /* vim: set ts=4: */
@@ -1226,7 +1226,7 @@ index a191eb3..fe8bf4e 100644
 +	.globl EXT(linux64_el0_vectors)
 +LEXT(linux64_el0_vectors)
 +	.rept 8										// current EL (SP0, SPx): not expected while at EL0
-+	b		.
++	b		Llinux64_el0_bad
 +	.align 7
 +	.endr
 +	.rept 4										// lower EL, AArch64: sync, IRQ, FIQ, SError
@@ -1237,6 +1237,15 @@ index a191eb3..fe8bf4e 100644
 +	b		.
 +	.align 7
 +	.endr
++
++Llinux64_el0_bad:								// note it for the monitor (linux64_dbg[14] = ESR) and stop here
++	adrp	x9, _linux64_dbg@PAGE
++	add		x9, x9, _linux64_dbg@PAGEOFF
++	mrs		x10, ESR_EL1
++	str		x10, [x9, #112]
++	mrs		x10, ELR_EL1
++	str		x10, [x9, #120]
++	b		.
 +
 +Llinux64_el0_entry:
 +	sub		sp, sp, #(36 * 8)
@@ -1755,10 +1764,10 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..578aa9a 100644
+index d8f1b19..4fef008 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,106 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3646,111 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1853,7 +1862,12 @@ index d8f1b19..578aa9a 100644
 +{
 +	thread_t thread = current_thread();
 +	arm_saved_state_t *ss = thread->machine.upcb;
++	extern unsigned long linux64_dbg[16];
 +
++	linux64_dbg[10]++;			/* LINUX64 debug: EL0 exceptions, the last one's ESR, FAR, PC */
++	linux64_dbg[11] = f->esr;
++	linux64_dbg[12] = f->far;
++	linux64_dbg[13] = f->pc;
 +	for (unsigned i = 0; i < 29; i++) {
 +		set_saved_state_reg(ss, i, f->x[i]);
 +	}
