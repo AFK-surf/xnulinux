@@ -1,3 +1,16 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 5362b32..cd43d8e 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -585,7 +585,7 @@ bsd_init(void)
+ 	check_for_failure_injection(XNU_STAGE_BSD_INIT_START);
+ #endif
+ 
+-#define DEBUG_BSDINIT 0
++#define DEBUG_BSDINIT 1	/* LINUX64 (xnulinux) PoC: bsd_init progress to kprintf */
+ 
+ #if DEBUG_BSDINIT
+ #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
 diff --git a/bsd/kern/kern_trustcache.c b/bsd/kern/kern_trustcache.c
 index 4b1e8a9..f188eed 100644
 --- a/bsd/kern/kern_trustcache.c
@@ -1631,6 +1644,26 @@ index b2aae03..dcfaff8 100644
  		/*
  		 * Ensure that updates to my processor and pset state,
  		 * made by the IPI source processor before sending the IPI,
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index a004862..8d4f8a1 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -910,6 +910,7 @@ kernel_bootstrap_thread(void)
+ #ifdef  IOKIT
+ 	kernel_bootstrap_log("PE_lockdown_iokit");
+ 	PE_lockdown_iokit();
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(8201); }	/* LINUX64 */
+ #endif
+ 	/*
+ 	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
+@@ -926,6 +927,7 @@ kernel_bootstrap_thread(void)
+ 	 *	Start the user bootstrap.
+ 	 */
+ #ifdef  MACH_BSD
++	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(8202); }	/* LINUX64 */
+ 	bsd_init();
+ #endif
+ 
 diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
 index 44b993c..d21911d 100644
 --- a/osfmk/prng/prng_random.c
@@ -1695,7 +1728,7 @@ index 44b993c..d21911d 100644
  
  	return 0;
 diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
-index b7134a6..e7d1c99 100644
+index b7134a6..384bacf 100644
 --- a/pexpert/arm/pe_init.c
 +++ b/pexpert/arm/pe_init.c
 @@ -292,8 +292,10 @@ PE_init_iokit(void)
@@ -1730,6 +1763,18 @@ index b7134a6..e7d1c99 100644
  #endif
  	ConfigureIOKit();
 +	{ extern void linux64_stage_ext(unsigned long); linux64_stage_ext(8003); }
+ }
+ 
+ void
+@@ -433,8 +439,11 @@ PE_lockdown_iokit(void)
+ 	 * against a kernel which has not yet enabled the full set of available
+ 	 * hardware protections.
+ 	 */
++	extern void linux64_stage_ext(unsigned long);
+ 	zalloc_iokit_lockdown();
++	linux64_stage_ext(8211);	/* LINUX64 */
+ 	StartIOKitMatching();
++	linux64_stage_ext(8212);	/* LINUX64 */
  }
  
  void
