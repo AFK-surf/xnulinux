@@ -1676,6 +1676,30 @@ index d8f1b19..cac79d3 100644
 +	linux64_stage_arg(9100, get_saved_state_pc(thread->machine.upcb));
 +	panic("linux64: user space entry is not hosted yet");
 +}
+diff --git a/osfmk/arm64/status.c b/osfmk/arm64/status.c
+index c615764..72ec4a7 100644
+--- a/osfmk/arm64/status.c
++++ b/osfmk/arm64/status.c
+@@ -2103,16 +2103,17 @@ machine_thread_state_initialize(thread_t thread)
+                         "mov	x3, #0"                 "\n"
+                         "mov	x4, #0"                 "\n"
+                         "mov	x5, #0"                 "\n"
++                        "mrs	x10, SPSel"             "\n"
+                         "msr	SPSel, #1"              "\n"
+                         VERIFY_USER_THREAD_STATE_INSTR  "\n"
+                         "mov	x6, lr"                 "\n"
+                         "bl     _ml_sign_thread_state"  "\n"
+-                        "msr	SPSel, #0"              "\n"
++                        "msr	SPSel, x10"             "\n"
+                         "mov	lr, x6"                 "\n"
+                         :
+                         : [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr),
+                           VERIFY_USER_THREAD_STATE_INPUTS
+-                        : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x17"
++                        : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x10", "x17"
+                 );
+ 		ml_pac_safe_interrupts_restore(intr);
+ 	}
 diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
 index 4224c9d..4a1fe94 100644
 --- a/osfmk/kern/assert.h
@@ -1960,6 +1984,36 @@ index a004862..8d4f8a1 100644
  	bsd_init();
  #endif
  
+diff --git a/osfmk/mach/arm/thread_status.h b/osfmk/mach/arm/thread_status.h
+index 99971b0..efc6ab8 100644
+--- a/osfmk/mach/arm/thread_status.h
++++ b/osfmk/mach/arm/thread_status.h
+@@ -522,6 +522,7 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
+ 	        asm volatile (                                                  \
+ 	                "mov	x9, lr"				"\n"            \
+ 	                "mov	x0, %[iss]"			"\n"            \
++	                "mrs	x10, SPSel"			"\n"            \
+ 	                "msr	SPSel, #1"			"\n"            \
+ 	                "ldp	x4, x5, [x0, %[SS64_X16]]"	"\n"            \
+ 	                "ldr	x7, [x0, %[SS64_PC]]"		"\n"            \
+@@ -535,7 +536,7 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
+ 	                _instr					"\n"            \
+ 	                "bl	_ml_sign_thread_state"		"\n"            \
+ 	                "0:"					"\n"            \
+-	                "msr	SPSel, #0"			"\n"            \
++	                "msr	SPSel, x10"			"\n"            \
+ 	                "mov	lr, x9"				"\n"            \
+ 	                :                                                       \
+ 	                : [iss]         "r"(_iss),                              \
+@@ -544,7 +545,7 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
+ 	                  [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),               \
+ 	                  [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__    \
+ 	                : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", \
+-	                  "x9", "x16", "x17"                                    \
++	                  "x9", "x10", "x16", "x17"                             \
+ 	        );                                                              \
+ 	        ml_pac_safe_interrupts_restore(_intr);                          \
+ 	} while (0)
 diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
 index 44b993c..d21911d 100644
 --- a/osfmk/prng/prng_random.c
