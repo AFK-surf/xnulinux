@@ -28,6 +28,7 @@ static struct xnu_image img;
 static struct fki_region l2page;
 static unsigned long long *window_slot, *window_l1;
 static unsigned char window_owned[512];
+static u64_t diag_va[4];
 #define XNU_L1_FIRST 384	/* VM_MIN_KERNEL_ADDRESS 0xffffffe000000000 */
 #define XNU_L1_LAST 495	/* VM_MAX_KERNEL_ADDRESS 0xfffffffbffffffff */
 static void *blob;
@@ -86,6 +87,35 @@ struct boot_args_v2 {			/* pexpert/arm64/boot.h layout */
 
 static const char *cmdline = "debug=0x8 -v serial=0 startup_debug=1 vm_compression_limit=1572864";
 
+
+/* Walk XNU's kernel tables (inside its contiguous DRAM) for va and log the descriptors. */
+static unsigned long long *tbl_va(u64_t desc)
+{
+	u64_t pa = desc & 0x0000fffffffff000ULL;
+	if (pa < img.region.pa || pa >= img.region.pa + img.region.size) return 0;
+	return (unsigned long long *)((char *)img.region.va + (pa - img.region.pa));
+}
+
+static void walk_log(const char *what, u64_t va, const unsigned long long *l1)
+{
+	u64_t d1 = l1[(va >> 30) & 511], d2 = 0, d3 = 0;
+	logs(what);
+	logkv("xnu:   va", va);
+	logkv("xnu:   L1", d1);
+	if ((d1 & 3) == 3) {
+		unsigned long long *t2 = tbl_va(d1);
+		if (!t2) { logs("xnu:   L2 table outside XNU DRAM"); return; }
+		d2 = t2[(va >> 21) & 511];
+		logkv("xnu:   L2", d2);
+		if ((d2 & 3) == 3) {
+			unsigned long long *t3 = tbl_va(d2);
+			if (!t3) { logs("xnu:   L3 table outside XNU DRAM"); return; }
+			d3 = t3[(va >> 12) & 511];
+			logkv("xnu:   L3", d3);
+		}
+	}
+}
+
 long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 {
 	if (stage == 998) {		/* XNU kprintf */
@@ -98,6 +128,10 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 	}
 	if (stage == 210 && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
 		const unsigned long long *tte = (const unsigned long long *)a1;
+		walk_log("xnu: XNU table walk for arm_init (text)", diag_va[0], tte);
+		walk_log("xnu: XNU table walk for the Mach-O header", diag_va[1], tte);
+		walk_log("xnu: XNU table walk for boot args", diag_va[2], tte);
+		walk_log("xnu: XNU table walk for the cpu_tte page", a1, tte);
 		int n = 0, last = -1;
 		for (int i = XNU_L1_FIRST; i <= XNU_L1_LAST; i++) {
 			if (!(tte[i] & 1)) continue;
@@ -231,6 +265,7 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	*(u64_t *)a_hook = (u64_t)xnu_world_upcall;
 	*(u64_t *)a_slide = img.slide;
 
+	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba;
 	logs("xnu: entering arm_init");
 	long r = xnu_world_call(a_init, (unsigned long)ba);
 	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: arm_init returned (unexpected), r =", (u64_t)r);
