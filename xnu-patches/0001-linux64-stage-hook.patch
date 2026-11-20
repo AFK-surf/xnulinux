@@ -1,5 +1,5 @@
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..283fb99 100644
+index ac1713e..f0a504d 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -228,6 +228,13 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
@@ -32,7 +32,7 @@ index ac1713e..283fb99 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +352,27 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +352,34 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
@@ -57,10 +57,17 @@ index ac1713e..283fb99 100644
 +	}
 +}
 +
++void linux64_stage_ext(unsigned long stage);
++void
++linux64_stage_ext(unsigned long stage)
++{
++	linux64_stage(stage);
++}
++
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
-@@ -361,6 +393,7 @@ arm_init(
+@@ -361,6 +400,7 @@ arm_init(
  	port_crumb = 100;
  	arm_slide_rebase_and_sign_image();
  	port_crumb = 101;
@@ -68,7 +75,7 @@ index ac1713e..283fb99 100644
  
  	arm_static_if_init(args);
  	port_crumb = 102;
-@@ -382,6 +415,7 @@ arm_init(
+@@ -382,6 +422,7 @@ arm_init(
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	boot_progress_init();
@@ -76,7 +83,7 @@ index ac1713e..283fb99 100644
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -475,6 +509,7 @@ arm_init(
+@@ -475,6 +516,7 @@ arm_init(
  #endif
  
  	ml_parse_cpu_topology();
@@ -84,7 +91,7 @@ index ac1713e..283fb99 100644
  
  
  	boot_cpu_id = ml_get_boot_cpu_number();
-@@ -511,15 +546,19 @@ arm_init(
+@@ -511,15 +553,19 @@ arm_init(
  
  	kernel_debug_string_early("kernel_startup_bootstrap");
  	kernel_startup_bootstrap();
@@ -104,7 +111,7 @@ index ac1713e..283fb99 100644
  
  	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
  		xmaxmem = (uint64_t) maxmem * (1024 * 1024);
-@@ -544,7 +583,9 @@ arm_init(
+@@ -544,7 +590,9 @@ arm_init(
  	}
  #endif /* SCHED_HYGIENE_DEBUG */
  
@@ -114,7 +121,7 @@ index ac1713e..283fb99 100644
  
  #if HAS_BP_RET
  	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
-@@ -581,10 +622,12 @@ arm_init(
+@@ -581,10 +629,12 @@ arm_init(
  		panic("%s: Unable to find 'dram-size' entry in the 'chosen' DT node", __FUNCTION__);
  	}
  
@@ -186,6 +193,58 @@ index 84deb3f..767b8f8 100644
  .endmacro
  
  .macro BRANCH_EXTERN
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index d10d7a1..edece60 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -735,20 +735,27 @@ cpu_idle_exit(boolean_t from_reset)
+ void
+ cpu_init(void)
+ {
++	extern void linux64_stage_ext(unsigned long);
++	linux64_stage_ext(141);
+ 	cpu_data_t     *cdp = getCpuDatap();
+ 	arm_cpu_info_t *cpu_info_p;
+ 
++	linux64_stage_ext(142);
+ 	assert(exception_stack_pointer() != 0);
++	linux64_stage_ext(143);
+ 
+ 	if (cdp->cpu_type != CPU_TYPE_ARM64) {
+ 		cdp->cpu_type = CPU_TYPE_ARM64;
+ 
+ 		timer_call_queue_init(&cdp->rtclock_timer.queue);
++		linux64_stage_ext(144);
+ 		cdp->rtclock_timer.deadline = EndOfAllTime;
+ 
+ 		if (cdp == &BootCpuData) {
+ 			do_cpuid();
++		linux64_stage_ext(145);
+ 			do_mvfpid();
++		linux64_stage_ext(146);
+ 		} else {
+ 			/*
+ 			 * We initialize non-boot CPUs here; the boot CPU is
+@@ -758,9 +765,11 @@ cpu_init(void)
+ 		}
+ 
+ 		do_cacheid();
++		linux64_stage_ext(147);
+ 
+ 		/* ARM_SMP: Assuming identical cpu */
+ 		do_debugid();
++		linux64_stage_ext(148);
+ 
+ 		cpu_info_p = cpuid_info();
+ 
+@@ -780,6 +789,7 @@ cpu_init(void)
+ 		}
+ 
+ 		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
++		linux64_stage_ext(149);
+ #if CONFIG_CPU_COUNTERS
+ 		cpc_cpu_transition(CPC_CPU_EARLY_INIT, cdp);
+ #endif /* CONFIG_CPU_COUNTERS */
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
 index a191eb3..571ea46 100644
 --- a/osfmk/arm64/cswitch.s
