@@ -80,10 +80,14 @@ void fki_thread_stop(void *thread);
 int fki_thread_should_stop(void);
 void fki_msleep(unsigned int ms);
 /*
- * Foreign kernel faults: a kernel-mode data or instruction abort whose address is in [lo, hi) is offered to handler
- * (far, esr, the faulting pt_regs) before Linux's own handling; handler returns 0 when it made the access retryable
- * (the faulting instruction then runs again), nonzero to let Linux handle it as usual. One registration at a time.
+ * Foreign kernel faults: a kernel-mode data or instruction abort whose address or faulting pc is in [lo, hi) is offered
+ * to handler (far, esr, the faulting registers) before Linux's own handling; handler returns 0 when the exception should
+ * return (the faulting instruction runs again, or wherever fki_regs_set_pc points it), nonzero to let Linux handle it as
+ * usual. One registration at a time.
  */
+unsigned long fki_regs_pc(void *regs);
+unsigned long fki_regs_lr(void *regs);
+void fki_regs_set_pc(void *regs, unsigned long pc);
 int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsigned long far, unsigned long esr, void *regs));
 void fki_fault_unregister(void);
 #ifdef __cplusplus
