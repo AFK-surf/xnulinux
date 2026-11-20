@@ -272,6 +272,14 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 				logs(m);
 			}
 		}
+		if (n) {	/* a write without a newline (a prompt): show it now */
+			char m[220]; unsigned j = 0, k;
+			const char *p = "darwin console: ";
+			while (*p) m[j++] = *p++;
+			for (k = 0; k < n; k++) m[j++] = line[k];
+			m[j] = 0; n = 0;
+			logs(m);
+		}
 		return 0;
 	}
 	if (stage == 998) {		/* XNU kprintf */
