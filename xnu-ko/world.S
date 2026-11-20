@@ -3,6 +3,40 @@
  * so a fault taken in XNU code reaches Linux with a sane per-cpu base and becomes a normal oops. */
 #define W(reg) adrp reg, xnu_W; add reg, reg, :lo12:xnu_W
 
+/*
+ * The user half (TTBR0, TCR.T0SZ) belongs to whichever world runs: XNU switches TTBR0 to its user pmaps (with its own
+ * ASIDs and T0SZ), Linux to the current task's mm. Each switch saves one and loads the other, then drops the local TLB
+ * (the two worlds' ASIDs are unrelated). x9 = &xnu_W; clobbers x10.
+ */
+.macro TO_XNU_MM
+	mrs	x10, ttbr0_el1
+	str	x10, [x9, #416]
+	mrs	x10, tcr_el1
+	str	x10, [x9, #424]
+	ldr	x10, [x9, #440]
+	msr	tcr_el1, x10
+	ldr	x10, [x9, #432]
+	msr	ttbr0_el1, x10
+	isb
+	tlbi	vmalle1
+	dsb	nsh
+	isb
+.endm
+.macro TO_LINUX_MM
+	mrs	x10, ttbr0_el1
+	str	x10, [x9, #432]
+	mrs	x10, tcr_el1
+	str	x10, [x9, #440]
+	ldr	x10, [x9, #424]
+	msr	tcr_el1, x10
+	ldr	x10, [x9, #416]
+	msr	ttbr0_el1, x10
+	isb
+	tlbi	vmalle1
+	dsb	nsh
+	isb
+.endm
+
 	.text
 	.globl	xnu_world_call
 	.type	xnu_world_call, %function
@@ -28,6 +62,7 @@ xnu_world_call:
 	str	x10, [x9, #216]
 	mrs	x10, tpidrro_el0
 	str	x10, [x9, #224]
+	TO_XNU_MM
 	/* XNU runs on the Linux task stack: Linux's entry code treats any other stack as overflow. */
 	mov	x0, x20
 	blr	x19
@@ -38,7 +73,8 @@ xnu_world_call:
 xnu_world_abort:			/* from the upcall: Linux keys and TPIDR are live */
 	W(x9)
 	mov	x19, #1
-2:	ldr	x10, [x9, #216]
+2:	TO_LINUX_MM
+	ldr	x10, [x9, #216]
 	msr	tpidr_el0, x10
 	ldr	x10, [x9, #224]
 	msr	tpidrro_el0, x10
@@ -84,6 +120,7 @@ xnu_world_upcall:			/* x0 = stage, called by XNU with blr */
 	mov	x19, x0
 	mov	x20, x1
 	mov	x21, x2
+	TO_LINUX_MM
 	add	x0, x9, #240		/* load Linux keys */
 	add	x1, x9, #328		/* save XNU keys */
 	bl	fki_pac_swap
@@ -93,6 +130,7 @@ xnu_world_upcall:			/* x0 = stage, called by XNU with blr */
 	bl	xnu_hook
 	cbnz	x0, xnu_world_abort
 	W(x9)
+	TO_XNU_MM
 	add	x0, x9, #328		/* load XNU keys */
 	add	x1, x9, #240		/* save Linux keys */
 	bl	fki_pac_swap
