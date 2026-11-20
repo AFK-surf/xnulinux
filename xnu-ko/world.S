@@ -120,6 +120,14 @@ xnu_world_upcall:			/* x0 = stage, called by XNU with blr */
 	mov	x19, x0
 	mov	x20, x1
 	mov	x21, x2
+	/*
+	 * The current XNU thread's user TLS registers: Linux may schedule during the upcall (idle, file I/O), and its
+	 * context switch rewrites TPIDR_EL0 and zeroes TPIDRRO_EL0 (where Darwin user code keeps its TSD pointer).
+	 */
+	mrs	x10, tpidr_el0
+	str	x10, [x9, #448]
+	mrs	x10, tpidrro_el0
+	str	x10, [x9, #456]
 	TO_LINUX_MM
 	add	x0, x9, #240		/* load Linux keys */
 	add	x1, x9, #328		/* save XNU keys */
@@ -130,6 +138,10 @@ xnu_world_upcall:			/* x0 = stage, called by XNU with blr */
 	bl	xnu_hook
 	cbnz	x0, xnu_world_abort
 	W(x9)
+	ldr	x10, [x9, #448]
+	msr	tpidr_el0, x10
+	ldr	x10, [x9, #456]
+	msr	tpidrro_el0, x10
 	TO_XNU_MM
 	add	x0, x9, #328		/* load XNU keys */
 	add	x1, x9, #240		/* save Linux keys */
