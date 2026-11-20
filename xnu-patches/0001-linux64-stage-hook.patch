@@ -1052,10 +1052,10 @@ index 743117b..9dc298b 100644
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
 diff --git a/osfmk/arm/machine_routines_common.c b/osfmk/arm/machine_routines_common.c
-index b65f76c..11b510a 100644
+index b65f76c..b0692dd 100644
 --- a/osfmk/arm/machine_routines_common.c
 +++ b/osfmk/arm/machine_routines_common.c
-@@ -1094,6 +1094,30 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
+@@ -1094,6 +1094,49 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
  
  	thread = current_thread();
  
@@ -1070,6 +1070,25 @@ index b65f76c..11b510a 100644
 +		if (linux64_hook) {
 +			boolean_t was = linux64_vint ? TRUE : FALSE;
 +			if (enable && !was) {
++				/*
++				 * Kernel code that runs long without going to user space or idle never sees a host interrupt
++				 * (hardware IRQs stay masked in XNU's kernel), which stalls Linux (RCU) and stops XNU's own
++				 * clock. Where XNU would take a pending interrupt, re-enabling interrupts, let Linux run its
++				 * interrupts every 2 ms and deliver XNU's timer if it is due, as the IRQ path does.
++				 */
++				static uint64_t linux64_last_kyield;
++				uint64_t now = mach_absolute_time();
++				if (now - linux64_last_kyield > 48000 && thread->machine.CpuDatap->cpu_int_state == NULL) {
++					extern void linux64_stage_arg(unsigned long, unsigned long);
++					extern void rtclock_intr(unsigned int);
++					cpu_data_t *cdp = thread->machine.CpuDatap;
++					linux64_last_kyield = now;
++					linux64_stage_arg(811, 1);
++					if (cdp->rtcPop != 0 && cdp->rtcPop != 0xFFFFFFFFFFFFFFFFULL && mach_absolute_time() >= cdp->rtcPop) {
++						cdp->cpu_decrementer = -1;
++						rtclock_intr(FALSE);
++					}
++				}
 +				if (get_preemption_level() == 0) {
 +					while (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
 +						ast_taken_kernel();
@@ -1086,7 +1105,7 @@ index b65f76c..11b510a 100644
  	state = __builtin_arm_rsr("DAIF");
  
  	if (__improbable(!(state & DAIF_DEBUGF))) {
-@@ -1384,6 +1408,13 @@ ml_wait_max_cpus(void)
+@@ -1384,6 +1427,13 @@ ml_wait_max_cpus(void)
  {
  	assert(lockdown_done);
  	lck_mtx_lock(&max_cpus_lock);
