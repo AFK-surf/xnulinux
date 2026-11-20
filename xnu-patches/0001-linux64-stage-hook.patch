@@ -386,7 +386,7 @@ index 0cc7f6e..c07d35c 100644
  		DEBUG_INFO("region = %d\n", currentRegion->type);
  		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index 76555f6..c602cc1 100644
+index 76555f6..34d8b8f 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
 @@ -1540,6 +1540,43 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
@@ -433,14 +433,31 @@ index 76555f6..c602cc1 100644
  IOReturn
  IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
      bool waitForFunction,
-@@ -1564,7 +1601,26 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
+@@ -1564,7 +1601,43 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
  	}
  
  	if (waitForFunction) {
 -		_resources = waitForService(resourceMatching(functionName));
 +		if (linux64_hook && functionName->isEqualTo("AKSKernelServices")) {
++			static bool scrd_done;
 +			if (param1) {
 +				*(void **)param1 = linux64_aks_services();
++			}
++			if (!scrd_done) {
++				/*
++				 * No SEP either: AMFI's device-state thread waits forever for the SEP's "scrd" endpoint by name (and
++				 * launchd's first AMFI sysctl waits on that thread). A plain registered service of that name.
++				 */
++				scrd_done = true;
++				IOService *scrd = OSTypeAlloc(IOService);
++				if (scrd && scrd->init()) {
++					scrd->setName("sep-endpoint,scrd");
++					if (scrd->attach(this)) {
++						scrd->registerService();
++						IOLog("LINUX64: stand-in sep-endpoint,scrd registered\n");
++					}
++					scrd->release();
++				}
 +			}
 +			IOLog("LINUX64: AKSKernelServices from the hosted stand-in\n");
 +			return kIOReturnSuccess;
@@ -461,7 +478,7 @@ index 76555f6..c602cc1 100644
  	} else {
  		_resources = getResourceService();
  	}
-@@ -2341,6 +2397,8 @@ IOPlatformDevice::getResources( void )
+@@ -2341,6 +2414,8 @@ IOPlatformDevice::getResources( void )
  * the kernel with a suitable message.
  *********************************************************************/
  
@@ -470,7 +487,7 @@ index 76555f6..c602cc1 100644
  class IOPanicPlatform : IOPlatformExpert {
  	OSDeclareDefaultStructors(IOPanicPlatform);
  
-@@ -2361,6 +2419,32 @@ IOPanicPlatform::start(IOService * provider)
+@@ -2361,6 +2436,19 @@ IOPanicPlatform::start(IOService * provider)
  		platform_name = provider->getName();
  	}
  
@@ -484,19 +501,6 @@ index 76555f6..c602cc1 100644
 +			return false;
 +		}
 +		registerService();
-+		/*
-+		 * No SEP while hosted: AMFI's device-state thread waits forever for the SEP's "scrd" endpoint by name (and
-+		 * launchd's first AMFI sysctl waits on that thread). A plain registered service of that name lets it go on.
-+		 */
-+		IOService *scrd = OSTypeAlloc(IOService);
-+		if (scrd && scrd->init()) {
-+			scrd->setName("sep-endpoint,scrd");
-+			if (scrd->attach(this)) {
-+				scrd->registerService();
-+				IOLog("linux64: stand-in sep-endpoint,scrd registered\n");
-+			}
-+			scrd->release();
-+		}
 +		return true;
 +	}
 +
