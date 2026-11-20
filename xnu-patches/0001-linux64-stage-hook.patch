@@ -1333,6 +1333,69 @@ index 2fc6931..dd59ae6 100644
  	if (fmt) {
  		struct console_printbuf_state info_data;
  
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+index 44b993c..d21911d 100644
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -368,13 +368,46 @@ random_cpu_init(int cpu)
+ 		panic("random_cpu_init: kernel prng has not been installed");
+ 	}
+ 
+-	prng_funcs.initgen(prng_ctx, cpu);
++	if (prng_funcs.initgen != NULL) {
++		prng_funcs.initgen(prng_ctx, cpu);
++	}
++}
++
++/*
++ * LINUX64 (xnulinux) PoC: without the corecrypto kext nobody calls register_and_init_prng(), so
++ * prng_funcs stays zeroed. Until the hosted kernel has a PRNG provider, read_random() falls back to
++ * a non-cryptographic xorshift generator seeded from early_random(). NOT FOR PRODUCTION.
++ */
++static uint64_t linux64_prng_state[2];
++static void
++linux64_prng_fill(uint8_t *p, size_t len)
++{
++	uint64_t *st = linux64_prng_state;
++	if (st[0] == 0 && st[1] == 0) {
++		st[0] = early_random() | 1;
++		st[1] = early_random();
++	}
++	while (len) {
++		uint64_t s1 = st[0], s0 = st[1];
++		st[0] = s0;
++		s1 ^= s1 << 23;
++		st[1] = s1 ^ s0 ^ (s1 >> 17) ^ (s0 >> 26);
++		uint64_t v = st[1] + s0;
++		size_t n = len < sizeof(v) ? len : sizeof(v);
++		memcpy(p, &v, n);
++		p += n;
++		len -= n;
++	}
+ }
+ 
+ /* export good random numbers to the rest of the kernel */
+ __mockable void
+ read_random(void * buffer, u_int numbytes)
+ {
++	if (prng_funcs.generate == NULL) {
++		linux64_prng_fill(buffer, numbytes);
++		return;
++	}
+ 	prng_funcs.refresh(prng_ctx);
+ 	read_random_generate(buffer, numbytes);
+ }
+@@ -433,7 +466,9 @@ write_random(void * buffer, u_int numbytes)
+ 		memcpy(seed, buffer, numbytes);
+ 	}
+ 
+-	prng_funcs.reseed(prng_ctx, sizeof(seed), seed);
++	if (prng_funcs.reseed != NULL) {
++		prng_funcs.reseed(prng_ctx, sizeof(seed), seed);
++	}
+ 	cc_clear(sizeof(seed), seed);
+ 
+ 	return 0;
 diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 index b7134a6..e7d1c99 100644
 --- a/pexpert/arm/pe_init.c
