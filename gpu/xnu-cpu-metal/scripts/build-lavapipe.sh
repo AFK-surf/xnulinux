@@ -34,7 +34,8 @@ if [ ! -f "$BUILD_DIR/build.ninja" ]; then
     -Dshared-llvm=disabled \
     -Dzstd=disabled \
     -Dxmlconfig=disabled \
-    -Dshader-cache=disabled \
+    -Dshader-cache=enabled \
+    -Dshader-cache-max-size=256M \
     -Dvideo-codecs= \
     -Dvalgrind=disabled \
     -Dlibunwind=disabled \
