@@ -24,8 +24,13 @@ typedef struct Xm2vComputeEncoder Xm2vComputeEncoder;
 typedef struct Xm2vRenderEncoder Xm2vRenderEncoder;
 typedef struct Xm2vBlitEncoder Xm2vBlitEncoder;
 typedef struct Xm2vEvent Xm2vEvent;
+typedef struct Xm2vSharedEvent Xm2vSharedEvent;
+typedef struct Xm2vSharedEventHandle Xm2vSharedEventHandle;
 typedef struct Xm2vFence Xm2vFence;
 typedef struct Xm2vArgumentEncoder Xm2vArgumentEncoder;
+
+typedef void (*Xm2vDeallocatorFn)(void *ptr, uint64_t length, void *ctx);
+typedef void (*Xm2vSharedEventNotifyFn)(void *ctx, uint64_t value);
 
 typedef struct Xm2vTextureDesc {
     uint64_t texture_type;
@@ -156,11 +161,15 @@ bool xm2v_device_supports_family(const Xm2vDevice *dev, int64_t family);
 /* Buffers */
 Xm2vBuffer *xm2v_buffer_new(Xm2vDevice *dev, uint64_t length, uint64_t resource_options, const void *bytes);
 Xm2vBuffer *xm2v_buffer_new_no_copy(Xm2vDevice *dev, void *ptr, uint64_t length, uint64_t resource_options);
+Xm2vBuffer *xm2v_buffer_new_no_copy_dealloc(Xm2vDevice *dev, void *ptr, uint64_t length, uint64_t resource_options,
+                                            Xm2vDeallocatorFn dealloc_fn, void *dealloc_ctx);
 void xm2v_buffer_release(Xm2vBuffer *buf);
 void *xm2v_buffer_contents(const Xm2vBuffer *buf);
 uint64_t xm2v_buffer_length(const Xm2vBuffer *buf);
 uint64_t xm2v_buffer_gpu_address(const Xm2vBuffer *buf);
 void xm2v_buffer_did_modify_range(const Xm2vBuffer *buf, uint64_t location, uint64_t length);
+Xm2vTexture *xm2v_buffer_new_texture(Xm2vBuffer *buf, const Xm2vTextureDesc *desc, uint64_t offset, uint64_t bytes_per_row);
+Xm2vTexture *xm2v_buffer_new_linear_texture(Xm2vBuffer *buf, const Xm2vTextureDesc *desc, uint64_t offset, uint64_t bytes_per_row, uint64_t bytes_per_image);
 
 /* Textures */
 Xm2vTexture *xm2v_texture_new(Xm2vDevice *dev, const Xm2vTextureDesc *desc);
@@ -252,8 +261,13 @@ void xm2v_command_buffer_release(Xm2vCommandBuffer *cb);
 bool xm2v_command_buffer_commit(Xm2vCommandBuffer *cb);
 bool xm2v_command_buffer_wait_until_completed(Xm2vCommandBuffer *cb, uint64_t timeout_ms);
 uint32_t xm2v_command_buffer_status(const Xm2vCommandBuffer *cb);
+size_t xm2v_command_buffer_error(const Xm2vCommandBuffer *cb, char *out, size_t size);
 bool xm2v_command_buffer_encode_signal_event(Xm2vCommandBuffer *cb, Xm2vEvent *ev, uint64_t value);
+bool xm2v_command_buffer_encode_signal_event_scheduled(Xm2vCommandBuffer *cb, Xm2vEvent *ev, uint64_t value);
 bool xm2v_command_buffer_encode_wait_event(Xm2vCommandBuffer *cb, Xm2vEvent *ev, uint64_t value);
+bool xm2v_command_buffer_encode_signal_shared_event(Xm2vCommandBuffer *cb, Xm2vSharedEvent *ev, uint64_t value);
+bool xm2v_command_buffer_encode_signal_shared_event_scheduled(Xm2vCommandBuffer *cb, Xm2vSharedEvent *ev, uint64_t value);
+bool xm2v_command_buffer_encode_wait_shared_event(Xm2vCommandBuffer *cb, Xm2vSharedEvent *ev, uint64_t value);
 
 /* Compute Encoder */
 Xm2vComputeEncoder *xm2v_compute_encoder_new(Xm2vCommandBuffer *cb);
@@ -271,6 +285,8 @@ bool xm2v_compute_encoder_dispatch_threadgroups(Xm2vComputeEncoder *enc,
 bool xm2v_compute_encoder_dispatch_threads(Xm2vComputeEncoder *enc,
                                            uint64_t gx, uint64_t gy, uint64_t gz,
                                            uint64_t tx, uint64_t ty, uint64_t tz);
+bool xm2v_compute_encoder_update_fence(Xm2vComputeEncoder *enc, Xm2vFence *fence);
+bool xm2v_compute_encoder_wait_fence(Xm2vComputeEncoder *enc, Xm2vFence *fence);
 bool xm2v_compute_encoder_end(Xm2vComputeEncoder *enc);
 
 /* Render Encoder */
@@ -298,6 +314,8 @@ bool xm2v_render_encoder_draw_primitives(Xm2vRenderEncoder *enc, uint64_t prim, 
 bool xm2v_render_encoder_draw_indexed_primitives(Xm2vRenderEncoder *enc, uint64_t prim, uint64_t index_count, uint64_t index_type,
                                                  Xm2vBuffer *index_buf, uint64_t index_offset, uint64_t instance_count,
                                                  int64_t base_vertex, uint64_t base_instance);
+bool xm2v_render_encoder_update_fence(Xm2vRenderEncoder *enc, Xm2vFence *fence, uint64_t after_stages);
+bool xm2v_render_encoder_wait_fence(Xm2vRenderEncoder *enc, Xm2vFence *fence, uint64_t before_stages);
 bool xm2v_render_encoder_end(Xm2vRenderEncoder *enc);
 
 /* Blit Encoder */
@@ -323,11 +341,22 @@ bool xm2v_blit_encoder_fill_buffer(Xm2vBlitEncoder *enc, Xm2vBuffer *buf, uint64
 bool xm2v_blit_encoder_generate_mipmaps(Xm2vBlitEncoder *enc, Xm2vTexture *tex);
 bool xm2v_blit_encoder_synchronize_buffer(Xm2vBlitEncoder *enc, Xm2vBuffer *buf);
 bool xm2v_blit_encoder_synchronize_texture(Xm2vBlitEncoder *enc, Xm2vTexture *tex);
+bool xm2v_blit_encoder_update_fence(Xm2vBlitEncoder *enc, Xm2vFence *fence);
+bool xm2v_blit_encoder_wait_fence(Xm2vBlitEncoder *enc, Xm2vFence *fence);
 bool xm2v_blit_encoder_end(Xm2vBlitEncoder *enc);
 
 /* Events & Fences */
 Xm2vEvent *xm2v_event_new(Xm2vDevice *dev);
 void xm2v_event_release(Xm2vEvent *ev);
+Xm2vSharedEvent *xm2v_shared_event_new(Xm2vDevice *dev);
+Xm2vSharedEvent *xm2v_shared_event_new_with_handle(Xm2vDevice *dev, const Xm2vSharedEventHandle *handle);
+void xm2v_shared_event_release(Xm2vSharedEvent *ev);
+uint64_t xm2v_shared_event_signaled_value(const Xm2vSharedEvent *ev);
+void xm2v_shared_event_set_signaled_value(const Xm2vSharedEvent *ev, uint64_t value);
+bool xm2v_shared_event_wait_until(const Xm2vSharedEvent *ev, uint64_t value, uint64_t timeout_ms);
+bool xm2v_shared_event_notify(const Xm2vSharedEvent *ev, uint64_t value, Xm2vSharedEventNotifyFn cb, void *ctx);
+Xm2vSharedEventHandle *xm2v_shared_event_new_handle(const Xm2vSharedEvent *ev);
+void xm2v_shared_event_handle_release(Xm2vSharedEventHandle *h);
 Xm2vFence *xm2v_fence_new(Xm2vDevice *dev);
 void xm2v_fence_release(Xm2vFence *f);
 

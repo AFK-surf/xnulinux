@@ -323,8 +323,171 @@ dist/XnuCpuMetal.bundle/
 - **不改 `metal2vulkan-runtime` 64 MiB 内存 slab（`BLOCK_BYTES`）**：`metal2vulkan` 属 GPL/LGPL 上游（构建时拉取、不入库）；我们在自研桥接层收紧了 `ShaderCacheOptions` 内存/磁盘上限。
 - **不做 commit 去阻塞 / 无管线 draw 跳过**：插件此前已异步 `commit` 且已跳过 `!_hasPipeline` 的 draw。
 
-### 托管 macOS 内实测（xnulinux 托管 XNU，1 CPU，`tools/hosted/tests/gpu7.sh`）
-- `ictool Stats.icon --scale 2`，同一图标、输出 md5 全部一致（`da2d8998…`）：
-  - 旧 bundle（Round 6）：21.81s / 20.23s，峰值 RSS 1.11–1.15 GB
-  - 新 bundle（Round 7）：首次 19.53s（填缓存）→ 8.48s → **4.97s**，峰值 RSS 1.09–1.14 GB
-- 托管系统里峰值内存基本不变（宿主机上报的 RSS 下降没有复现）；耗时随 Mesa 磁盘缓存命中逐次下降。
+---
+
+## Round 8: WindowServer / SkyLight Metal 设备筛选分析与合成器适配
+
+### SkyLight 静态反汇编证据（macOS 27.0.1 dyld cache `SkyLight.framework`）
+1. **`__WSSystemCanCompositeWithMetal_block_invoke` (`SkyLight @ 0x19365f508`)**：
+   - `+0x088`: `BL MTLCopyAllDevicesWithObserver(&observer, handler)`（observer block 在 `+0x1e0` 检查 `MTLDeviceWasAddedNotification`）。
+   - `+0x090`: `BL objc_msgSend("count")`；`+0x094`: `cbz x0, +0x0a4`。
+   - **此处本身没有任何设备属性过滤**——只要 `[devices count] == 0`，就记录 `"Metal device initially absent."`（`+0x0c8`），在 `dispatch_semaphore_wait` 上等 30 秒，超时后记录 `"No suitable Metal devices present after %llu seconds."`（`+0x168`）并 `abort()`。
+   - **托管系统 WindowServer 触发该错误的直接根因**：commit `04d3386` 的插件在 `confstr(_CS_DARWIN_USER_CACHE_DIR)` 失败时回退到共享路径 `/tmp/xnu-cpu-metal-m2v`；先前以 `root` (uid=0) 运行时 `metal2vulkan` `ShaderCache` 以 `0700` 创建了该目录，随后 `WindowServer` 以 `_windowserver` (uid=88) 启动时 `ShaderCache::open` 报 `PermissionDenied` → `xm2v_device_open` 返回 `NULL` → `initWithAcceleratorPort:` 返回 `nil` → `MTLCopyAllDevicesWithObserver` 返回空数组 (`count == 0`)。
+2. **通过 `WSSystemCanCompositeWithMetal` 后 SkyLight 紧接着检查的接口**：
+   - `__WSGetDefaultMetalAccelerator_block_invoke` (`0x19366a14c`)：`MTLCopyAllDevices` → `firstObject` → `acceleratorPort`（必须非 0）。
+   - `CompositorMetal::new_compositor` (`0x193663944`)：`acceleratorPort`、`isRemovable` (`NO`)、`supportPriorityBand` (`NO`)、`MPSSupportsMTLDevice` (`YES`)、`registryID`、`compilerPropagatesThreadPriority:`、队列 `setCompletionQueue:` / `setSubmissionQueue:` / `setGPUPriority:`。
+   - `SLSCreateDefaultMetalDevice` (`0x19387fc08`)：`acceleratorPort`、`isLowPower`。
+
+### 插件修改（`XnuCpuMetalPlugin.mm`、`XnuCpuMetalShim.h`）
+1. **Per-UID 真实可写探测的缓存目录回退**：按 `XNU_CPU_METAL_CACHE_DIR` → `_CS_DARWIN_USER_CACHE_DIR` → `_CS_DARWIN_USER_TEMP_DIR` → `NSTemporaryDirectory()` → `/var/tmp/xnu-cpu-metal-<uid>` → `/tmp/xnu-cpu-metal-<uid>` 逐级用实际 `open(O_CREAT|O_WRONLY)` 探测可写性，杜绝 uid=0 与 uid=88 (`_windowserver`) 互锁；打开失败时同步写入 `os_log_error`。
+2. **对齐 DroidVM WindowServer 设备属性与 IOSurface 策略**：
+   - `isHeadless = NO`、`isLowPower = NO`（原为 `YES`/`YES`），保持 `isRemovable = NO`、`hasUnifiedMemory = YES`、`isBuiltIn = YES`。
+   - 启动时设置 `CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication)`，确保 QuartzCore/WindowServer 分配线性未压缩 IOSurface。
+3. **补齐 WindowServer 合成器接口**：
+   - `XnuCpuMetalShim.h` 新增设备 `compilerPropagatesThreadPriority:` 与队列 `setCompletionQueue:` / `setSubmissionQueue:`（消除 `CompositorMetal::new_compositor` 的 stub 警告）。
+   - `XcmTexture` 多平面 IOSurface 同步增加 `plane < planeCount` 越界保护，并将 `_iosurface` / `_iosurfacePlane` 传递到 `newTextureViewWithPixelFormat:` 视图纹理（支持对 IOSurface 的 sRGB/格式视图渲染回写）。
+
+### 宿主机验证结果（通用 `arm64 + arm64e` `XnuCpuMetal.bundle`）
+- `test_ws_full`：`isHeadless=0, isLowPower=0, isRemovable=0, hasUnified=1, MPSSupportsMTLDevice=1`；2-plane YCbCr `420v` IOSurface (`R8Unorm` + `RG8Unorm`) 读写 PASS；`MPSImageGaussianBlur` + `setCompletionQueue:`/`setSubmissionQueue:` PASS（`status=4, center=(229,229,229,229)`）。
+- 全量回归全部 PASS：`test-bundle.sh arm64/arm64e` (`bad=0, completedHandler=1`)、`test-render-ci.sh arm64/arm64e` (`CIGaussianBlur maxErr=1, meanErr=0.0161`)、`ictool Stats.icon` (`maxErr=51`)、`MenuBarIcon.icon` scale 1 & 2 (`maxErr=42/38`)、`mbui_offscreen` (`maxErr=2`)、`gpui_offscreen` (`maxErr=1`)，全部零 `stubbed`。
+
+---
+
+## Round 9: Vulkan-Loader secure-mode ICD 自包含加载 + `&BGA`/`&RhA`/`&b3a` 压缩 IOSurface 线性处理
+
+### 修改内容
+1. **彻底消除 `VK_ICD_FILENAMES` 环境变量依赖与构建目录 `sysconfdir` 硬编码**：
+   - `scripts/build-vkloader-arm64e.sh` 改为同时构建 `arm64` 与 `arm64e` 两个 slice，并传入 `-DSYSCONFDIR=/Library/GPUBundles/XnuCpuMetal.bundle/Contents/Resources`。
+   - `scripts/build-bundle-universal.sh` 将双架构 `libvulkan.1.dylib` 合并进 bundle，并在 bundle 内放入 `Contents/Resources/vulkan/icd.d/lvp_icd.aarch64.json`（`library_path: "../../../Frameworks/libvulkan_lvp.dylib"`）。在 `WindowServer` 等高权限/secure 模式下，Vulkan-Loader 自动搜索 `<SYSCONFDIR>/vulkan/icd.d` 并加载 bundle 内的 lavapipe，无需环境变量也无需在 `/usr/local/share/vulkan/icd.d` 写外部清单。
+   - `strings` 验证 `libvulkan.1.dylib` 中零 `/Users/admin` 硬编码路径，仅含 `/Library/GPUBundles/XnuCpuMetal.bundle/Contents/Resources`。
+2. **`&BGA` / `&RhA` / `&b3a` / `b3a8` 压缩 IOSurface 格式的线性处理**（`XnuCpuMetalPlugin.mm`）：
+   - 新增 `xcmPixelFormatBpp`（含 `BGRA10_XR` 8 Bpp）与 `xcmIOSurfacePlaneLayout`，在 `syncFromIOSurfaceIfNeeded` / `syncToIOSurface` 中统一将 `&` 开头的无损压缩 IOSurface 按线性未压缩行读取/回写；针对 `b3a8`/`&b3a` 双平面 `IOSurfaceGetBytesPerRowOfPlane == 0` 情形按 64B 对齐自动计算双平面偏移与 stride（并做 `allocSize` 越界保护）。
+   - `XcmTexture` 的 `replaceRegion:` 与 `getBytes:` 同步补齐 IOSurface 双向同步。
+
+### 验证结果
+- 端到端 `&BGA` (1280×720, `bpr=5120`)、`&RhA` (`RGBA16Float`)、`&b3a` (`BGR10_XR`) 渲染 + 采样 + Blit + IOSurface 线性回读测试 (`test_compressed_full`)：**全部 PASS**（线性 BGRA 精确匹配 `(204,153,51,255)`）。
+- 全量 `arm64` + `arm64e` 回归（`test-bundle.sh`、`test-render-ci.sh`）：**全部 PASS**（`vecadd bad=0, completedHandler=1`；Render Pass PASS；CoreImage `CIGaussianBlur maxErr=1, meanErr=0.0161`）。
+
+---
+
+## Round 10: Buffer-Backed Linear Textures + `MTLSharedEvent`/`MTLFence` + 内存态 `CAEnableIOSurfaceCompression`
+
+### 根因分析（QuartzCore macOS 27.0.1 dyld cache 静态反汇编）
+1. **`nil linear texture from buffer`**：`CA::OGL::MetalContext::copy_image_to_texture` 将客户端共享内存 backing store 通过 `newBufferWithBytesNoCopy:length:options:deallocator:` 包装为 `MTLBuffer` 后，调用 SPI `-[MTLBuffer newLinearTextureWithDescriptor:offset:bytesPerRow:bytesPerImage:]`。此前 `XcmBuffer` 未实现该 SPI（被 `resolveStub` 桩返回 `0`），且 `newTextureWithDescriptor:offset:bytesPerRow:` 忽略 `offset`/`bytesPerRow` 新建了独立纹理。
+2. **`timed out fence` + `Command buffer failed (Error code = 0x1)`**：`XcmBackendDevice` 缺失 `newSharedEvent` / `newSharedEventWithOptions:` / `newSharedEventWithHandle:`，`XcmCommandBuffer` 的 `encodeSignalEvent:`/`encodeWaitForEvent:` 仅处理 `XcmEvent` 未处理 `MTLSharedEvent`，三类 Encoder 缺失 `updateFence:`/`waitForFence:`，且 `XcmCommandBuffer.error` 硬编码 `"Command buffer failed"` 未透出底层 `metal2vulkan` 失败原因。
+3. **非持久化 `CAEnableIOSurfaceCompression`**：`CFPreferencesSetAppValue` 会把偏好落盘到各 App 的 plist。反汇编 `__CADeviceUseCompression_block_invoke` 确认 QuartzCore 调用 `CFPreferencesGetAppBooleanValue`，改用 `[[NSUserDefaults standardUserDefaults] registerDefaults:@{@"CAEnableIOSurfaceCompression": @NO}]` 仅在内存 `NSRegistrationDomain` 生效，绝不落盘。
+
+### 修改内容
+- **`src/xnu-m2v-bridge/include/xnu_m2v.h` & `src/lib.rs`**：
+  - 导出 `xm2v_buffer_new_no_copy_dealloc`（支持 `Deallocator` 回调）、`xm2v_buffer_new_texture`、`xm2v_buffer_new_linear_texture`（直接对接 `metal2vulkan_runtime::Buffer::new_texture` / `new_linear_texture`，原生别名共享内存并在需要时自动走 `shadowed-texture` 双向同步）。
+  - 导出完整 `Xm2vSharedEvent` / `Xm2vSharedEventHandle` C ABI（`new`、`new_with_handle`、`signaled_value`、`set_signaled_value`、`wait_until`、`notify`、`new_handle`）及 `xm2v_command_buffer_encode_{signal,signal_scheduled,wait}_shared_event`。
+  - 导出 Compute/Render/Blit Encoder 的 `update_fence` / `wait_fence` 与 `xm2v_command_buffer_error`（透出 `cb.error()` / `cb.refusal()` / `cb.error_description()`）。
+- **`src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm` & `XnuCpuMetalShim.h`**：
+  - 实现 `-[XcmBuffer newTextureWithDescriptor:offset:bytesPerRow:]` 与 `-[XcmBuffer newLinearTextureWithDescriptor:offset:bytesPerRow:bytesPerImage:]`，在 `XcmTexture` 上维护并透传 `buffer` / `bufferOffset` / `bufferBytesPerRow`；`newBufferWithBytesNoCopy:` 完整透传 `deallocator`。
+  - 新增 `XcmSharedEvent`（声明遵循 `MTLSharedEvent`/`MTLEvent`，参考类 `IOGPUMetalSharedEvent`）与 `XcmSharedEventHandle`，支持 `MTLSharedEventListener` 在其 `dispatchQueue` 异步回调；补齐 `XcmCommandBuffer` 事件编码与 `os_log_error` 详细错误日志、三类 Encoder 的 `MTLFence` 编码。
+  - 将 `CFPreferencesSetAppValue` 替换为纯内存 `NSUserDefaults registerDefaults:`。
+
+### 宿主机验证结果（通用 `arm64 + arm64e` `XnuCpuMetal.bundle`）
+- **`test_round10`（`arm64` & `arm64e` 双架构全部 PASS）**：
+  - `CAEnableIOSurfaceCompression` 通过 `CFPreferencesGetAppBooleanValue` 读到 `valid=1, val=0` 且无任何 plist 落盘。
+  - WindowServer 日志全部 4 种线性纹理规格（`84x103 bpr=192 o=0`、`234x18 bpr=960 o=0x100`、`256x1 bpr=2048 o=0`、`1x1 bpr=64 o=0x100 bpi=4`）均成功创建并校验 `buffer`/`bufferOffset`/`bufferBytesPerRow` 与 `deallocator` 调用；CPU 原地覆写共享内存（`0xff112233` → `0xff44cc88`）不重建纹理，GPU Shader 连续两帧渲染结果精确一致。
+  - `MTLSharedEvent` GPU signal → `MTLSharedEventListener` 回调及时触发、CPU `setSignaledValue:` 解除 GPU `encodeWaitForEvent:` 阻塞、`newSharedEventHandle`/`newSharedEventWithHandle:` 别名与 `MTLFence` 均 PASS。
+- **全量回归（`arm64` & `arm64e`）**：`test-bundle.sh`、`test-render-ci.sh`（Render Pass + `CIGaussianBlur maxErr=1, meanErr=0.0161`）、`test_compressed_full`（`&BGA`/`&RhA`/`&b3a`）全部 PASS。
+
+---
+
+## Round 11: 修复 QuartzCore `VfxXg/Xgc` 合成全黑（`minConstantBufferAlignmentBytes` 环缓冲归零 + `isFramebufferReadSupported`）
+
+### 根因定位（宿主机 `CARenderer rendererWithMTLTexture:options:` 复现 + `QuartzCore` 反汇编）
+用 `CARenderer` 对比本插件与 Apple M5 Max 原生 Metal，在 `rounded_only` 与 `rounded_shadow` 场景中稳定复现全黑/大面积 `(0,0,0,0)`，并定位到两个耦合的设备能力缺口：
+1. **`minConstantBufferAlignmentBytes` 返回 `0` 导致 `MetalBufferPool` 环缓冲偏移归零覆写**：
+   - 反汇编 `CA::OGL::MetalBufferPool::encode_vertex_arg`（`+0x3c..+0x58`）确认其用 `align = max(req_align, pool->min_alignment)` 计算对齐偏移 `aligned = (cur + align - 1) & (-align)`。
+   - 当 `VfxXg/Xgc` 编码 0 字节占位参数（`req_align = 0`）且 `_MTLDevice` limits 中 `minConstantBufferAlignmentBytes == 0` 时，`align = 0`，`aligned = (cur - 1) & 0 = 0`，导致 `pool->current_offset` 在同一个 RenderPass 中被重置为 `0`，后续 draw 直接从偏移 `0` 覆写同一个 256 KiB 缓冲，摧毁前面所有 draw 的顶点、索引和颜色常量。
+2. **`isFramebufferReadSupported` 返回 `NO` 导致 `VfxXg/Xgc` 混合输出 `(0,0,0,0)`**：
+   - `VfxXg/Xgc`（`fixed_vert_lph_gen` + `fixed_frag_lph_cpf`）是 QuartzCore 的通用 uber-shader，其管线固定为 `blend=0` 并依赖 `[[color(0)]]` 可编程混合（`fc_framebuffer_fetch = Bool 01`）。此前插件未返回 `isFramebufferReadSupported = YES`，导致 QuartzCore 以 `fc_framebuffer_fetch = Bool 00` 且 `blend=0` 编译 `Xgc`，所有半透明/圆角/阴影/窗口合成 draw 均输出 `(0,0,0,0)`。开启后 `metal2vulkan-runtime` 通过 lavapipe 的 `rasterizationOrderColorAttachmentAccess` 精确执行 framebuffer fetch。
+
+### 修改内容（`src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm`）
+- 在 `fillBaseLimits` 补齐缺失的对齐字段：`minConstantBufferAlignmentBytes = 4`、`minBufferNoCopyAlignmentBytes = 4096`、`linearTextureArrayAlignmentBytes = 16`、`linearTextureArrayAlignmentSlice = 128`、`maxComputeThreadgroupMemoryAlignmentBytes = 16`、`linearTextureAlignmentBytes = 64`。
+- 在 `XcmBackendDevice` 补齐 `isFramebufferReadSupported = YES`、`supportsProgrammableBlending = YES`、`supportsUnalignedVertexFetch = YES`，并在 `supportsFamily:` 放行 `Apple1..2` / `Mac1..2` / `Common1..3`。
+- 在 `XNU_CPU_METAL_TRACE=1` 下新增每次 `renderCommandEncoderWithDescriptor:`（`c0`、load/store/clear、depth/stencil）、`newRenderPSO`（`blend` 参数与 `writeMask`）、`drawPrimitives`/`drawIndexedPrimitives`（图元类型、顶点数、绑定的 `vb`/`fb`/`ft`/`fs` 掩码、`fbytes`、`viewport`、`scissor`）及 `cb-done` 状态日志。
+
+### 宿主机验证结果（通用 `arm64 + arm64e` `XnuCpuMetal.bundle`）
+- **`CARenderer` 对比 Apple M5 Max（`build/test_carenderer.mm`，`arm64` & `arm64e` 双架构全部 PASS，覆盖 `VfxXg/Xgc` 路径）**：
+  - `color`（纯红 backgroundColor）：`maxErr=0, meanErr=0.000`
+  - `image`（四象限 CGImage）：`maxErr=0, meanErr=0.000`
+  - `two_layers`（双层叠加）：`maxErr=0, meanErr=0.000`
+  - `rounded_only`（圆角 layer，触发 `VfxXg/Xgc`）：`maxErr=1, meanErr=0.000`
+  - `rounded_shadow`（圆角 + 阴影，多 pass 模糊 + `VfxXg/Xgc`）：`maxErr=3, meanErr=0.092`
+- **全量回归（`arm64` & `arm64e`）**：`test_round10`、`test-bundle.sh`、`test-render-ci.sh`、`test_compressed_full` 全部 PASS。
+
+---
+
+## Round 12: `XcmCommandBuffer` / Encoder 并发资源生命周期与线程安全加固（`iconservicesagent` 崩溃排查）
+
+### 审计发现与修复（`src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm`）
+1. **Encoder 资源过早释放（违反 `retainedReferences = YES`）**：
+   - 此前 `XcmRenderEncoder`、`XcmComputeEncoder`、`XcmBlitEncoder` 在 `endEncoding` 时立刻清空 `_retained`，且 `renderCommandEncoderWithDescriptor:` 未强引用非 IOSurface 的 color/depth/stencil attachment 纹理，导致调用方在 `endEncoding` + `commit` 后立即释放 `XcmBuffer`（含 `_fallbackDeallocator`）或 `XcmTexture` 时，对象可能在 GPU（`llvmpipe` 光栅化线程）仍在执行期间提前 `dealloc`。
+   - 修复：在 `XcmCommandBuffer` 新增 `_retainedResources` 与 `retainResource:`（`@synchronized(self)` 保护），将三类 Encoder 绑定资源、RenderPass attachment 纹理与 Event 全部挂到 `XcmCommandBuffer`，仅在 `wait_until_completed` + IOSurface 同步 + handlers 完成后于锁外 `_releaseRetainedResourcesOnce` 释放。
+2. **`XcmCommandBuffer` 并发竞争与 Handler 顺序保证**：
+   - `addScheduledHandler:`、`addCompletedHandler:`、`markDirtyIOSurfaceTexture:`、`commit`（`_committed` 防重入）全部加 `@synchronized(self)` 保护。
+   - `_fireHandlersOnce` 在锁内快照清空回调列表，**锁外**执行用户回调避免死锁，同时用 `dispatch_group_t`（带同线程重入检测）保证任意并发调用 `waitUntilCompleted` 的线程在所有 completed handler 执行完之前绝不提前返回。
+3. **`XcmTexture` IOSurface 并发同步与类型校验**：
+   - `syncFromIOSurfaceIfNeeded`（先 `xcmFlushIOSurfaceWriter` 再取 `@synchronized(self)`，保持严格锁序 `XcmCommandBuffer -> XcmTexture`）与 `syncToIOSurface` 加 `@synchronized(self)` 保护；`gIOSurfaceLastWriter` 超过 256 项时自动清理失效 `__weak` 项。
+   - 三类 Encoder 对 buffer/texture/sampler/depthStencil/pipeline 参数补齐 `isKindOfClass:` 校验，避免非法对象强转解引用 `_handle`。
+
+### 验证结果（通用 `arm64 + arm64e` `dist/XnuCpuMetal.bundle`）
+- **新增多线程并发压测**（`build/test_stress_mt.mm`，`arm64` & `arm64e`，`LP_NUM_THREADS=2` 与 `LP_NUM_THREADS=0`）：
+  - Phase 1（8 线程 × 60 = 480 次并发 `commit` + IOSurface + `addCompletedHandler:` + 交替 `waitUntilCompleted` + 立即释放）：`submitted=480 handlers=480 failures=0`
+  - Phase 2（4 线程 × 15 = 60 次并发 `CARenderer` 含圆角阴影）：`caDone=60 failures=0`
+  - Phase 3（4 线程 × 40 = 160 次 `newBufferWithBytesNoCopy:` + `munmap` deallocator + `commit` 后立即释放）：`noCopyDone=160 deallocCount=160 failures=0`
+  - Phase 4（40 轮双线程并发 `waitUntilCompleted` 与 `completedHandler` 完成顺序及单次触发校验）：`failures=0`
+  - 4 进程并发 `ictool MenuBarIcon.icon`：全部退出 0 且输出一致（`114801` 字节）。
+- **全量回归（`arm64` & `arm64e`）**：
+  - `test_carenderer`（5 项对比 Apple M5 Max）、`test_round10`（4/4 PASS）、`test-bundle.sh`（`bad=0`）、`test-render-ci.sh`（`CIGaussianBlur maxErr=1, meanErr=0.0161`）全部 PASS。
+
+---
+
+## Round 13: Safari 打开时 `WindowServer` `GpuHang` → `AccessRevoked` → `llvmpipe_draw_vbo` UAF `SIGSEGV` 与 0 长度 NoCopy 修复
+
+### 根因
+1. **CPU 设备套用了 20.2s 硬件 GPU watchdog**：`metal2vulkan-runtime/src/command_buffer/stall.rs` 对所有设备硬编码 `WATCHDOG = 20.2s`、`STALL = 10s`。Safari 启动时 CPU 光栅化 + LLVM JIT 负载骤增，单批超过 20.2s 即被判 `GpuHang` 并 park `VkDevice`；累计 2 次后触发 `revocation.rs`（`REVOKING = 2`）永久吊销队列，后续提交全部 `AccessRevoked`。
+2. **Parked 设备仍执行 host memory deallocator 导致 `llvmpipe_draw_vbo` 顶点 fetch UAF**：`VkDevice` 被 park 后 `release::object` 跳过 `vkFreeMemory`，但 `metal2vulkan-runtime/src/buffer.rs` 的 `Imported::drop` 与 `HostPages::drop` 仍会执行调用方的 `deallocator`（`munmap`），且 `XcmCommandBuffer` 仍释放 `_retainedResources`，导致 `lavapipe` 后台线程执行 `llvmpipe_draw_vbo` 读取已取消映射的页边界（`0x...c000`）而 `SIGSEGV`。同时 `XcmCommandBuffer` 的 `wait_until_completed` 存在 60s 硬超时。
+3. **`newBufferWithBytesNoCopy(ptr=0, len=0)` 语义偏差**：实测宿主机 Apple M5 Max 上 `newBufferWithBytesNoCopy(NULL, 0)`、`newBufferWithLength(0)`、`newBufferWithBytes(NULL, 0)` 均直接返回 `nil` 且不调用 `deallocator`；原插件会报错并回退到 `xm2v_buffer_new(..., 0, ...)`。
+
+### 修复
+1. `src/metal2vulkan/crates/metal2vulkan-runtime/src/command_buffer/stall.rs`：对 `DeviceKind::Cpu` 将 `watchdog_after` 与 `stall_after` 放宽至 `3600s`（支持 `XNU_CPU_METAL_WATCHDOG_MS` 覆盖用于测试）。
+2. `src/metal2vulkan/crates/metal2vulkan-runtime/src/buffer.rs`：`Imported::drop` 与 `HostPages::drop` 在 `release::parked(vk_device)` 时跳过 deallocator / keep_alive 释放（与 `vkFreeMemory` 一致地保持映射），彻底杜绝 parked 设备的 `munmap` UAF。
+3. `src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm`：
+   - `XcmCommandBuffer` `wait_until_completed` 改为无限等待（`timeout_ms = 0`）；若遇到 `GpuHang`/`DeviceLost` 则将 `_retainedResources` 存入静态 park 列表不提前释放。
+   - `xcmDev_newBufferNoCopy`、`xcmDev_newBufferLen`、`xcmDev_newBufferBytes` 对 `ptr == nullptr || length == 0` 直接返回 `nil` 且不触发 `deallocator`。
+
+### 验证（通用 `arm64 + arm64e` `dist/XnuCpuMetal.bundle`）
+- `build/test_round13.mm`（`arm64` & `arm64e`，`LP_NUM_THREADS=0`）：
+  - `PASS [1]`：`newBufferWithBytesNoCopy(NULL, 0)` / `newBufferWithLength(0)` / `newBufferWithBytes(NULL, 0)` 全返回 `nil` 且 `dealloc=0`。
+  - `PASS [2]`：单 CB 26 次重负载 draw 连续运行 **25.02s**（超过原 20.2s watchdog）正常完成，`0 GpuHang / 0 AccessRevoked`，`dealloced=1/1`；3 连重负载 CB（9.75s）全过。
+  - `PASS [hang_uaf]`（`XNU_CPU_METAL_WATCHDOG_MS=1000` 强制触发 `GpuHang` 并 park 设备）：`arm64` 与 `arm64e` 均在 `llvmpipe_draw_vbo` 继续读 `mmap` 顶点缓冲期间零 `SIGSEGV`（`dealloced=0`）。
+- 全量回归：`test_carenderer_arm64e`、`test_round10_arm64e`、`test_stress_mt_arm64e`（Phase 1-4 `failures=0`）、`test-bundle.sh arm64e` 全部 PASS。
+
+---
+
+## Round 14: 锁屏 `loginwindow` → `AvatarKit` / `VFX` `MTLDevice` Selector 差集补齐
+
+### 根因与审计
+- 锁屏时 `loginwindow` 的 `AVTView` 进入 `VFX`，调用 `-[XcmBackendDevice isDepth24Stencil8PixelFormatSupported]` 抛出 `NSInvalidArgumentException` 导致 `loginwindow` 退出、会话重启。
+- 对照宿主机 macOS 27 `AGXG17CDevice`（Apple M5 Max）全量扫描 `@protocol(MTLDevice)`、`@protocol(MTLDeviceSPI)` 以及 7 个框架（`VFX`、`AvatarKit`、`SceneKit`、`CoreRE`、`QuartzCore`、`RenderBox`、`CoreImage`）共 **25,589 条 `__objc_selrefs`**，发现：
+  - `@protocol(MTLDevice)` 缺失 3 项：`isDepth24Stencil8PixelFormatSupported`、`sparseTileSizeWithTextureType:pixelFormat:sampleCount:`、`sparseTileSizeWithTextureType:pixelFormat:sampleCount:sparsePageSize:`（3 项均被 `VFX` / `SceneKit` 引用）。
+  - `@protocol(MTLDeviceSPI)` 缺失 23 项（含 `newBufferWithDescriptor:`、`newVisibleFunctionTableWithDescriptor:`、`newTextureWithBytesNoCopy:length:descriptor:deallocator:`、`supportsSampleCount:`、`singleFPConfig`/`doubleFPConfig`/`halfFPConfig`、`metalAssertionsEnabled`/`setMetalAssertionsEnabled:`、`tileSizeWithSparsePageSize:...`、`newRenderPipelineStateWithTileDescriptor:*` 等）。
+  - 另发现 VFX 初始化查询 `maxViewportCount` 返回了 `0`（应为 `16`），`maxArgumentBufferSamplerCount` 为 `0`（应为 `16`）。
+
+### 修复（`src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm`）
+- 在 `XcmBackendDevice` 补齐上述全部 26 个 `MTLDevice` + `MTLDeviceSPI` 方法（`isDepth24Stencil8PixelFormatSupported` 按 Apple Silicon 实测返回 `NO`；`newBufferWithDescriptor:` 标 `NS_RETURNS_RETAINED` 并完整转发至 `newBuffer*`），并补齐 `maxViewportCount = 16`、`maxArgumentBufferSamplerCount = 16`、`supportsBaseVertexInstanceDrawing` / `supportsDepthClipMode` / `supportsTextureCubeArray` / `supportsNonUniformThreadgroupSize = YES`。
+
+### 验证（通用 `arm64 + arm64e` `dist/XnuCpuMetal.bundle`）
+- 新增 `build/test_round14_vfx.mm`（`arm64` & `arm64e` 均 6/6 PASS）：
+  1. `isDepth24Stencil8PixelFormatSupported == NO`
+  2. `@protocol(MTLDevice)` + `@protocol(MTLDeviceSPI)` 对照 Apple M5 Max **0 缺失**
+  3. `Depth32Float_Stencil8` 纹理创建 + 深度/模板 RenderPass 完成
+  4. `SCNRenderer rendererWithDevice:dev options:nil` 正常初始化
+  5. `VFXRenderer rendererWithDevice:dev options:nil` 与 `AVTView initWithFrame:options:` 正常初始化（0 `unrecognized selector`）
+  6. 7 个框架（`VFX`/`AvatarKit`/`SceneKit`/`CoreRE`/`QuartzCore`/`RenderBox`/`CoreImage`）25,589 条 `__objc_selrefs` **0 缺失**
+- 全量回归：`test_carenderer_arm64e`、`test_round10_arm64e`、`test_round13_arm64e`、`test-bundle.sh arm64e` 全部 PASS。

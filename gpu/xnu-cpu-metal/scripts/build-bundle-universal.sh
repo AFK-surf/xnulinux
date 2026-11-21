@@ -18,7 +18,7 @@ lipo -create \
   -output "$BUNDLE/Contents/Frameworks/libxnu_m2v.dylib"
 
 lipo -create \
-  "$ROOT/dist/lavapipe/lib/libvulkan.1.dylib" \
+  "$ROOT/build/vkloader-arm64-install/lib/libvulkan.1.dylib" \
   "$ROOT/build/vkloader-arm64e-install/lib/libvulkan.1.dylib" \
   -output "$BUNDLE/Contents/Frameworks/libvulkan.1.dylib"
 
@@ -27,13 +27,24 @@ lipo -create \
   "$ROOT/dist/lavapipe-arm64e/lib/libvulkan_lvp.dylib" \
   -output "$BUNDLE/Contents/Frameworks/libvulkan_lvp.dylib"
 
-# 2. Relocatable ICD JSON
+# 2. Relocatable ICD JSON (both top-level for host env-var runs and vulkan/icd.d/ for secure-mode SYSCONFDIR)
 cat > "$BUNDLE/Contents/Resources/lvp_icd.aarch64.json" <<'EOF'
 {
     "ICD": {
         "api_version": "1.4.363",
         "library_arch": "64",
         "library_path": "../Frameworks/libvulkan_lvp.dylib"
+    },
+    "file_format_version": "1.0.1"
+}
+EOF
+mkdir -p "$BUNDLE/Contents/Resources/vulkan/icd.d"
+cat > "$BUNDLE/Contents/Resources/vulkan/icd.d/lvp_icd.aarch64.json" <<'EOF'
+{
+    "ICD": {
+        "api_version": "1.4.363",
+        "library_arch": "64",
+        "library_path": "../../../Frameworks/libvulkan_lvp.dylib"
     },
     "file_format_version": "1.0.1"
 }
