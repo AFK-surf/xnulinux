@@ -400,6 +400,32 @@ index e5e58b5..6e6596d 100644
  	pthread_functions->pth_proc_hashinit(p);
  }
  
+diff --git a/bsd/pthread/pthread_workqueue.c b/bsd/pthread/pthread_workqueue.c
+index cb27db6..2a73564 100644
+--- a/bsd/pthread/pthread_workqueue.c
++++ b/bsd/pthread/pthread_workqueue.c
+@@ -2117,6 +2117,21 @@ workq_open(struct proc *p, __unused struct workq_open_args *uap,
+ 		}
+ 
+ 		wq_max_cooperative_threads = num_cpus;
++		{
++			/*
++			 * LINUX64 (xnulinux): hosted XNU has one CPU. With a parallelism of 1 a process whose main thread waits
++			 * on work it queued (ld's layout: dispatch_group_wait) never got a worker admitted; allow a few
++			 * constrained threads per QoS bucket (the cooperative pool stays at the CPU count), as a small multi-core machine would.
++			 */
++			extern uintptr_t linux64_hook;
++			if (linux64_hook) {
++				for (int b = 0; b < WORKQ_NUM_QOS_BUCKETS; b++) {
++					if (wq_max_parallelism[b] < 4) {
++						wq_max_parallelism[b] = 4;
++					}
++				}
++			}
++		}
+ 
+ 		wq_init_constrained_limit = 0;
+ 	}
 diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
 index 229d6a1..e610b22 100644
 --- a/bsd/vfs/vfs_subr.c
