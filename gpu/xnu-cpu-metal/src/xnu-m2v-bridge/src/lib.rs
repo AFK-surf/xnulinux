@@ -5,9 +5,9 @@ use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::metal::{
     BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DataType,
-    FunctionOptions, IndexType, PixelFormat, PrimitiveType, SamplerAddressMode,
-    SamplerMinMagFilter, SamplerMipFilter, StencilOperation, TextureType, TextureUsage,
-    VertexFormat, VertexStepFunction, Winding,
+    FunctionOptions, IndexType, PixelFormat, PrimitiveType, RenderStages, ResourceUsage,
+    SamplerAddressMode, SamplerMinMagFilter, SamplerMipFilter, StencilOperation, TextureType,
+    TextureUsage, VertexFormat, VertexStepFunction, Winding,
 };
 use metal2vulkan::pipeline::{
     ColorAttachmentDescriptor, ComputePipelineDescriptor, LinkedFunctions,
@@ -15,12 +15,13 @@ use metal2vulkan::pipeline::{
     VertexBufferLayoutDescriptor, VertexDescriptor,
 };
 use metal2vulkan_runtime::{
-    BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer, CommandBufferStatus,
-    CommandQueue, ComputeCommandEncoder, ComputePipelineState, DepthStencilState, Device,
-    DeviceOptions, Event, EventRef, Fence, Function, FunctionDescriptor, HostMemory, Library,
-    LoadAction, Origin, PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor,
-    RenderPipelineState, ResourceOptions, ResourceRef, SamplerState, ScissorRect,
-    ShaderCacheOptions, Size, StoreAction, Texture, TextureDescriptor, Viewport,
+    ArgumentEncoder, BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer,
+    CommandBufferStatus, CommandQueue, ComputeCommandEncoder, ComputePipelineState,
+    DepthStencilState, Device, DeviceOptions, Event, EventRef, Fence, Function,
+    FunctionDescriptor, HostMemory, Library, LoadAction, Origin, PipelineOptions, Region,
+    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, ResourceRef,
+    SamplerState, ScissorRect, ShaderCacheOptions, Size, StoreAction, Texture, TextureDescriptor,
+    Viewport,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
@@ -495,6 +496,11 @@ pub extern "C" fn xm2v_texture_release(tex: *mut Texture) {
 }
 
 #[no_mangle]
+pub extern "C" fn xm2v_texture_gpu_resource_id(tex: *const Texture) -> u64 {
+    guard(0, || Ok(get(tex)?.gpu_resource_id().0))
+}
+
+#[no_mangle]
 pub extern "C" fn xm2v_texture_replace_region(
     tex: *const Texture,
     x: u64,
@@ -833,6 +839,169 @@ pub extern "C" fn xm2v_function_type(f: *const Function) -> u32 {
     })
 }
 
+#[no_mangle]
+pub extern "C" fn xm2v_function_new_argument_encoder(
+    f: *mut Function,
+    buffer_index: u32,
+) -> *mut ArgumentEncoder {
+    guard(std::ptr::null_mut(), || {
+        let enc = get(f)?
+            .new_argument_encoder_with_buffer_index(buffer_index)
+            .map_err(|e| format!("new_argument_encoder({buffer_index}): {e:?}"))?;
+        Ok(boxed(enc))
+    })
+}
+
+/* ---- Argument Encoder ---- */
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_release(enc: *mut ArgumentEncoder) {
+    release(enc);
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_encoded_length(enc: *const ArgumentEncoder) -> u64 {
+    guard(0, || Ok(get(enc)?.encoded_length()))
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_alignment(enc: *const ArgumentEncoder) -> u64 {
+    guard(1, || Ok(get(enc)?.alignment()))
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_set_argument_buffer(
+    enc: *mut ArgumentEncoder,
+    buf: *mut Buffer,
+    offset: u64,
+) -> bool {
+    guard(false, || {
+        let b = if buf.is_null() { None } else { Some(get(buf)?) };
+        get_mut(enc)?
+            .set_argument_buffer(b, offset)
+            .map_err(|e| format!("set_argument_buffer: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_set_argument_buffer_array_element(
+    enc: *mut ArgumentEncoder,
+    buf: *mut Buffer,
+    start_offset: u64,
+    array_element: u64,
+) -> bool {
+    guard(false, || {
+        let b = if buf.is_null() { None } else { Some(get(buf)?) };
+        get_mut(enc)?
+            .set_argument_buffer_start_offset_array_element(b, start_offset, array_element)
+            .map_err(|e| format!("set_argument_buffer_array_element: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_set_buffer(
+    enc: *const ArgumentEncoder,
+    buf: *mut Buffer,
+    offset: u64,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        let b = if buf.is_null() { None } else { Some(get(buf)?) };
+        get(enc)?
+            .set_buffer(b, offset, index)
+            .map_err(|e| format!("arg_enc set_buffer({index}): {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_set_texture(
+    enc: *const ArgumentEncoder,
+    tex: *mut Texture,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        let t = if tex.is_null() { None } else { Some(get(tex)?) };
+        get(enc)?
+            .set_texture(t, index)
+            .map_err(|e| format!("arg_enc set_texture({index}): {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_set_sampler(
+    enc: *const ArgumentEncoder,
+    samp: *mut SamplerState,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        let s = if samp.is_null() { None } else { Some(get(samp)?) };
+        get(enc)?
+            .set_sampler_state(s, index)
+            .map_err(|e| format!("arg_enc set_sampler({index}): {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_set_compute_pipeline(
+    enc: *const ArgumentEncoder,
+    pso: *mut ComputePipelineState,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        let p = if pso.is_null() { None } else { Some(get(pso)?) };
+        get(enc)?
+            .set_compute_pipeline_state(p, index)
+            .map_err(|e| format!("arg_enc set_compute_pipeline({index}): {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_set_render_pipeline(
+    enc: *const ArgumentEncoder,
+    pso: *mut RenderPipelineState,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        let p = if pso.is_null() { None } else { Some(get(pso)?) };
+        get(enc)?
+            .set_render_pipeline_state(p, index)
+            .map_err(|e| format!("arg_enc set_render_pipeline({index}): {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_constant_data(
+    enc: *const ArgumentEncoder,
+    index: u32,
+) -> *mut c_void {
+    guard(std::ptr::null_mut(), || {
+        let ptr = get(enc)?
+            .constant_data(index)
+            .map_err(|e| format!("arg_enc constant_data({index}): {e:?}"))?;
+        Ok(ptr.as_ptr().cast::<c_void>())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_argument_encoder_new_nested(
+    enc: *const ArgumentEncoder,
+    index: u32,
+) -> *mut ArgumentEncoder {
+    guard(std::ptr::null_mut(), || {
+        let nested = get(enc)?
+            .new_argument_encoder_for_buffer_at_index(index)
+            .map_err(|e| format!("arg_enc new_nested({index}): {e:?}"))?;
+        Ok(boxed(nested))
+    })
+}
+
 /* ---- Pipelines & States ---- */
 
 #[no_mangle]
@@ -1037,6 +1206,11 @@ pub extern "C" fn xm2v_sampler_new(
 #[no_mangle]
 pub extern "C" fn xm2v_sampler_release(s: *mut SamplerState) {
     release(s);
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_sampler_gpu_resource_id(s: *const SamplerState) -> u64 {
+    guard(0, || Ok(get(s)?.gpu_resource_id().0))
 }
 
 #[no_mangle]
@@ -1287,6 +1461,36 @@ pub extern "C" fn xm2v_compute_encoder_set_threadgroup_memory_length(
         get_mut(enc)?
             .set_threadgroup_memory_length(length, index)
             .map_err(|e| format!("set_threadgroup_memory_length: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_compute_encoder_use_buffer(
+    enc: *mut ComputeCommandEncoder,
+    buf: *mut Buffer,
+    usage: u64,
+) -> bool {
+    guard(false, || {
+        let u: ResourceUsage = raw_enum(usage, "ResourceUsage")?;
+        get_mut(enc)?
+            .use_resource(ResourceRef::Buffer(get(buf)?), u)
+            .map_err(|e| format!("compute use_buffer: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_compute_encoder_use_texture(
+    enc: *mut ComputeCommandEncoder,
+    tex: *mut Texture,
+    usage: u64,
+) -> bool {
+    guard(false, || {
+        let u: ResourceUsage = raw_enum(usage, "ResourceUsage")?;
+        get_mut(enc)?
+            .use_resource(ResourceRef::Texture(get(tex)?), u)
+            .map_err(|e| format!("compute use_texture: {e:?}"))?;
         Ok(true)
     })
 }
@@ -1629,6 +1833,40 @@ pub extern "C" fn xm2v_render_encoder_set_fragment_sampler(
         get_mut(enc)?
             .set_fragment_sampler_state(s, index)
             .map_err(|e| format!("set_fragment_sampler_state: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_use_buffer(
+    enc: *mut RenderCommandEncoder,
+    buf: *mut Buffer,
+    usage: u64,
+    stages: u64,
+) -> bool {
+    guard(false, || {
+        let u: ResourceUsage = raw_enum(usage, "ResourceUsage")?;
+        let st: RenderStages = raw_enum(stages, "RenderStages")?;
+        get_mut(enc)?
+            .use_resource(ResourceRef::Buffer(get(buf)?), u, st)
+            .map_err(|e| format!("render use_buffer: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_use_texture(
+    enc: *mut RenderCommandEncoder,
+    tex: *mut Texture,
+    usage: u64,
+    stages: u64,
+) -> bool {
+    guard(false, || {
+        let u: ResourceUsage = raw_enum(usage, "ResourceUsage")?;
+        let st: RenderStages = raw_enum(stages, "RenderStages")?;
+        get_mut(enc)?
+            .use_resource(ResourceRef::Texture(get(tex)?), u, st)
+            .map_err(|e| format!("render use_texture: {e:?}"))?;
         Ok(true)
     })
 }

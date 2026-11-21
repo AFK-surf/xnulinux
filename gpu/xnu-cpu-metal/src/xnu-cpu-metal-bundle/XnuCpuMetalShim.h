@@ -46,6 +46,7 @@ static Class referenceClass(Class cls) {
         {"XcmHeap", "IOGPUMetalHeap"},
         {"XcmLibrary", "_MTLLibrary"},
         {"XcmFunction", "_MTLFunction"},
+        {"XcmArgumentEncoder", "_MTLArgumentEncoder"},
         {"XcmComputePipeline", "_MTLComputePipelineState"},
         {"XcmRenderPipeline", "_MTLRenderPipelineState"},
         {"XcmObject", nullptr},
@@ -195,6 +196,7 @@ static void install(id device, io_service_t port) {
     static const char *const conformances[][2] = {
         {"XcmBuffer", "MTLBuffer"}, {"XcmTexture", "MTLTexture"},
         {"XcmLibrary", "MTLLibrary"}, {"XcmFunction", "MTLFunction"},
+        {"XcmArgumentEncoder", "MTLArgumentEncoder"},
         {"XcmComputePipeline", "MTLComputePipelineState"},
         {"XcmRenderPipeline", "MTLRenderPipelineState"},
         {"XcmSampler", "MTLSamplerState"}, {"XcmDepthStencil", "MTLDepthStencilState"},
