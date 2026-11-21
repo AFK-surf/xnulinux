@@ -506,10 +506,25 @@ index 6e740c2..bfbdd29 100644
  	/* consumes reason */
  	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), NULL,
 diff --git a/bsd/kern/kern_mman.c b/bsd/kern/kern_mman.c
-index 32d27c9..8f9bc0c 100644
+index 32d27c9..20aa26b 100644
 --- a/bsd/kern/kern_mman.c
 +++ b/bsd/kern/kern_mman.c
-@@ -669,7 +669,9 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
+@@ -487,7 +487,13 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
+ 		/*
+ 		 * Entitlement check.
+ 		 */
+-		error = mac_proc_check_map_anon(p, current_cached_proc_cred(p),
++		/*
++		 * LINUX64 (xnulinux): under amfi_get_out_of_my_way a JIT mapping is let through without the JIT entitlement, as
++		 * AMFI's other verdicts on code are (F_CHECK_LV, executable mmap): the CPU Metal device (Mesa's llvmpipe) compiles
++		 * shaders to machine code in every Metal client, WindowServer included, which is hardened and not JIT-entitled.
++		 */
++		extern int linux64_amfi_off(void);
++		error = ((flags & MAP_JIT) && linux64_amfi_off()) ? 0 : mac_proc_check_map_anon(p, current_cached_proc_cred(p),
+ 		    user_addr, user_size, prot, flags, &maxprot);
+ 		if (error) {
+ 			return EINVAL;
+@@ -669,7 +675,9 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
  
  			handle = (void *)vp;
  #if CONFIG_MACF
@@ -732,10 +747,10 @@ index c08a74c..1e26f75 100644
  355	AUE_NULL	ALL	{ int nosys(void); }	{ old getaudit }
 diff --git a/bsd/net/if_linux64.c b/bsd/net/if_linux64.c
 new file mode 100644
-index 0000000..55fe82d
+index 0000000..461d993
 --- /dev/null
 +++ b/bsd/net/if_linux64.c
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,256 @@
 +/*
 + * LINUX64 (xnulinux): the hosted kernel's Ethernet interface en0.
 + *
@@ -898,6 +913,23 @@ index 0000000..55fe82d
 +		return 0;
 +	}
 +	linux64_stage_arg(817, (unsigned long)&q);
++	return q.result > 0 ? q.result : 0;
++}
++
++/*
++ * The host's input events for the IOKit HID driver (kexts/XnuInput), through the same kind of upcall: whole 8-byte evdev
++ * records {u16 type, u16 code, s32 value} into buffer, their bytes (0 when none wait).
++ */
++long linux64_input_read(void *buffer, unsigned long size);
++long
++linux64_input_read(void *buffer, unsigned long size)
++{
++	struct linux64_net_req q = { .buf = buffer, .len = size, .result = 0 };
++
++	if (linux64_hook == 0) {
++		return 0;
++	}
++	linux64_stage_arg(818, (unsigned long)&q);
 +	return q.result > 0 ? q.result : 0;
 +}
 +
