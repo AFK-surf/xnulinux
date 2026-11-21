@@ -521,10 +521,10 @@ index 32d27c9..8f9bc0c 100644
  			if (error) {
  				(void)vnode_put(vp);
 diff --git a/bsd/kern/kern_trustcache.c b/bsd/kern/kern_trustcache.c
-index 4b1e8a9..f188eed 100644
+index 4b1e8a9..f979bb6 100644
 --- a/bsd/kern/kern_trustcache.c
 +++ b/bsd/kern/kern_trustcache.c
-@@ -78,6 +78,10 @@ SYSCTL_UINT(
+@@ -78,6 +78,30 @@ SYSCTL_UINT(
  	0, "number of loadable trust caches loaded"
  	);
  
@@ -532,10 +532,30 @@ index 4b1e8a9..f188eed 100644
 +extern uintptr_t linux64_hook;
 +static bool linux64_trust_cache_skipped = false;
 +
++/*
++ * LINUX64 (xnulinux): the runtime is skipped at boot until the AppleImage4 and AMFI kexts register their interfaces
++ * (they start with the kernel collection); once both are there, set it up and load the static trust cache the host
++ * passes (chosen/memory-map/TrustCache), so AMFI validates the OS's platform binaries as on a booted Mac.
++ */
++void linux64_trust_cache_late_init(void);
++void
++linux64_trust_cache_late_init(void)
++{
++	if (!linux64_trust_cache_skipped || img4if == NULL || amfi == NULL) {
++		return;
++	}
++	linux64_trust_cache_skipped = false;
++	trust_cache_runtime_init();
++	if (!linux64_trust_cache_skipped) {
++		load_static_trust_cache();
++		printf("linux64: trust cache runtime set up late; static trust caches: %u\n", num_static_trust_caches);
++	}
++}
++
  #if CONFIG_SPTM
  /*
   * We have the TrustedExecutionMonitor environment available. All of our artifacts
-@@ -124,6 +128,16 @@ get_trust_cache_info(void)
+@@ -124,6 +148,16 @@ get_trust_cache_info(void)
  void
  trust_cache_runtime_init(void)
  {
@@ -552,7 +572,7 @@ index 4b1e8a9..f188eed 100644
  	/* Image4 interface needs to be available */
  	if (img4if == NULL) {
  		panic("image4 interface not available");
-@@ -402,6 +416,16 @@ trust_cache_runtime_init(void)
+@@ -402,6 +436,16 @@ trust_cache_runtime_init(void)
  		allow_engineering_caches = true;
  	}
  
@@ -569,7 +589,7 @@ index 4b1e8a9..f188eed 100644
  	/* Image4 interface needs to be available */
  	if (img4if == NULL) {
  		panic("image4 interface not available");
-@@ -579,6 +603,16 @@ trust_cache_runtime_init(void)
+@@ -579,6 +623,16 @@ trust_cache_runtime_init(void)
  	allow_legacy_caches = true;
  #endif
  
@@ -586,7 +606,7 @@ index 4b1e8a9..f188eed 100644
  	/* Image4 interface needs to be available */
  	if (img4if == NULL) {
  		panic("image4 interface not available");
-@@ -1175,6 +1209,10 @@ load_static_trust_cache(void)
+@@ -1175,6 +1229,10 @@ load_static_trust_cache(void)
  	/* Mark this function as having been called */
  	trust_cache_static_init = true;
  
@@ -1331,6 +1351,19 @@ index ae82fc8..3fd837c 100644
  	}
  
  //
+diff --git a/libkern/amfi/amfi.c b/libkern/amfi/amfi.c
+index 58df36b..76d1a20 100644
+--- a/libkern/amfi/amfi.c
++++ b/libkern/amfi/amfi.c
+@@ -12,6 +12,8 @@ amfi_interface_register(const amfi_t *mfi)
+ 		panic("AppleMobileFileIntegrity interface already set");
+ 	}
+ 	amfi = mfi;
++	extern void linux64_trust_cache_late_init(void);   /* LINUX64 (xnulinux) */
++	linux64_trust_cache_late_init();
+ }
+ 
+ void
 diff --git a/libkern/crypto/corecrypto_rand.c b/libkern/crypto/corecrypto_rand.c
 index d46815b..ccd2d84 100644
 --- a/libkern/crypto/corecrypto_rand.c
@@ -1430,6 +1463,17 @@ index d46815b..ccd2d84 100644
 +		return;
 +	}
  	g_crypto_funcs->random_kmem_init_fn(ctx);
+ }
+diff --git a/libkern/img4/interface.c b/libkern/img4/interface.c
+index 3863334..2fff0c8 100644
+--- a/libkern/img4/interface.c
++++ b/libkern/img4/interface.c
+@@ -15,4 +15,6 @@ img4_interface_register(const img4_interface_t *i4)
+ 		panic("img4 interface already set");
+ 	}
+ 	img4if = i4;
++	extern void linux64_trust_cache_late_init(void);   /* LINUX64 (xnulinux): whichever of img4/AMFI registers last */
++	linux64_trust_cache_late_init();
  }
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
 index ac1713e..45b4d94 100644
@@ -3562,10 +3606,32 @@ index 77044be..2c195af 100644
  			addr = (vm_offset_t)&_backtrace_packed_out_of_reach;
  			addr_delta = addr - vm_kernel_stext;
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
-index 0eae1f6..3253146 100644
+index 0eae1f6..7ae37e9 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1253,6 +1253,32 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -754,7 +754,21 @@ DebuggerTrapWithState(debugger_op db_op, const char *db_message, const char *db_
+ 	 * The rest of the cores are halted by IPI if possible; if that
+ 	 * fails it will fall back to dbgwrap.
+ 	 */
++	{
++		/*
++		 * LINUX64 (xnulinux): the hosted kernel's exceptions are taken by Linux, which does not hand XNU this trap
++		 * (an uncategorized exception), so a stackshot (spindump, tailspin, sysdiagnose) ended the whole run. The
++		 * stackshot needs no trap frame (handle_debugger_trap takes it with do_stackshot(NULL)) and there is one CPU:
++		 * call the handler here, as the trap would (kdp_trap -> handle_debugger_trap).
++		 */
++		extern uintptr_t linux64_hook;
++		if (linux64_hook && db_op == DBOP_STACKSHOT) {
++			handle_debugger_trap(0, 0, 0, NULL);	/* the exception number only matters for breakpoints */
++			goto trapped;
++		}
++	}
+ 	TRAP_DEBUGGER;
++trapped:
+ 
+ 	ret = CPUDEBUGGERRET;
+ 
+@@ -1253,6 +1267,32 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  {
  #pragma clang diagnostic pop
  

@@ -30,6 +30,9 @@ if [ -e out/kc/kc27.bin ]; then
   done
   K27_NO_BOOT=1 NATIVE="$NATIVE" bash k27/try.sh 0 2>&1 | tail -3
   grep -iE 'error|unresolved|XnuCpuMetal' out/k27/kc-build.log | tail -8 || true
+  # AMFI of the collection's macOS expects the code-signature platform version of that build; the system disk's binaries
+  # carry their own (macOS 27.0.1: 26 where 27.2's AMFI expects 27)
+  python3 ~/w/poc/scripts/kc-amfi-platform.py out/k27/kc-k27.bin ${AMFI_PLATFORM:-26}
   sudo cp out/k27/kc-k27.bin /lib/firmware/xnu/kc.bin
 fi
 ls -la out/k27/kernel-k27.macho
