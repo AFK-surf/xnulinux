@@ -92,6 +92,13 @@ static char *console_in;
 module_param(console_in, charp, 0444);
 static void *ci_file; static fki_u64 ci_off;
 struct xnu_cons_req { void *buf; u64_t len; long result; };
+/*
+ * Input events for XnuInput (kexts/XnuInput): a host file of 8-byte records {u16 type, u16 code, s32 value} as Linux's evdev
+ * (tools/hosted/xnu-input.py appends them); upcall 818 reads the whole records written since the load.
+ */
+static char *input_in;
+module_param(input_in, charp, 0444);
+static void *in_file; static fki_u64 in_off;
 /* hook returns must be 0 (nonzero ends the run): results come back through the request */
 struct xnu_hostdisk_req { u64_t write, off, len; void *buf; long result; };
 struct xnu_net_req { void *buf; u64_t len; long result; };
@@ -326,6 +333,16 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		if (ci_file) {
 			long n = fki_file_rw(ci_file, 0, q->buf, (unsigned long)q->len, ci_off);
 			if (n > 0) { ci_off += n; q->result = n; }
+		}
+		return 0;
+	}
+	if (stage == 818) {		/* input events: whole 8-byte records of input_in, into q->buf */
+		struct xnu_cons_req *q = (struct xnu_cons_req *)a1;
+		if (!q) return 0;
+		q->result = 0;
+		if (in_file && q->len >= 8) {
+			long n = fki_file_rw(in_file, 0, q->buf, (unsigned long)(q->len & ~7ULL), in_off);
+			if (n > 0) { n &= ~7L; in_off += n; q->result = n; }
 		}
 		return 0;
 	}
@@ -888,6 +905,12 @@ static int __init xnu_init(void)
 		ci_off = sz;	/* only what is written after the load */
 		if (!ci_file) logs("xnu: cannot open console_in");
 	}
+	if (input_in) {
+		fki_u64 sz = 0;
+		in_file = fki_file_open(input_in, 0, &sz);
+		in_off = sz & ~7ULL;	/* only what is written after the load */
+		if (!in_file) logs("xnu: cannot open input_in");
+	}
 	if (hostdisk) {
 		hd_file = fki_file_open(hostdisk, hostdisk_rw, &hd_size);
 		if (!hd_file) { logs("xnu: cannot open the host disk"); return -2; }
@@ -926,6 +949,7 @@ static void __exit xnu_exit(void)
 	if (tc_blob) fki_blob_put(tc_blob);
 	if (hd_file) fki_file_close(hd_file);
 	if (ci_file) fki_file_close(ci_file);
+	if (in_file) fki_file_close(in_file);
 }
 
 module_init(xnu_init);

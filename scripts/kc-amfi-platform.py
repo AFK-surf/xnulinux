@@ -10,12 +10,22 @@ AMFI keeps the expected version in a 32-bit global, read by a small accessor tha
 logs that message. This finds the message, the accessor called just before its use, the global the accessor loads, and
 writes the given version there. It changes nothing when the value is already the requested one.
 
+It also turns off AMFI's version restriction, which the same mismatch trips: 27.2's AMFI refuses to run some Apple
+programs unless they carry a com.apple.private.amfi.version-restriction entitlement of at least a given version (a table
+of signing identifiers and versions, e.g. com.apple.SecurityAgent). Programs of an older macOS do not carry it, and AMFI
+kills them at exec ("com.apple.SecurityAgent disallowed without correct ... entitlement version"); SecurityAgent runs
+loginwindow's login mechanisms, so no graphical session starts. The check function starts with a fast path that allows
+every process without one flag (`bti c; tbnz w1, #N, slow; mov w0, #1; ret`); the tbnz becomes a nop, so the check
+always allows.
+
     kc-amfi-platform.py KC VERSION
 """
 import struct
 import sys
 
 MESSAGE = b'%s: platformVersion %u is lower than expected version %u.'
+VR_MESSAGE = b'%s: %s disallowed without correct com.apple.private.amfi.version-restriction entitlement version'
+NOP = 0xd503201f
 
 
 def segments(d):
@@ -91,6 +101,29 @@ def accessor_global(d, segs, fva):
     return adrp_page(w1, fva + 4) + ((w2 >> 10) & 0xfff) * 4
 
 
+def version_restriction_check(d, segs):
+    """File offset of the version-restriction check's fast-path tbnz (or of the nop already there), or None."""
+    at = d.find(VR_MESSAGE + b'\0')
+    if at < 0:
+        return None
+    found = set()
+    for pc, fo in string_xrefs(d, segs, file_to_va(segs, at)):
+        for back in range(1, 8):  # bl check; tbnz w0, #0, allowed; ... adrp x3, message
+            w = word(d, fo - 4 * back)
+            if (w & 0xfc000000) != 0x94000000:
+                continue
+            imm = w & 0x3ffffff
+            if imm & 0x2000000:
+                imm -= 1 << 26
+            ffo = va_to_file(segs, pc - 4 * back + imm * 4)
+            if ffo is None or word(d, ffo) != 0xd503245f:  # bti c
+                continue
+            t, m, r = word(d, ffo + 4), word(d, ffo + 8), word(d, ffo + 12)
+            if m == 0x52800020 and r == 0xd65f03c0 and ((t & 0x7f00001f) == 0x37000001 or t == NOP):  # tbnz w1 / nop; mov w0, #1; ret
+                found.add(ffo + 4)
+    return found.pop() if len(found) == 1 else None
+
+
 def main():
     path, version = sys.argv[1], int(sys.argv[2])
     d = bytearray(open(path, 'rb').read())
@@ -117,10 +150,20 @@ def main():
     old = struct.unpack_from('<I', d, gfo)[0]
     if not 10 <= old <= 60:
         sys.exit('kc-amfi-platform: implausible expected platform version %d at %#x' % (old, g))
-    if old != version:
+    changed = old != version
+    if changed:
         struct.pack_into('<I', d, gfo, version)
-        open(path, 'wb').write(d)
     print('kc-amfi-platform: AMFI expected platform version at %#x: %d -> %d' % (g, old, version))
+    vr = version_restriction_check(d, segs)
+    if vr is None:
+        print('kc-amfi-platform: AMFI version-restriction check not found: left as it is')
+    else:
+        if word(d, vr) != NOP:
+            struct.pack_into('<I', d, vr, NOP)
+            changed = True
+        print('kc-amfi-platform: AMFI version-restriction check at %#x: always allows' % file_to_va(segs, vr))
+    if changed:
+        open(path, 'wb').write(d)
 
 
 if __name__ == '__main__':
