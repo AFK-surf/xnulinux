@@ -28,10 +28,16 @@ if [ -e out/kc/kc27.bin ]; then
   NETINC=~/w/poc/build/netinc; NETSRC=~/w/poc/build/IONetworkingFamily-188; mkdir -p $NETINC/IOKit
   [ -e $NETSRC/IOEthernetController.h ] || git clone -q --depth 1 --branch IONetworkingFamily-188 https://github.com/apple-oss-distributions/IONetworkingFamily.git $NETSRC
   ln -sfn $NETSRC $NETINC/IOKit/network
+  # IOHIDFamily's kernel headers (IOKit/hid/*.h) for XnuInput: the SDK's Kernel.framework has them
+  for h in toolchains/sdks/*.sdk/System/Library/Frameworks/Kernel.framework/Headers/IOKit/hid; do
+    [ -e $h/IOHIDDevice.h ] && { ln -sfn $PWD/$h $NETINC/IOKit/hid; ln -sfn $PWD/$h/../hidsystem $NETINC/IOKit/hidsystem; ln -sfn $PWD/$h/../graphics $NETINC/IOKit/graphics
+      ln -sfn $PWD/${h%%/System/*}/usr/include/TargetConditionals.h $NETINC/TargetConditionals.h; break; }
+  done
   for j in ~/w/poc/kexts/*/*.json; do
     [ -e "$j" ] || continue
     n=$(basename $j .json)
-    python3 scripts/build-native-kext.py $n $(dirname $j)/$n.cpp -I $NETINC --obj ${KEXT_OBJ:-k27-obj}
+    # a kext that does not build is left out of the collection (reported), not the whole rebuild
+    python3 scripts/build-native-kext.py $n $(dirname $j)/$n.cpp -I $NETINC --obj ${KEXT_OBJ:-k27-obj} || { echo "kext $n failed to build: left out"; continue; }
     NATIVE="$NATIVE $j"
   done
   K27_NO_BOOT=1 NATIVE="$NATIVE" bash k27/try.sh 0 2>&1 | tail -3

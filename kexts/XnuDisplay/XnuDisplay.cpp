@@ -812,7 +812,7 @@ void XnuDisplay::program_hardware_gated()
 
 // 8-bit BGRA, 16-bit half-float RGBA, and 'b3a8': two planes, 10-bit extended-range BGR in 32 bits and 8-bit alpha (QuartzCore's
 // four_cc_to_mtl_format: Metal's format 550), what WindowServer draws with a deep framebuffer (CADeviceUseCIF10).
-static constexpr uint32_t kFormatBGRA = 'BGRA', kFormatRGhA = 'RGhA', kFormatB3A8 = 'b3a8';
+static constexpr uint32_t kFormatBGRA = 'BGRA', kFormatRGhA = 'RGhA', kFormatB3A8 = 'b3a8', kFormatLosslessBGRA = '&BGA';
 
 // A half float's value in [0, 1] as a byte, in integer arithmetic (no floating point in the kernel).
 static uint8_t halfToByte(uint16_t half)
@@ -1092,6 +1092,15 @@ void XnuDisplay::copySurface(IOSurface *surface, bool refresh)
                   ioSurfacePlaneHeight(surface, plane), ioSurfacePlaneOffset(surface, plane), ioSurfacePlaneBytesPerRow(surface, plane),
                   ioSurfacePlaneBytesPerElement(surface, plane));
         fSurfaceFormat = format;
+    }
+    // xnulinux: WindowServer's framebuffers are '&BGA' (Apple's lossless-compressed 32-bit BGRA). The CPU Metal device never
+    // compresses: plane 0 holds plain BGRA rows (the surface's own row bytes are those of the compressed layout).
+    if (format == kFormatLosslessBGRA) {
+        if (ioSurfacePlaneCount(surface) < 1 || ioSurfacePlaneBytesPerElement(surface, 0) != 4)
+            return;
+        base = ioSurfacePlaneOffset(surface, 0);
+        rowBytes = ioSurfacePlaneBytesPerRow(surface, 0);
+        format = kFormatBGRA;
     }
     if (format == kFormatB3A8) {   // the colour plane; alpha is not shown
         if (ioSurfacePlaneCount(surface) < 1 || ioSurfacePlaneBytesPerElement(surface, 0) != 4)
