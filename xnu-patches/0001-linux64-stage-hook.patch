@@ -267,7 +267,7 @@ index ec19ee7..6baf626 100644
  	}
  }
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index 5362b32..8028c48 100644
+index 5362b32..6f378e2 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -585,7 +585,7 @@ bsd_init(void)
@@ -291,6 +291,24 @@ index 5362b32..8028c48 100644
  #endif /* ETHER */
  
  #if NETWORKING
+@@ -1083,6 +1088,17 @@ bsd_init(void)
+ 			}
+ 		}
+ #endif
++		{
++			/*
++			 * LINUX64 (xnulinux): a hosted APFS root is the host's own image, unsealed, with no boot manifest to
++			 * authenticate it against. With SIP's unauthenticated-root allowance (boot-arg lp-sip0 with 0x800, what
++			 * "csrutil authenticated-root disable" sets on a Mac) it mounts as it is.
++			 */
++			extern uintptr_t linux64_hook;
++			if (linux64_hook && csr_check(CSR_ALLOW_UNAUTHENTICATED_ROOT) == 0) {
++				require_rootauth = FALSE;
++			}
++		}
+ 		if (require_rootauth) {
+ 			/* enforce sealedness */
+ 			int autherr = VNOP_IOCTL(rootvnode, FSIOC_KERNEL_ROOTAUTH, NULL, 0, vfs_context_kernel());
 diff --git a/bsd/kern/kern_csr.c b/bsd/kern/kern_csr.c
 index 604f16a..7cffe13 100644
 --- a/bsd/kern/kern_csr.c
@@ -747,10 +765,10 @@ index c08a74c..1e26f75 100644
  355	AUE_NULL	ALL	{ int nosys(void); }	{ old getaudit }
 diff --git a/bsd/net/if_linux64.c b/bsd/net/if_linux64.c
 new file mode 100644
-index 0000000..461d993
+index 0000000..29cf3df
 --- /dev/null
 +++ b/bsd/net/if_linux64.c
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,307 @@
 +/*
 + * LINUX64 (xnulinux): the hosted kernel's Ethernet interface en0.
 + *
@@ -933,6 +951,57 @@ index 0000000..461d993
 +	return q.result > 0 ? q.result : 0;
 +}
 +
++/*
++ * The hosted keystore's backing file (xnu.ko keystore=): XnuEAN keeps the EAN blobs of the virtual platform's xART there.
++ * Reads or writes `length` bytes at `offset`; bytes moved, or a negative error.
++ */
++struct linux64_store_req {
++	uint64_t        write, off, len;
++	void            *buf;
++	long            result;
++};
++long linux64_store_rw(int write, void *buffer, unsigned long length, unsigned long offset);
++long
++linux64_store_rw(int write, void *buffer, unsigned long length, unsigned long offset)
++{
++	struct linux64_store_req q = { .write = (uint64_t)write, .off = offset, .len = length, .buf = buffer, .result = -6 };
++
++	if (linux64_hook == 0) {
++		return -6;
++	}
++	linux64_stage_arg(819, (unsigned long)&q);
++	return q.result;
++}
++
++/*
++ * The hosted system's block disk (XnuDisk, kexts/XnuDisk): a second host file, an APFS container, served to IOKit as media.
++ * Upcall 821 returns its size in bytes (0: none), 820 reads or writes `length` bytes at `offset` (bytes moved or -errno).
++ */
++uint64_t linux64_disk_size(void);
++uint64_t
++linux64_disk_size(void)
++{
++	uint64_t size = 0;
++
++	if (linux64_hook != 0) {
++		linux64_stage_arg(821, (unsigned long)&size);
++	}
++	return size;
++}
++
++long linux64_disk_rw(int write, void *buffer, unsigned long length, unsigned long offset);
++long
++linux64_disk_rw(int write, void *buffer, unsigned long length, unsigned long offset)
++{
++	struct linux64_store_req q = { .write = (uint64_t)write, .off = offset, .len = length, .buf = buffer, .result = -6 };
++
++	if (linux64_hook == 0) {
++		return -6;
++	}
++	linux64_stage_arg(820, (unsigned long)&q);
++	return q.result;
++}
++
 +/* From the hosted idle loop, after the host let it sleep: wake the receive thread when Linux queued frames. */
 +void linux64_net_idle_poll(void);
 +void
@@ -1061,21 +1130,22 @@ index cb27db6..2a73564 100644
  		wq_init_constrained_limit = 0;
  	}
 diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
-index 229d6a1..e610b22 100644
+index 229d6a1..cb42a6f 100644
 --- a/bsd/vfs/vfs_subr.c
 +++ b/bsd/vfs/vfs_subr.c
-@@ -1144,7 +1144,14 @@ vfs_rootmountalloc_internal(struct vfstable *vfsp, const char *devname)
+@@ -1144,7 +1144,15 @@ vfs_rootmountalloc_internal(struct vfstable *vfsp, const char *devname)
  
  	mp->mnt_vtable = vfsp;
  	mp->mnt_op = vfsp->vfc_vfsops;
 -	mp->mnt_flag = MNT_RDONLY | MNT_ROOTFS;
 +	{
 +		/*
-+		 * LINUX64 (xnulinux): a hosted root (the host-file disk) mounts read-write; nothing here runs the boot tasks
-+		 * that would remount it (logd traps on EROFS writing /private/var/db/diagnostics).
++		 * LINUX64 (xnulinux): a hosted HFS+ root (the host-file disk) mounts read-write; nothing here runs the boot
++		 * tasks that would remount it (logd traps on EROFS writing /private/var/db/diagnostics). APFS refuses a
++		 * writable root at mountroot ("can't mount root filesystem writeable"): an APFS root mounts read-only, as on a Mac.
 +		 */
 +		extern uintptr_t linux64_hook;
-+		mp->mnt_flag = (linux64_hook ? 0 : MNT_RDONLY) | MNT_ROOTFS;
++		mp->mnt_flag = (linux64_hook && strcmp(vfsp->vfc_name, "hfs") == 0 ? 0 : MNT_RDONLY) | MNT_ROOTFS;
 +	}
  	mp->mnt_vnodecovered = NULLVP;
  	//mp->mnt_stat.f_type = vfsp->vfc_typenum;
@@ -1179,7 +1249,7 @@ index 0cc7f6e..c07d35c 100644
  		DEBUG_INFO("region = %d\n", currentRegion->type);
  		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index 76555f6..280d150 100644
+index 76555f6..42b940f 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
 @@ -1403,15 +1403,18 @@ PESetGMTTimeOfDay(long secs)
@@ -1205,11 +1275,12 @@ index 76555f6..280d150 100644
  
  	assert(nsecs < NSEC_PER_SEC);
  	*usecs = nsecs / NSEC_PER_USEC;
-@@ -1540,6 +1543,100 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
+@@ -1540,6 +1543,114 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
  	publishResource("IONVRAM");
  }
  
 +extern "C" uintptr_t linux64_hook; /* LINUX64 (xnulinux) */
++#include <libkern/c++/OSKext.h>
 +
 +/*
 + * LINUX64 (xnulinux): a stand-in for AppleKeyStore's "AKSKernelServices" table, which AMFI requires (AKS_services()
@@ -1250,8 +1321,21 @@ index 76555f6..280d150 100644
 +	if (!buf) {
 +		return kIOReturnNoMemory;
 +	}
-+	IOByteCount got = src->readBytes(0, buf, (IOByteCount)len);
-+	IOByteCount put = dst->writeBytes(0, buf, got);
++	/* the descriptors come unprepared (a real engine prepares them for its DMA): wire them for the copy, each in its
++	 * own direction (AppleVirtualPlatformXART encrypts in place: one in-out descriptor as both, which a read-only
++	 * preparation would keep writeBytes from) */
++	IOReturn rs = src->prepare(), rd = (src == dst) ? kIOReturnSuccess : dst->prepare();
++	IOByteCount got = 0, put = 0;
++	if (rs == kIOReturnSuccess && rd == kIOReturnSuccess) {
++		got = src->readBytes(0, buf, (IOByteCount)len);
++		put = dst->writeBytes(0, buf, got);
++	}
++	if (rs == kIOReturnSuccess) {
++		src->complete();
++	}
++	if (rd == kIOReturnSuccess && src != dst) {
++		dst->complete();
++	}
 +	IOFreeData(buf, (vm_size_t)len);
 +	return (got == len && put == len) ? kIOReturnSuccess : kIOReturnIOError;
 +}
@@ -1306,14 +1390,25 @@ index 76555f6..280d150 100644
  IOReturn
  IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
      bool waitForFunction,
-@@ -1564,7 +1661,48 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
+@@ -1564,7 +1675,63 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
  	}
  
  	if (waitForFunction) {
 -		_resources = waitForService(resourceMatching(functionName));
++		/*
++		 * LINUX64 (xnulinux): with the virtual platform's software keystore in the collection (AppleVPKeyStore, as in
++		 * Apple's VirtualMac), AppleKeyStore provides AKSKernelServices itself: the stand-ins below for the SEP's
++		 * endpoint and the AES engine are still needed, the stand-in table is not.
++		 */
++		static int linux64_real_aks = -1;
++		if (linux64_hook && linux64_real_aks < 0) {
++			OSKext *vpks = OSKext::lookupKextWithIdentifier("com.apple.driver.AppleVPKeyStore");
++			linux64_real_aks = vpks != NULL;
++			OSSafeReleaseNULL(vpks);
++		}
 +		if (linux64_hook && functionName->isEqualTo("AKSKernelServices")) {
 +			static bool scrd_done;
-+			if (param1) {
++			if (param1 && !linux64_real_aks) {
 +				*(void **)param1 = linux64_aks_services();
 +			}
 +			if (!scrd_done) {
@@ -1337,10 +1432,14 @@ index 76555f6..280d150 100644
 +					OSSafeReleaseNULL(aes);
 +				}
 +			}
-+			IOLog("LINUX64: AKSKernelServices from the hosted stand-in\n");
-+			return kIOReturnSuccess;
++			if (!linux64_real_aks) {
++				IOLog("LINUX64: AKSKernelServices from the hosted stand-in\n");
++				return kIOReturnSuccess;
++			}
 +		}
-+		if (linux64_hook) {
++		if (linux64_hook && linux64_real_aks && functionName->isEqualTo("AKSKernelServices")) {
++			_resources = waitForService(resourceMatching(functionName));   /* AppleVPKeyStore publishes it */
++		} else if (linux64_hook) {
 +			/*
 +			 * LINUX64 (xnulinux): a hosted XNU has no providers for some platform functions (AppleKeyStore's, which AMFI
 +			 * waits for): wait a while, then report the function unsupported instead of blocking its caller forever.
@@ -1356,7 +1455,7 @@ index 76555f6..280d150 100644
  	} else {
  		_resources = getResourceService();
  	}
-@@ -2341,6 +2479,8 @@ IOPlatformDevice::getResources( void )
+@@ -2341,6 +2508,8 @@ IOPlatformDevice::getResources( void )
  * the kernel with a suitable message.
  *********************************************************************/
  
@@ -1365,7 +1464,7 @@ index 76555f6..280d150 100644
  class IOPanicPlatform : IOPlatformExpert {
  	OSDeclareDefaultStructors(IOPanicPlatform);
  
-@@ -2361,6 +2501,19 @@ IOPanicPlatform::start(IOService * provider)
+@@ -2361,6 +2530,19 @@ IOPanicPlatform::start(IOService * provider)
  		platform_name = provider->getName();
  	}
  
