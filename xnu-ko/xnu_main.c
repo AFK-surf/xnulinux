@@ -194,8 +194,16 @@ unsigned long xnu_fault_deferred(unsigned long *frame)
 	 * modified state, so each reuse takes one fault). Only report it, rarely, when it looks endless.
 	 */
 	if (xnu_kfault(far, esr) == 0) {
-		if (repeats == 100000)
-			logkv("xnu: one address took 100000 kernel faults in a row (each resolved), far", far);
+		if (repeats && (repeats & (repeats - 1)) == 0 && repeats >= 1024) {
+			logkv("xnu: one address keeps taking resolved kernel faults, repeats", repeats);
+			logkv("xnu:   far", far);
+			logkv("xnu:   esr", esr);
+			logkv("xnu:   pc ", pc);
+			logkv("xnu:   lr ", frame[30]);
+		}
+		/* a fault loop runs with interrupts masked: let Linux take its interrupts now and then (RCU, network) */
+		if ((repeats & 63) == 63)
+			((void (*)(unsigned long, unsigned long, unsigned long))xnu_world_upcall)(811, 0, 0);
 		return pc;
 	}
 	/* inside copyin/copyout: the routine's recovery path returns EFAULT to its caller, as XNU's own abort handler does */
@@ -588,7 +596,9 @@ static int monitor_fn(void *arg)
 	(void)arg;
 	while (!fki_thread_should_stop()) {
 		fki_msleep(2000);
-		if (!xnu_dbg || lines >= 90)
+		/* every 2 s for the first 3 minutes, then every 20 s */
+		static unsigned long ticks;
+		if (!xnu_dbg || (lines >= 90 && (++ticks % 10) != 0))
 			continue;
 		char buf[420]; char *p = buf;
 		const char *h = "xnu: monitor";
@@ -603,6 +613,9 @@ static int monitor_fn(void *arg)
 		h = " el0exc=";
 		while (*h) *p++ = *h++;
 		p = put_dec(p, xnu_dbg[10]);
+		h = " kfaults=";
+		while (*h) *p++ = *h++;
+		p = put_dec(p, kfaults);
 		{
 			static const char *const k[] = { " esr=0x", " far=0x", " pc=0x", " bad_esr=0x", " step=0x" };
 			for (int j = 0; j < 5; j++) {

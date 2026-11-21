@@ -1638,7 +1638,7 @@ index d10d7a1..15e2fb4 100644
  		cpc_cpu_transition(CPC_CPU_EARLY_INIT, cdp);
  #endif /* CONFIG_CPU_COUNTERS */
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
-index a191eb3..78c2de4 100644
+index a191eb3..062cd5f 100644
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
 @@ -185,7 +185,8 @@
@@ -1701,7 +1701,7 @@ index a191eb3..78c2de4 100644
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	load_general_registers	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
-@@ -444,3 +450,194 @@ LEXT(machine_set_current_thread)
+@@ -444,3 +450,199 @@ LEXT(machine_set_current_thread)
  
  
  /* vim: set ts=4: */
@@ -1733,11 +1733,6 @@ index a191eb3..78c2de4 100644
 +	str		x18, [x9, #16]
 +	mrs		x10, SCTLR_EL1
 +	str		x10, [x9, #24]
-+	cbz		x1, 1f								// x1: JOP off for this thread (arm64, not arm64e): EnIA (31) and EnDA (27) off at EL0
-+	mov		x11, #((1 << 31) | (1 << 27))
-+	bic		x10, x10, x11
-+	msr		SCTLR_EL1, x10
-+1:
 +	adrp	x10, EXT(linux64_el0_vectors)@page
 +	add		x10, x10, EXT(linux64_el0_vectors)@pageoff
 +	msr		VBAR_EL1, x10
@@ -1775,6 +1770,16 @@ index a191eb3..78c2de4 100644
 +	ldr		x11, [x11, _linux64_tpidr@PAGEOFF]
 +	LOAD_KERN_STACK_TOP	dst=x12, src=x11, tmp=x13
 +	mov		sp, x12
++	/*
++	 * x1: JOP off for this thread (arm64, not arm64e): EnIA (31) and EnDA (27) off at EL0. Only now, after the last
++	 * kernel pointer authentication above (LOAD_KERN_STACK_TOP authenticates; with EnDA off it would trap to brk).
++	 */
++	cbz		x1, 1f
++	mrs		x10, SCTLR_EL1
++	mov		x11, #((1 << 31) | (1 << 27))
++	bic		x10, x10, x11
++	msr		SCTLR_EL1, x10
++1:
 +	isb
 +	add		x30, x0, SS64_X0
 +	ldp		x2, x3, [x30, #16]
