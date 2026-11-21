@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 #include <deque>
 #include <functional>
@@ -1574,18 +1575,16 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     }
 }
 - (void)_fireHandlersOnce {
-    NSArray<MTLCommandBufferHandler> *sched = nil;
-    NSArray<MTLCommandBufferHandler> *comp = nil;
     @synchronized(self) {
         if (_handlersFired) return;
         _handlersFired = YES;
-        sched = [_scheduledHandlers copy];
-        comp = [_completedHandlers copy];
+        NSArray<MTLCommandBufferHandler> *sched = [_scheduledHandlers copy];
+        NSArray<MTLCommandBufferHandler> *comp = [_completedHandlers copy];
         [_scheduledHandlers removeAllObjects];
         [_completedHandlers removeAllObjects];
+        for (MTLCommandBufferHandler h in sched) h((id<MTLCommandBuffer>)self);
+        for (MTLCommandBufferHandler h in comp) h((id<MTLCommandBuffer>)self);
     }
-    for (MTLCommandBufferHandler h in sched) h((id<MTLCommandBuffer>)self);
-    for (MTLCommandBufferHandler h in comp) h((id<MTLCommandBuffer>)self);
 }
 - (void)commit {
     if (xcmTraceOn()) fprintf(stderr, "XCM commit cb=%p sched=%lu comp=%lu dirty=%lu\n",
@@ -2607,12 +2606,54 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
     if (envIcd && envIcd[0]) icdJson = envIcd;
 
     char cacheDir[512] = {};
-    if (confstr(_CS_DARWIN_USER_CACHE_DIR, cacheDir, sizeof(cacheDir) - 32) > 0) {
-        strlcat(cacheDir, "xnu-cpu-metal-m2v", sizeof(cacheDir));
-        mkdir(cacheDir, 0700);
-    } else {
-        strlcpy(cacheDir, "/tmp/xnu-cpu-metal-m2v", sizeof(cacheDir));
-        mkdir(cacheDir, 0777);
+    auto tryCacheDir = [&](const char *path) -> bool {
+        if (!path || !path[0]) return false;
+        mkdir(path, 0700);
+        if (access(path, W_OK | X_OK) == 0) {
+            strlcpy(cacheDir, path, sizeof(cacheDir));
+            return true;
+        }
+        return false;
+    };
+    const char *envCache = getenv("XNU_CPU_METAL_CACHE_DIR");
+    if (!tryCacheDir(envCache)) {
+        char darwinCache[512] = {};
+        bool ok = false;
+        if (confstr(_CS_DARWIN_USER_CACHE_DIR, darwinCache, sizeof(darwinCache) - 32) > 0) {
+            strlcat(darwinCache, "xnu-cpu-metal-m2v", sizeof(darwinCache));
+            ok = tryCacheDir(darwinCache);
+        }
+        if (!ok) {
+            char fallback[128];
+            snprintf(fallback, sizeof(fallback), "/var/tmp/xnu-cpu-metal-%u", (unsigned)getuid());
+            ok = tryCacheDir(fallback);
+        }
+        if (!ok) {
+            char fallback[128];
+            snprintf(fallback, sizeof(fallback), "/tmp/xnu-cpu-metal-%u", (unsigned)getuid());
+            tryCacheDir(fallback);
+        }
+    }
+
+    // Configure Mesa lavapipe LLVM JIT disk cache (bounded, overridable by caller).
+    if (cacheDir[0]) {
+        char mesaCache[544];
+        snprintf(mesaCache, sizeof(mesaCache), "%s/mesa", cacheDir);
+        mkdir(mesaCache, 0700);
+        setenv("MESA_SHADER_CACHE_DIR", mesaCache, 0);
+    }
+    setenv("MESA_SHADER_CACHE_MAX_SIZE", "256M", 0);
+
+    // Multi-VM safe lavapipe thread default: 0 (inline, no worker threads) on 1-CPU hosts,
+    // capped at 2 on multi-core hosts; always overridable via LP_NUM_THREADS.
+    if (!getenv("LP_NUM_THREADS")) {
+        int ncpu = 1;
+        size_t sz = sizeof(ncpu);
+        if (sysctlbyname("hw.ncpu", &ncpu, &sz, nullptr, 0) != 0 || ncpu < 1) ncpu = 1;
+        int lpThreads = (ncpu <= 1) ? 0 : (ncpu > 2 ? 2 : ncpu);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", lpThreads);
+        setenv("LP_NUM_THREADS", buf, 0);
     }
 
     return xnu_cpu_metal_open_device(loader.c_str(), icdJson.c_str(), cacheDir, port);
