@@ -276,3 +276,55 @@ dist/XnuCpuMetal.bundle/
   - `bash scripts/test-bundle.sh arm64` / `arm64e`：`vecadd N=1024, status=4, completedHandler=1, bad=0`。
   - `bash scripts/test-render-ci.sh arm64` / `arm64e`：Render Pass PASS，CoreImage `CIGaussianBlur` PASS（`maxErr=1, meanErr=0.0161, nonZeroDiff=264/16384`）。
   - Plain `Stats.icon` `--scale 2`：`EXIT=0`，无 `stubbed` 日志；`32×32` `nonZero=3944/4096`，对比 `build/stats_native.png`：`maxErr=51, meanErr=3.7783`。
+
+---
+
+## Round 7: 性能、资源占用与多项目 macOS CI 用例基线/优化
+
+### 约束与测量方式
+- 宿主机 Apple M5 Max（macOS 27.0.1），使用 `taskpolicy -c utility` + `RAYON_NUM_THREADS=1` + `LP_NUM_THREADS=1`（优化前）/ `LP_NUM_THREADS=0`（优化后，单核内联执行、无额外 worker 线程）模拟单核托管 VM 与多 VM 并发 CI 环境。
+- 所有改动均基于 `xnulinux` commit `04d3386`（`gpu/xnu-cpu-metal/`），未修改任何 GPL/LGPL 上游源码。
+
+### 性能剖析排序（`icrtool` WARM，200Hz `SIGPROF` PC 采样，3,600 samples）
+1. **Mesa `llvmpipe` LLVM JIT 编译（~97%）**：`59.4%` LLVM (`SpillPlacement`, `ScheduleDAGSDNodes`, `RAGreedy`, `InterferenceCache`) + `13.5%` `memmove`/`memset` + `13.0%` `madvise` + `11.1%` `malloc`（根因：`build-lavapipe*.sh` 此前传了 `-Dshader-cache=disabled`，每次进程启动都从零重编译所有 LLVM JIT 着色器，并产生 500–700 MB 临时峰值 RSS）。
+2. `lavapipe` 其余 + `dyld`：`2.7%`
+3. `metal2vulkan` AIR→SPIR-V 翻译：`0.1%`（热运行已命中磁盘缓存；冷运行约占 ~14s）
+4. `llvmpipe` JIT 光栅化/计算执行：`< 0.1%`
+5. IOSurface 同步拷贝 / `XnuCpuMetal` 插件 / command buffer 等待：`< 0.1%`
+
+### 实施的优化（4 文件，+91/-20 行）
+1. **启用 Mesa `llvmpipe` 持久化 LLVM JIT 磁盘缓存**：`scripts/build-lavapipe.sh` 与 `scripts/build-lavapipe-arm64e.sh` 改为 `-Dshader-cache=enabled -Dshader-cache-max-size=256M`（arm64 与 arm64e 均生效，ORC JIT `LPObjectCacheORC` 直接复用 `gallivm_jit_function` PAC 签名）。
+2. **Root/CI 安全的缓存目录与多 VM 并发默认上限**（`XnuCpuMetalPlugin.mm`、`lib.rs`）：
+   - 缓存目录按 `XNU_CPU_METAL_CACHE_DIR` → `_CS_DARWIN_USER_CACHE_DIR` → `/var/tmp/xnu-cpu-metal-<uid>` → `/tmp/xnu-cpu-metal-<uid>` 回退并校验可写（适配 root 托管环境）。
+   - 默认设置 `MESA_SHADER_CACHE_DIR=<cacheDir>/mesa`、`MESA_SHADER_CACHE_MAX_SIZE=256M`（均可由环境变量覆盖）。
+   - `metal2vulkan` 缓存上限从默认 `25 GiB` 磁盘 / `256 MiB` 内存收紧为 `512 MiB` 磁盘 / `32 MiB` 内存（可通过 `XNU_CPU_METAL_CACHE_MAX_MB`、`XNU_CPU_METAL_MEM_CACHE_MB` 覆盖）。
+   - `LP_NUM_THREADS` 默认值：`hw.ncpu <= 1` 时为 `0`（内联执行、零额外 worker 线程），多核时上限为 `2`（多 VM 友好，可由 `LP_NUM_THREADS` 覆盖）。
+3. **修复 `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` 环境变量污染**（`lib.rs`）：`xm2v_device_open` 打开设备后恢复原环境变量，避免同进程内 Chromium SwANGLE 被劫持到无 `VK_EXT_metal_surface` 的 lavapipe ICD。
+4. **修复 `XcmCommandBuffer _fireHandlersOnce` 竞态**（`XnuCpuMetalPlugin.mm`）：在 `@synchronized(self)` 内执行 `completedHandler`，防止缓存加速后 `waitUntilCompleted` 早于后台回调返回。
+
+### 优化前后对比（单核约束，含多项目 CI 简化用例）
+| 用例 | 来源 CI | 兼容性（vs 原生 GPU） | 优化前 Wall / User / Peak RSS | 优化后 Wall / User / Peak RSS | 提升 |
+|---|---|---|---|---|---|
+| `ictool Stats.icon --scale 2` (COLD) | Stats / Cue / AFFiNE | PASS (`maxErr=51, meanErr=3.7783`) | 61.72s / 24.30s / 893 MB | 33.75s / 24.86s / 1158 MB | Wall **1.83x** |
+| `ictool Stats.icon --scale 2` (WARM1 → WARM2 → 稳态) | Stats / Cue / AFFiNE | PASS (`maxErr=51, meanErr=3.7783`) | 47.69s / 25.79s / 918 MB | 11.19s → 5.04s → **1.21s** / **1.09s** / 781–980 MB | Wall **4.3x → 39.4x**，CPU **23.7x** |
+| `ictool MenuBarIcon.icon --scale 1` (WARM) | Stats | PASS (`maxErr=42, meanErr=7.8740`) | — | **1.22s** / 1.15s / 983 MB | 零 `stubbed` |
+| `ictool MenuBarIcon.icon --scale 2` (WARM) | Stats | PASS (`maxErr=38, meanErr=4.3428`) | — | **2.35s** / 2.15s / **534 MB** | 零 `stubbed` |
+| `CIGaussianBlur` 64×64 (WARM) | CoreImage | PASS (`maxErr=1, meanErr=0.0161`) | 0.45s (render 250.3ms) / 0.36s / 276 MB | **0.32s (render 108.6ms)** / 0.22s / **257 MB** | render **2.30x**，RSS -19 MB |
+| `vecadd` 1M floats (WARM) | Compute | PASS (`bad=0`) | 0.16s (exec 9.5ms) / 0.14s / 179 MB | 0.22s / 0.15s / **160 MB** | RSS **-19 MB** |
+| `mbui_offscreen` 800×600×5f (WARM) | `AFK-surf/monoid` (`mbui`) | PASS (`maxErr=2, meanErr=0.0784`) | 0.31s (render 65.7ms) / 0.25s / 195 MB | **0.23s (render 28.4ms)** / 0.17s / **186 MB** | render **2.31x**，RSS -9 MB |
+| `gpui_offscreen` 800×600×5f (WARM) | `longbridge/gpui-component` | PASS (`maxErr=1, meanErr=0.0001`) | 0.25s (render 57.3ms) / 0.21s / 196 MB | **0.20s (render 24.0ms)** / 0.16s / **180 MB** | render **2.39x**，RSS -16 MB |
+| `actool` minimal `.xcassets` | Cue / AFFiNE / monoid | PASS (21,720 B 完全一致) | 0.31s / 0.00s / 2.5 MB | 0.31s / 0.00s / 2.5 MB | 无回归 |
+| Playwright Chromium headless Metal (`400×300`) | Cue / AFFiNE | PASS (`maxErr=2, meanErr=0.2256`) | SwANGLE 因 `VK_ICD_FILENAMES` 污染报错 | **零 SwANGLE/Vulkan 报错**，12.07s / 2.00s / 298 MB | 兼容性修复 |
+| 空闲占用 (`idle_probe`, 3s idle) | 多 VM 并发 | 0.0% 空闲 CPU | RSS 160.5 MB / phys 98.9 MB / 14 线程 / 0.000s CPU | RSS **157.5 MB** / phys 101.7 MB / **13 线程** / **0.000s CPU** | 零空闲线程耗电 |
+
+### 明确不做项及原因
+- **不默认开启 `GALLIVM_PERF=no_opt`**：实测虽可降冷编译 ~40%，但使热渲染慢 **2.9x–3.1x**（`CIGaussianBlur` 108.6→316.0ms、`mbui` 28.4→87.6ms、`gpui` 24.0→73.5ms）；配合磁盘缓存一次编译 `-O2` 复用显著更优。
+- **不做零拷贝 IOSurface Vulkan 导入**：剖析显示 IOSurface 同步耗时 `< 0.1%`，800×600×5 帧 `gpui` 含 IOSurface 仅 24ms（4.8ms/帧）；lavapipe 导入 IOSurface 需要线性布局与 `VK_EXT_external_memory_host`，与 `metal2vulkan-runtime` 的 tiled/shadowed 纹理模型冲突且收益微弱。
+- **不改 `metal2vulkan-runtime` 64 MiB 内存 slab（`BLOCK_BYTES`）**：`metal2vulkan` 属 GPL/LGPL 上游（构建时拉取、不入库）；我们在自研桥接层收紧了 `ShaderCacheOptions` 内存/磁盘上限。
+- **不做 commit 去阻塞 / 无管线 draw 跳过**：插件此前已异步 `commit` 且已跳过 `!_hasPipeline` 的 draw。
+
+### 托管 macOS 内实测（xnulinux 托管 XNU，1 CPU，`tools/hosted/tests/gpu7.sh`）
+- `ictool Stats.icon --scale 2`，同一图标、输出 md5 全部一致（`da2d8998…`）：
+  - 旧 bundle（Round 6）：21.81s / 20.23s，峰值 RSS 1.11–1.15 GB
+  - 新 bundle（Round 7）：首次 19.53s（填缓存）→ 8.48s → **4.97s**，峰值 RSS 1.09–1.14 GB
+- 托管系统里峰值内存基本不变（宿主机上报的 RSS 下降没有复现）；耗时随 Mesa 磁盘缓存命中逐次下降。

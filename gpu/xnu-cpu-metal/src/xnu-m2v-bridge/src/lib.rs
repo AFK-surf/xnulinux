@@ -297,10 +297,13 @@ pub extern "C" fn xm2v_device_open(
     cache_dir: *const c_char,
 ) -> *mut Device {
     guard(std::ptr::null_mut(), || {
-        if let Some(icd) = cstr_opt(icd_json_path) {
+        let prev_icd = std::env::var_os("VK_ICD_FILENAMES");
+        let prev_drv = std::env::var_os("VK_DRIVER_FILES");
+        let icd_opt = cstr_opt(icd_json_path);
+        if let Some(ref icd) = icd_opt {
             unsafe {
-                std::env::set_var("VK_ICD_FILENAMES", &icd);
-                std::env::set_var("VK_DRIVER_FILES", &icd);
+                std::env::set_var("VK_ICD_FILENAMES", icd);
+                std::env::set_var("VK_DRIVER_FILES", icd);
             }
         }
         let mut opts = DeviceOptions::default();
@@ -308,10 +311,35 @@ pub extern "C" fn xm2v_device_open(
             opts.loader = Some(PathBuf::from(loader));
         }
         if let Some(cache) = cstr_opt(cache_dir) {
-            opts.shader_cache = ShaderCacheOptions::in_directory(cache);
+            let mut sc = ShaderCacheOptions::in_directory(cache);
+            let disk_mb: u64 = std::env::var("XNU_CPU_METAL_CACHE_MAX_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v >= 16)
+                .unwrap_or(512);
+            let mem_mb: u64 = std::env::var("XNU_CPU_METAL_MEM_CACHE_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v >= 4)
+                .unwrap_or(32);
+            sc.capacity = disk_mb << 20;
+            sc.memory_capacity = mem_mb << 20;
+            opts.shader_cache = sc;
         }
-        let dev = Device::system_default_with(&opts).map_err(|e| format!("device open: {e:?}"))?;
-        Ok(boxed(dev))
+        let res = Device::system_default_with(&opts).map_err(|e| format!("device open: {e:?}"));
+        if icd_opt.is_some() {
+            unsafe {
+                match prev_icd {
+                    Some(v) => std::env::set_var("VK_ICD_FILENAMES", v),
+                    None => std::env::remove_var("VK_ICD_FILENAMES"),
+                }
+                match prev_drv {
+                    Some(v) => std::env::set_var("VK_DRIVER_FILES", v),
+                    None => std::env::remove_var("VK_DRIVER_FILES"),
+                }
+            }
+        }
+        Ok(boxed(res?))
     })
 }
 
