@@ -95,7 +95,7 @@ PL
 	<key>ProgramArguments</key>
 	<array><string>/bin/bash</string><string>-i</string></array>
 	<key>EnvironmentVariables</key>
-	<dict><key>PATH</key><string>/bin:/usr/bin:/sbin:/usr/sbin</string><key>PS1</key><string>xnulinux# </string><key>TERM</key><string>dumb</string></dict>
+	<dict><key>PATH</key><string>/bin:/usr/bin:/sbin:/usr/sbin</string><key>PS1</key><string>xnulinux# </string><key>TERM</key><string>dumb</string><key>HOME</key><string>/var/root</string><key>SHELL</key><string>/bin/bash</string><key>USER</key><string>root</string><key>LOGNAME</key><string>root</string></dict>
 	<key>RunAtLoad</key><true/>
 	<key>StandardInPath</key><string>/dev/console</string>
 	<key>StandardOutPath</key><string>/dev/console</string>

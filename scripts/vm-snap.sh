@@ -5,7 +5,7 @@ set -e
 IMG=${IMG:-/var/tmp/full.img}; COW=${COW:-/var/tmp/full.cow}
 sudo dmsetup remove xnusys 2>/dev/null || true
 for l in $(losetup -j "$IMG" -O NAME -n) $(losetup -j "$COW" -O NAME -n 2>/dev/null); do sudo losetup -d "$l"; done
-rm -f "$COW"; truncate -s 24G "$COW"
+rm -f "$COW"; truncate -s ${COW_SIZE:-40G} "$COW"
 B=$(sudo losetup -f -r --show "$IMG"); C=$(sudo losetup -f --show "$COW")
 sudo dmsetup create xnusys --table "0 $(sudo blockdev --getsz "$B") snapshot $B $C N 16"
 sudo chmod 666 /dev/mapper/xnusys 2>/dev/null || true
