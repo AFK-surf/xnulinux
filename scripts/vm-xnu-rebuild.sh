@@ -31,7 +31,8 @@ if [ -e out/kc/kc27.bin ]; then
   # IOHIDFamily's kernel headers (IOKit/hid/*.h) for XnuInput: the SDK's Kernel.framework has them
   for h in toolchains/sdks/*.sdk/System/Library/Frameworks/Kernel.framework/Headers/IOKit/hid; do
     [ -e $h/IOHIDDevice.h ] && { ln -sfn $PWD/$h $NETINC/IOKit/hid; ln -sfn $PWD/$h/../hidsystem $NETINC/IOKit/hidsystem; ln -sfn $PWD/$h/../graphics $NETINC/IOKit/graphics
-      ln -sfn $PWD/${h%%/System/*}/usr/include/TargetConditionals.h $NETINC/TargetConditionals.h; break; }
+      ln -sfn $PWD/${h%%/System/*}/usr/include/TargetConditionals.h $NETINC/TargetConditionals.h
+      ln -sfn $PWD/$h/../../HIDDriverKit $NETINC/HIDDriverKit; break; }	# IOHIDDevice.h includes HIDDriverKit/IOHIDDevice.h
   done
   for j in ~/w/poc/kexts/*/*.json; do
     [ -e "$j" ] || continue
