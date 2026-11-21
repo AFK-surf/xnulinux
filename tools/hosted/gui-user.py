@@ -85,13 +85,13 @@ seen.update({k: build for k in ['LastSeenBuddyBuildVersion', 'LastPreLoginTasksP
 seen.update({'MiniBuddyLaunchReason': 0, 'MiniBuddyShouldLaunchToResumeSetup': False, 'LastPrivacyBundleVersion': '2',
              'selectedFDEEscrowType': 'DeclinedFDE', 'InitialAccountOnMac': False})
 dump(home + '/Library/Preferences/com.apple.SetupAssistant.plist', seen, 0o644)
-# The template's loginwindow preferences ask for MiniBuddy at the user's first login (MiniBuddyLaunch), as for an account
-# made by Setup Assistant; this user has been set up already.
+# No MiniBuddy (the first-login Setup Assistant) for this user, set up already: an account made outside Setup Assistant
+# gets MiniBuddyLaunch at its first login unless its loginwindow preferences say otherwise, and with it loginwindow stores
+# a MiniBuddy keychain item through LocalAuthentication, which does not return here (the session never gets to the Dock).
 lwp = home + '/Library/Preferences/com.apple.loginwindow.plist'
-if os.path.exists(lwp):
-    ulw = plistlib.load(open(lwp, 'rb'))
-    ulw.pop('MiniBuddyLaunch', None)
-    dump(lwp, ulw, 0o644)
+ulw = plistlib.load(open(lwp, 'rb')) if os.path.exists(lwp) else {}
+ulw['MiniBuddyLaunch'] = False
+dump(lwp, ulw, 0o600)
 # WebKit draws pages in its GPU process (as on a Mac with Apple silicon) rather than in the web content process: it
 # would not for the CPU Metal device, and the web content sandbox does not let that process make IOSurfaces.
 gp = home + '/Library/Preferences/.GlobalPreferences.plist'
