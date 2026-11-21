@@ -7,6 +7,7 @@
   "stop": "_native_kext_stop",
   "libraries": {
     "com.apple.iokit.AppleVirtIOStorage": "1.0.0",
+    "com.apple.driver.AppleVirtualPlatform": "1.0.0",
     "com.apple.kpi.bsd": "18.0.0",
     "com.apple.kpi.iokit": "18.0.0",
     "com.apple.kpi.libkern": "18.0.0",

@@ -15,6 +15,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOService.h>
+#include <kern/thread.h>
 #include <libkern/OSByteOrder.h>
 #include <ptrauth.h>
 
@@ -29,6 +30,8 @@ extern "C" void appleEanGetSize(void) __asm("__ZN12AppleNVMeEAN10eanGetSizeEj");
 extern "C" void appleEanRead(void) __asm("__ZN12AppleNVMeEAN7eanReadEjPvj");
 extern "C" void appleEanWrite(void) __asm("__ZN12AppleNVMeEAN8eanWriteEjPvj");
 extern "C" void appleEanSwap(void) __asm("__ZN12AppleNVMeEAN7eanSwapEjj");
+// AppleVirtualPlatform's sealed registers (non-virtual; AppleVPKeyStore calls it on the instance it waits for at late init)
+extern "C" void appleSealedRegisterUpdate(void) __asm("__ZN35AppleVirtualPlatformSealedRegisters20sealedRegisterUpdateEPKhyS1_m");
 
 namespace {
 constexpr uint32_t kMagic = 'XEAN', kMaxEntries = 16, kMaxBlob = 64 * 1024, kStoreMax = 1024 * 1024;
@@ -162,10 +165,19 @@ extern "C" IOReturn xnu_ean_swap(void *, uint32_t a, uint32_t b)
     return kIOReturnSuccess;
 }
 
+// AppleVirtualPlatformSealedRegisters::sealedRegisterUpdate(const uint8_t *uuid, uint64_t, const uint8_t *bytes, size_t):
+// on a VirtualMac it passes the value to the host (Virtualization.framework) to fold into a register the VM cannot read
+// back; the hosted system has no such host side and nothing reads the registers, so an update is accepted as made.
+extern "C" uint32_t xnu_sealed_register_update(void *, const uint8_t *, uint64_t, const uint8_t *, size_t length)
+{
+    return length <= 512;
+}
+
 class XnuEAN : public IOService {
     OSDeclareDefaultStructors(XnuEAN)
-    IOService *fEan = nullptr;
+    IOService *fEan = nullptr, *fSealed = nullptr;
     static bool redirect(void (*from)(void), const void *to, const char *what);
+    static void publishSealedRegisters(void *self, wait_result_t);
 
 public:
     bool start(IOService *provider) override;
@@ -215,9 +227,41 @@ bool XnuEAN::start(IOService *provider)
         return false;
     }
     fEan->registerService();
+    // the virtual platform's sealed registers, which AppleVPKeyStore's late init waits for forever (holding the keystore's
+    // gate, so every AppleKeyStore open blocks behind it). Published only once AppleKeyStore itself is: present while the
+    // keystore starts, the instance (never started) sends its start down another path that never publishes the service.
+    if (redirect(appleSealedRegisterUpdate, (const void *)&xnu_sealed_register_update, "sealedRegisterUpdate")) {
+        thread_t thread;
+        retain();
+        if (kernel_thread_start(&XnuEAN::publishSealedRegisters, this, &thread) == KERN_SUCCESS)
+            thread_deallocate(thread);
+        else
+            release();
+    }
     registerService();
     IOLog("XnuEAN: AppleNVMeEAN registered; its EAN calls go to the hosted store\n");
     return true;
+}
+
+void XnuEAN::publishSealedRegisters(void *arg, wait_result_t)
+{
+    XnuEAN *self = (XnuEAN *)arg;
+    OSDictionary *match = IOService::serviceMatching("AppleKeyStore");
+    IOService *aks = match ? IOService::waitForMatchingService(match) : nullptr;
+    OSSafeReleaseNULL(match);
+    OSSafeReleaseNULL(aks);
+    OSObject *sealed = OSMetaClass::allocClassWithName("AppleVirtualPlatformSealedRegisters");
+    self->fSealed = OSDynamicCast(IOService, sealed);
+    if (self->fSealed && self->fSealed->init(nullptr) && self->fSealed->attach(self)) {
+        self->fSealed->registerService();
+        IOLog("XnuEAN: AppleVirtualPlatformSealedRegisters registered (after AppleKeyStore)\n");
+    } else {
+        IOLog("XnuEAN: cannot make an AppleVirtualPlatformSealedRegisters (%p)\n", sealed);
+        OSSafeReleaseNULL(sealed);
+        self->fSealed = nullptr;
+    }
+    self->release();
+    thread_terminate(current_thread());
 }
 
 // Module start/stop for the collection's kext entry; the driver starts through IOKit matching.

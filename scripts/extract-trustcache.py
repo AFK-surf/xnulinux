@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Write the raw static trust cache module of this Mac's OS (the payload of StaticTrustCache.img4) to OUT.
 
-    extract-trustcache.py OUT
+    extract-trustcache.py OUT [PREBOOT]
 
-Run on the Mac whose OS the hosted system disk was made from. The output is Apple data: it stays local (the VM's
+Run on the Mac whose OS the hosted system disk was made from, or give the mounted Preboot volume of that disk (an
+installed macOS VM disk, scripts/mk-macvm-disk.sh). The output is Apple data: it stays local (the VM's
 /lib/firmware/xnu/trustcache.bin, passed to xnu.ko as trustcache=), never in the repository.
 """
 import glob, struct, sys
 
-paths = glob.glob('/System/Volumes/Preboot/*/boot/*/usr/standalone/firmware/FUD/StaticTrustCache.img4')
+preboot = sys.argv[2] if len(sys.argv) > 2 else '/System/Volumes/Preboot'
+paths = glob.glob(preboot + '/*/boot/*/usr/standalone/firmware/FUD/StaticTrustCache.img4')
 if len(paths) != 1:
     sys.exit(f'expected one StaticTrustCache.img4, found {paths}')
 d = open(paths[0], 'rb').read()
