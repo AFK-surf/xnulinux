@@ -6,7 +6,7 @@ IMG=${IMG:-/var/tmp/full.img}
 PARK="com.apple.audiomxd com.apple.audio.coreaudiod com.apple.audio.AudioComponentRegistrar.daemon com.apple.audio.micactivityd
  com.apple.audio.systemsoundserverd com.apple.audioanalyticsd com.apple.historicalaudiod com.apple.usbaudiod
  com.apple.PerfPowerServices com.apple.PerfPowerServicesExtended com.apple.perfpowermetricd
- com.apple.bluetoothd com.apple.mobileactivationd com.apple.xprotectd com.apple.XProtect.daemon.scan com.apple.MRTd
+ com.apple.bluetoothd com.apple.mobileactivationd com.apple.xprotectd com.apple.security.xprotectd com.apple.XProtect.daemon.scan com.apple.MRTd
  com.apple.systemstats.daily com.apple.systemstats.analysis com.apple.systemstats.microstackshot_periodic
  com.apple.endpointsecurity.endpointsecurityd com.apple.MobileSoftwareUpdate.CleanupPreparePathService ${PARK_MORE:-}"
 sudo mount -o loop,rw,force -t hfsplus "$IMG" /mnt/sys || exit 1
