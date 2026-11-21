@@ -10,6 +10,8 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <os/log.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
@@ -210,6 +212,8 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
     MTLResourceOptions _options;
     uint64_t _length;
     MTLPurgeableState _purgeable;
+    void (^_fallbackDeallocator)(void *, NSUInteger);
+    void *_fallbackPtr;
 }
 - (instancetype)initWithHandle:(Xm2vBuffer *)h device:(id)dev options:(MTLResourceOptions)opts;
 @end
@@ -227,6 +231,11 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
 }
 - (void)dealloc {
     if (_handle) { xm2v_buffer_release(_handle); _handle = nullptr; }
+    if (_fallbackDeallocator) {
+        void (^d)(void *, NSUInteger) = _fallbackDeallocator;
+        _fallbackDeallocator = nil;
+        d(_fallbackPtr, (NSUInteger)_length);
+    }
 }
 - (id<MTLDevice>)device { return _device; }
 - (void *)contents { return _handle ? xm2v_buffer_contents(_handle) : nullptr; }
@@ -244,10 +253,6 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
     MTLPurgeableState prev = _purgeable;
     if (state != MTLPurgeableStateKeepCurrent) _purgeable = state;
     return prev;
-}
-- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow {
-    (void)offset; (void)bytesPerRow;
-    return [_device newTextureWithDescriptor:desc];
 }
 @end
 
@@ -267,6 +272,9 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
     NSUInteger _iosurfacePlane;
     uint32_t _iosurfaceSeed;
     BOOL _iosurfaceSyncedIn;
+    XcmBuffer *_buffer;
+    NSUInteger _bufferOffset;
+    NSUInteger _bufferBytesPerRow;
 }
 - (instancetype)initWithHandle:(Xm2vTexture *)h device:(id)dev descriptor:(MTLTextureDescriptor *)desc;
 - (void)syncFromIOSurfaceIfNeeded;
@@ -304,6 +312,13 @@ static void xcmRecordIOSurfaceWriter(IOSurfaceRef surf, id cmdBuf) {
     uint32_t sid = IOSurfaceGetID(surf);
     if (!sid) return;
     std::lock_guard<std::mutex> lk(gIOSurfaceWriterLock);
+    if (gIOSurfaceLastWriter.size() > 256) {
+        for (auto it = gIOSurfaceLastWriter.begin(); it != gIOSurfaceLastWriter.end(); ) {
+            id w = it->second;
+            if (!w) it = gIOSurfaceLastWriter.erase(it);
+            else ++it;
+        }
+    }
     gIOSurfaceLastWriter[sid] = cmdBuf;
 }
 
@@ -323,48 +338,117 @@ static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
     }
 }
 
+static NSUInteger xcmPixelFormatBpp(MTLPixelFormat fmt) {
+    switch (fmt) {
+        case MTLPixelFormatA8Unorm: case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Snorm:
+        case MTLPixelFormatR8Uint: case MTLPixelFormatR8Sint: case MTLPixelFormatStencil8:
+            return 1;
+        case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: case MTLPixelFormatR16Uint:
+        case MTLPixelFormatR16Sint: case MTLPixelFormatR16Float: case MTLPixelFormatRG8Unorm:
+        case MTLPixelFormatRG8Snorm: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG8Sint:
+        case MTLPixelFormatDepth16Unorm:
+            return 2;
+        case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRGBA16Snorm: case MTLPixelFormatRGBA16Uint:
+        case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA16Float:
+        case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint: case MTLPixelFormatRG32Float:
+        case MTLPixelFormatDepth32Float_Stencil8:
+        case MTLPixelFormatBGRA10_XR: case MTLPixelFormatBGRA10_XR_sRGB:
+            return 8;
+        case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: case MTLPixelFormatRGBA32Float:
+            return 16;
+        default:
+            return 4;
+    }
+}
+
+// Resolve linear base pointer and bytes-per-row for an IOSurface plane (while locked),
+// treating '&'-prefixed lossless-compressed formats (&BGA, &b3a, &RhA, &R10, etc.) as linear
+// uncompressed rows and computing 64-byte aligned planes for 2-plane b3a8/&b3a when bpr==0.
+static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInteger width, NSUInteger height,
+                                    MTLPixelFormat fmt, void **outBase, size_t *outBpr) {
+    if (!surf || !width || !height) return false;
+    void *rootBase = IOSurfaceGetBaseAddress(surf);
+    size_t allocSz = IOSurfaceGetAllocSize(surf);
+    size_t planeCount = IOSurfaceGetPlaneCount(surf);
+    bool usePlane = (planeCount > 0 && plane < planeCount);
+    void *base = usePlane ? IOSurfaceGetBaseAddressOfPlane(surf, plane) : rootBase;
+    size_t bpr = usePlane ? IOSurfaceGetBytesPerRowOfPlane(surf, plane) : IOSurfaceGetBytesPerRow(surf);
+
+    if (bpr == 0) {
+        uint32_t pf = IOSurfaceGetPixelFormat(surf);
+        // 2-plane RGB10A8_2P_XR10 ('b3a8' or compressed '&b3a') reporting 0 plane row bytes.
+        if ((pf == 0x62336138u || pf == 0x26623361u) && plane < 2 && rootBase) {
+            size_t sw = IOSurfaceGetWidth(surf), sh = IOSurfaceGetHeight(surf);
+            size_t row0 = (sw * 4 + 63) & ~(size_t)63;
+            size_t row1 = (sw + 63) & ~(size_t)63;
+            if (sw && sh && row0 * sh + row1 * sh <= allocSz) {
+                base = (uint8_t *)rootBase + (plane == 0 ? 0 : row0 * sh);
+                bpr = (plane == 0) ? row0 : row1;
+            }
+        }
+        if (bpr == 0) {
+            if (!base) base = rootBase;
+            bpr = IOSurfaceGetBytesPerRow(surf);
+        }
+        if (bpr == 0) {
+            bpr = ((size_t)width * xcmPixelFormatBpp(fmt) + 63) & ~(size_t)63;
+        }
+    }
+    if (!base || bpr == 0) return false;
+    if (rootBase && allocSz > 0) {
+        uintptr_t r = (uintptr_t)rootBase, b = (uintptr_t)base;
+        if (b < r || (b - r) + bpr * (size_t)height > allocSz) {
+            // Clamp to unaligned width*bpp if padded bpr slightly exceeds allocSz on last row.
+            size_t minBpr = (size_t)width * xcmPixelFormatBpp(fmt);
+            if (b < r || (b - r) + minBpr * (size_t)height > allocSz) return false;
+        }
+    }
+    *outBase = base;
+    *outBpr = bpr;
+    return true;
+}
+
 - (void)syncFromIOSurfaceIfNeeded {
     if (!_iosurface || !_handle) return;
     xcmFlushIOSurfaceWriter(_iosurface);
-    uint32_t seed = IOSurfaceGetSeed(_iosurface);
-    if (_iosurfaceSyncedIn && seed == _iosurfaceSeed) return;
-    if (IOSurfaceLock(_iosurface, kIOSurfaceLockReadOnly, nullptr) == kIOReturnSuccess) {
-        size_t planeCount = IOSurfaceGetPlaneCount(_iosurface);
-        void *base = (planeCount > 0) ? IOSurfaceGetBaseAddressOfPlane(_iosurface, _iosurfacePlane)
-                                      : IOSurfaceGetBaseAddress(_iosurface);
-        size_t bpr = (planeCount > 0) ? IOSurfaceGetBytesPerRowOfPlane(_iosurface, _iosurfacePlane)
-                                      : IOSurfaceGetBytesPerRow(_iosurface);
-        if (base && bpr > 0) {
-            xm2v_texture_replace_region(_handle, 0, 0, 0, _width, _height, 1, 0, 0, base, bpr, 0);
+    @synchronized(self) {
+        if (!_iosurface || !_handle) return;
+        uint32_t seed = IOSurfaceGetSeed(_iosurface);
+        if (_iosurfaceSyncedIn && seed == _iosurfaceSeed) return;
+        if (IOSurfaceLock(_iosurface, kIOSurfaceLockReadOnly, nullptr) == kIOReturnSuccess) {
+            void *base = nullptr;
+            size_t bpr = 0;
+            if (xcmIOSurfacePlaneLayout(_iosurface, _iosurfacePlane, _width, _height, _pixelFormat, &base, &bpr)) {
+                xm2v_texture_replace_region(_handle, 0, 0, 0, _width, _height, 1, 0, 0, base, bpr, 0);
+            }
+            IOSurfaceUnlock(_iosurface, kIOSurfaceLockReadOnly, nullptr);
+            _iosurfaceSeed = seed;
+            _iosurfaceSyncedIn = YES;
         }
-        IOSurfaceUnlock(_iosurface, kIOSurfaceLockReadOnly, nullptr);
-        _iosurfaceSeed = seed;
-        _iosurfaceSyncedIn = YES;
     }
 }
 - (void)syncToIOSurface {
-    if (!_iosurface || !_handle) return;
-    if (IOSurfaceLock(_iosurface, 0, nullptr) == kIOReturnSuccess) {
-        size_t planeCount = IOSurfaceGetPlaneCount(_iosurface);
-        void *base = (planeCount > 0) ? IOSurfaceGetBaseAddressOfPlane(_iosurface, _iosurfacePlane)
-                                      : IOSurfaceGetBaseAddress(_iosurface);
-        size_t bpr = (planeCount > 0) ? IOSurfaceGetBytesPerRowOfPlane(_iosurface, _iosurfacePlane)
-                                      : IOSurfaceGetBytesPerRow(_iosurface);
-        if (base && bpr > 0) {
-            bool ok = xm2v_texture_get_bytes(_handle, base, bpr, 0, 0, 0, 0, _width, _height, 1, 0, 0);
-            if (xcmTraceOn() || !ok) {
-                const uint8_t *p = (const uint8_t *)base;
-                size_t nz = 0;
-                for (size_t i = 0; i < bpr * _height; i++) if (p[i]) nz++;
-                fprintf(stderr, "XCM syncToIOSurface(%p surf=%p fmt=%lu %lux%lu bpr=%zu) ok=%d nz=%zu/%zu err=%s\n",
-                        (__bridge void *)self, _iosurface, (unsigned long)_pixelFormat,
-                        (unsigned long)_width, (unsigned long)_height, bpr, ok, nz, bpr * _height,
-                        ok ? "ok" : xm2v_last_error());
+    @synchronized(self) {
+        if (!_iosurface || !_handle) return;
+        if (IOSurfaceLock(_iosurface, 0, nullptr) == kIOReturnSuccess) {
+            void *base = nullptr;
+            size_t bpr = 0;
+            if (xcmIOSurfacePlaneLayout(_iosurface, _iosurfacePlane, _width, _height, _pixelFormat, &base, &bpr)) {
+                bool ok = xm2v_texture_get_bytes(_handle, base, bpr, 0, 0, 0, 0, _width, _height, 1, 0, 0);
+                if (xcmTraceOn() || !ok) {
+                    const uint8_t *p = (const uint8_t *)base;
+                    size_t nz = 0;
+                    for (size_t i = 0; i < bpr * _height; i++) if (p[i]) nz++;
+                    fprintf(stderr, "XCM syncToIOSurface(%p surf=%p fmt=%lu %lux%lu bpr=%zu) ok=%d nz=%zu/%zu err=%s\n",
+                            (__bridge void *)self, _iosurface, (unsigned long)_pixelFormat,
+                            (unsigned long)_width, (unsigned long)_height, bpr, ok, nz, bpr * _height,
+                            ok ? "ok" : xm2v_last_error());
+                }
             }
+            IOSurfaceUnlock(_iosurface, 0, nullptr);
+            _iosurfaceSeed = IOSurfaceGetSeed(_iosurface);
+            _iosurfaceSyncedIn = YES;
         }
-        IOSurfaceUnlock(_iosurface, 0, nullptr);
-        _iosurfaceSeed = IOSurfaceGetSeed(_iosurface);
-        _iosurfaceSyncedIn = YES;
     }
 }
 - (id<MTLDevice>)device { return _device; }
@@ -386,30 +470,14 @@ static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
 - (BOOL)isDrawable { return NO; }
 - (NSUInteger)protectionOptions { return 0; }
 - (NSUInteger)allocatedSize {
-    NSUInteger bpp = 4;
-    switch (_pixelFormat) {
-        case MTLPixelFormatA8Unorm: case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Snorm:
-        case MTLPixelFormatR8Uint: case MTLPixelFormatR8Sint: case MTLPixelFormatStencil8:
-            bpp = 1; break;
-        case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: case MTLPixelFormatR16Uint:
-        case MTLPixelFormatR16Sint: case MTLPixelFormatR16Float: case MTLPixelFormatRG8Unorm:
-        case MTLPixelFormatRG8Snorm: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG8Sint:
-        case MTLPixelFormatDepth16Unorm:
-            bpp = 2; break;
-        case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRGBA16Snorm: case MTLPixelFormatRGBA16Uint:
-        case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA16Float:
-        case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint: case MTLPixelFormatRG32Float:
-        case MTLPixelFormatDepth32Float_Stencil8:
-            bpp = 8; break;
-        case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: case MTLPixelFormatRGBA32Float:
-            bpp = 16; break;
-        default: bpp = 4; break;
-    }
+    NSUInteger bpp = xcmPixelFormatBpp(_pixelFormat);
     NSUInteger sz = MAX(1ul, _width) * MAX(1ul, _height) * MAX(1ul, _depth) * MAX(1ul, _arrayLength) * MAX(1ul, _sampleCount) * bpp;
     return (sz + 255ul) & ~255ul;
 }
 - (id<MTLTexture>)parentTexture { return nil; }
-- (id<MTLBuffer>)buffer { return nil; }
+- (id<MTLBuffer>)buffer { return (id<MTLBuffer>)_buffer; }
+- (NSUInteger)bufferOffset { return _bufferOffset; }
+- (NSUInteger)bufferBytesPerRow { return _bufferBytesPerRow; }
 - (IOSurfaceRef)iosurface { return _iosurface; }
 - (NSUInteger)iosurfacePlane { return _iosurfacePlane; }
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state {
@@ -424,6 +492,7 @@ static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
             region.origin.x, region.origin.y, region.origin.z,
             region.size.width, region.size.height, region.size.depth,
             level, slice, pixelBytes, bytesPerRow, bytesPerImage);
+        if (_iosurface && level == 0 && slice == 0) [self syncToIOSurface];
     }
 }
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level
@@ -433,6 +502,7 @@ static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
 - (void)getBytes:(void *)pixelBytes bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage
       fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice {
     if (_handle) {
+        if (_iosurface && level == 0 && slice == 0) [self syncFromIOSurfaceIfNeeded];
         xm2v_texture_get_bytes(_handle, pixelBytes, bytesPerRow, bytesPerImage,
             region.origin.x, region.origin.y, region.origin.z,
             region.size.width, region.size.height, region.size.depth,
@@ -463,7 +533,20 @@ static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
     desc.arrayLength = sliceRange.length;
     desc.usage = _usage;
     desc.resourceOptions = _options;
-    return (id<MTLTexture>)[[XcmTexture alloc] initWithHandle:vh device:_device descriptor:desc];
+    XcmTexture *view = [[XcmTexture alloc] initWithHandle:vh device:_device descriptor:desc];
+    if (view && _iosurface && levelRange.location == 0 && sliceRange.location == 0) {
+        CFRetain(_iosurface);
+        view->_iosurface = _iosurface;
+        view->_iosurfacePlane = _iosurfacePlane;
+        view->_iosurfaceSeed = _iosurfaceSeed;
+        view->_iosurfaceSyncedIn = _iosurfaceSyncedIn;
+    }
+    if (view && _buffer && levelRange.location == 0 && sliceRange.location == 0) {
+        view->_buffer = _buffer;
+        view->_bufferOffset = _bufferOffset;
+        view->_bufferBytesPerRow = _bufferBytesPerRow;
+    }
+    return (id<MTLTexture>)view;
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat {
     return [self newTextureViewWithPixelFormat:pixelFormat textureType:_textureType
@@ -487,6 +570,64 @@ static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
 - (MTLResourceID)gpuResourceID {
     MTLResourceID rid = { _handle ? xm2v_texture_gpu_resource_id(_handle) : 0 };
     return rid;
+}
+@end
+
+static void xcmFillTextureDesc(MTLTextureDescriptor *desc, Xm2vTextureDesc &td) {
+    td = {};
+    td.texture_type = (uint64_t)desc.textureType;
+    td.pixel_format = (uint64_t)desc.pixelFormat;
+    td.width = desc.width;
+    td.height = desc.height;
+    td.depth = desc.depth;
+    td.mipmap_level_count = desc.mipmapLevelCount;
+    td.sample_count = desc.sampleCount;
+    td.array_length = desc.arrayLength;
+    td.resource_options = (uint64_t)desc.resourceOptions;
+    td.usage = (uint64_t)desc.usage;
+}
+
+@implementation XcmBuffer (LinearTextures)
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow {
+    if (!_handle || !desc) return nil;
+    Xm2vTextureDesc td;
+    xcmFillTextureDesc(desc, td);
+    Xm2vTexture *t = xm2v_buffer_new_texture(_handle, &td, offset, bytesPerRow);
+    if (!t) {
+        const char *err = xm2v_last_error();
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: buffer newTexture failed (fmt=%lu %lux%lu off=%lu bpr=%lu len=%llu): %{public}s",
+                     (unsigned long)desc.pixelFormat, (unsigned long)desc.width, (unsigned long)desc.height,
+                     (unsigned long)offset, (unsigned long)bytesPerRow, (unsigned long long)_length, err ?: "?");
+        return nil;
+    }
+    XcmTexture *tex = [[XcmTexture alloc] initWithHandle:t device:_device descriptor:desc];
+    if (tex) {
+        tex->_buffer = self;
+        tex->_bufferOffset = offset;
+        tex->_bufferBytesPerRow = bytesPerRow;
+    }
+    return (id<MTLTexture>)tex;
+}
+- (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage {
+    if (!_handle || !desc) return nil;
+    Xm2vTextureDesc td;
+    xcmFillTextureDesc(desc, td);
+    Xm2vTexture *t = xm2v_buffer_new_linear_texture(_handle, &td, offset, bytesPerRow, bytesPerImage);
+    if (!t) {
+        const char *err = xm2v_last_error();
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: buffer newLinearTexture failed (fmt=%lu %lux%lu off=%lu bpr=%lu bpi=%lu len=%llu): %{public}s",
+                     (unsigned long)desc.pixelFormat, (unsigned long)desc.width, (unsigned long)desc.height,
+                     (unsigned long)offset, (unsigned long)bytesPerRow, (unsigned long)bytesPerImage,
+                     (unsigned long long)_length, err ?: "?");
+        return nil;
+    }
+    XcmTexture *tex = [[XcmTexture alloc] initWithHandle:t device:_device descriptor:desc];
+    if (tex) {
+        tex->_buffer = self;
+        tex->_bufferOffset = offset;
+        tex->_bufferBytesPerRow = bytesPerRow;
+    }
+    return (id<MTLTexture>)tex;
 }
 @end
 
@@ -854,6 +995,10 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 @public
     Xm2vRenderPipeline *_handle;
     id _device;
+    NSString *_vName;
+    NSString *_fName;
+    BOOL _blendEnabled;
+    uint64_t _writeMask;
 }
 - (instancetype)initWithHandle:(Xm2vRenderPipeline *)h device:(id)dev;
 @end
@@ -1008,6 +1153,69 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 - (id<MTLDevice>)device { return _device; }
 @end
 
+@interface XcmSharedEventHandle : NSObject {
+@public
+    Xm2vSharedEventHandle *_handle;
+    NSString *_label;
+}
+- (instancetype)initWithHandle:(Xm2vSharedEventHandle *)h label:(NSString *)label;
+@end
+
+@implementation XcmSharedEventHandle
+- (instancetype)initWithHandle:(Xm2vSharedEventHandle *)h label:(NSString *)label {
+    if ((self = [super init])) { _handle = h; _label = [label copy]; }
+    return self;
+}
+- (void)dealloc { if (_handle) { xm2v_shared_event_handle_release(_handle); _handle = nullptr; } }
+- (NSString *)label { return _label; }
+@end
+
+@interface XcmSharedEvent : XcmObject {
+@public
+    Xm2vSharedEvent *_handle;
+}
+- (instancetype)initWithHandle:(Xm2vSharedEvent *)h;
+@end
+
+static void xcmSharedEventNotified(void *context, uint64_t value) {
+    NSArray *job = (__bridge_transfer NSArray *)context;
+    id<MTLSharedEvent> event = job[0];
+    dispatch_queue_t queue = job[1];
+    MTLSharedEventNotificationBlock block = job[2];
+    dispatch_async(queue, ^{ block(event, value); });
+}
+
+@implementation XcmSharedEvent
+- (instancetype)initWithHandle:(Xm2vSharedEvent *)h {
+    if ((self = [super init])) { _handle = h; }
+    return self;
+}
+- (void)dealloc { if (_handle) { xm2v_shared_event_release(_handle); _handle = nullptr; } }
+- (id<MTLDevice>)device { return nil; }
+- (uint64_t)signaledValue { return _handle ? xm2v_shared_event_signaled_value(_handle) : 0; }
+- (void)setSignaledValue:(uint64_t)value {
+    if (_handle) xm2v_shared_event_set_signaled_value(_handle, value);
+}
+- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {
+    return _handle ? (xm2v_shared_event_wait_until(_handle, value, milliseconds) ? YES : NO) : NO;
+}
+- (void)notifyListener:(MTLSharedEventListener *)listener atValue:(uint64_t)value block:(MTLSharedEventNotificationBlock)block {
+    if (!_handle || !block) return;
+    dispatch_queue_t queue = listener.dispatchQueue ?: dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0);
+    NSArray *job = @[self, queue, [block copy]];
+    void *ctx = (__bridge_retained void *)job;
+    if (!xm2v_shared_event_notify(_handle, value, xcmSharedEventNotified, ctx)) {
+        (void)(__bridge_transfer NSArray *)ctx;
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: shared event notifyListener failed: %{public}s", xm2v_last_error() ?: "?");
+    }
+}
+- (MTLSharedEventHandle *)newSharedEventHandle {
+    if (!_handle) return nil;
+    Xm2vSharedEventHandle *h = xm2v_shared_event_new_handle(_handle);
+    return h ? (MTLSharedEventHandle *)[[XcmSharedEventHandle alloc] initWithHandle:h label:self.label] : nil;
+}
+@end
+
 @interface XcmFence : XcmObject {
 @public
     Xm2vFence *_handle;
@@ -1096,12 +1304,18 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     NSMutableArray<MTLCommandBufferHandler> *_scheduledHandlers;
     NSMutableArray<MTLCommandBufferHandler> *_completedHandlers;
     NSMutableArray<XcmTexture *> *_dirtyIOSurfaceTextures;
+    NSMutableArray *_retainedResources;
+    dispatch_group_t _handlersGroup;
+    pthread_t _handlersThread;
+    BOOL _committed;
     BOOL _handlersFired;
     BOOL _iosurfaceFlushed;
+    BOOL _retainedReleased;
     NSUInteger _protectionOptions;
 }
 - (instancetype)initWithHandle:(Xm2vCommandBuffer *)h device:(id)dev queue:(id)q;
 - (void)markDirtyIOSurfaceTexture:(XcmTexture *)tex;
+- (void)retainResource:(id)obj;
 @end
 
 /* ======================== Encoders ======================== */
@@ -1132,15 +1346,18 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 }
 - (id<MTLDevice>)device { return _device; }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state {
-    if (!_handle || !state) return;
-    [_retained addObject:state];
+    if (!_handle || !state || ![(id)state isKindOfClass:[XcmComputePipeline class]]) return;
+    [_cmdBuf retainResource:state];
     xm2v_compute_encoder_set_pipeline(_handle, ((XcmComputePipeline *)state)->_handle);
 }
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     if (!_handle) return;
     if (index < 31) _boundBuffers[index] = buffer;
-    if (buffer) [_retained addObject:buffer];
-    Xm2vBuffer *bh = buffer ? ((XcmBuffer *)buffer)->_handle : nullptr;
+    Xm2vBuffer *bh = nullptr;
+    if (buffer && [(id)buffer isKindOfClass:[XcmBuffer class]]) {
+        [_cmdBuf retainResource:buffer];
+        bh = ((XcmBuffer *)buffer)->_handle;
+    }
     xm2v_compute_encoder_set_buffer(_handle, bh, offset, (uint32_t)index);
 }
 - (void)setBuffers:(const id<MTLBuffer> *)buffers offsets:(const NSUInteger *)offsets withRange:(NSRange)range {
@@ -1156,14 +1373,15 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 }
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     if (!_handle) return;
+    Xm2vTexture *th = nullptr;
     if (texture && [texture isKindOfClass:[XcmTexture class]]) {
         XcmTexture *xt = (XcmTexture *)texture;
-        [_retained addObject:xt];
+        [_cmdBuf retainResource:xt];
         [xt syncFromIOSurfaceIfNeeded];
         if (xt->_iosurface && (xt->_usage & MTLTextureUsageShaderWrite))
             [_cmdBuf markDirtyIOSurfaceTexture:xt];
+        th = xt->_handle;
     }
-    Xm2vTexture *th = texture ? ((XcmTexture *)texture)->_handle : nullptr;
     xm2v_compute_encoder_set_texture(_handle, th, (uint32_t)index);
 }
 - (void)setTextures:(const id<MTLTexture> *)textures withRange:(NSRange)range {
@@ -1172,8 +1390,11 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 }
 - (void)setSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
     if (!_handle) return;
-    if (sampler) [_retained addObject:sampler];
-    Xm2vSampler *sh = sampler ? ((XcmSampler *)sampler)->_handle : nullptr;
+    Xm2vSampler *sh = nullptr;
+    if (sampler && [(id)sampler isKindOfClass:[XcmSampler class]]) {
+        [_cmdBuf retainResource:sampler];
+        sh = ((XcmSampler *)sampler)->_handle;
+    }
     xm2v_compute_encoder_set_sampler(_handle, sh, (uint32_t)index);
 }
 - (void)setSamplerStates:(const id<MTLSamplerState> *)samplers withRange:(NSRange)range {
@@ -1185,7 +1406,7 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 }
 - (void)useResource:(id<MTLResource>)resource usage:(MTLResourceUsage)usage {
     if (!_handle || !resource) return;
-    [_retained addObject:resource];
+    [_cmdBuf retainResource:resource];
     if ([resource isKindOfClass:[XcmBuffer class]]) {
         xm2v_compute_encoder_use_buffer(_handle, ((XcmBuffer *)resource)->_handle, (uint64_t)usage);
     } else if ([resource isKindOfClass:[XcmTexture class]]) {
@@ -1215,6 +1436,16 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
             threadsPerThreadgroup.width, threadsPerThreadgroup.height, threadsPerThreadgroup.depth);
     }
 }
+- (void)updateFence:(id<MTLFence>)fence {
+    if (!_handle || !fence || ![(id)fence isKindOfClass:[XcmFence class]]) return;
+    [_cmdBuf retainResource:fence];
+    xm2v_compute_encoder_update_fence(_handle, ((XcmFence *)fence)->_handle);
+}
+- (void)waitForFence:(id<MTLFence>)fence {
+    if (!_handle || !fence || ![(id)fence isKindOfClass:[XcmFence class]]) return;
+    [_cmdBuf retainResource:fence];
+    xm2v_compute_encoder_wait_fence(_handle, ((XcmFence *)fence)->_handle);
+}
 - (void)endEncoding {
     if (_handle) { xm2v_compute_encoder_end(_handle); _handle = nullptr; }
     [_retained removeAllObjects];
@@ -1232,6 +1463,14 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     NSMutableArray *_retained;
     NSMutableDictionary *_vbufs, *_fbufs;   // slot -> bound buffer (for set*BufferOffset:atIndex:)
     BOOL _hasPipeline;
+    XcmRenderPipeline *_curPso;
+    uint32_t _tVbufMask, _tFbufMask, _tFtexMask, _tFsampMask;
+    NSUInteger _tFbytesLen;
+    uint32_t _tFbytesSlot;
+    uint8_t _tFbytesHead[16];
+    BOOL _tHasVp, _tHasScissor;
+    MTLViewport _tVp;
+    MTLScissorRect _tScissor;
 }
 - (instancetype)initWithHandle:(Xm2vRenderEncoder *)h device:(id)dev commandBuffer:(XcmCommandBuffer *)cb;
 @end
@@ -1247,27 +1486,36 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     if (!_handle) return;
     if (!pipelineState || ![pipelineState isKindOfClass:[XcmRenderPipeline class]] || !((XcmRenderPipeline *)pipelineState)->_handle) {
         _hasPipeline = NO;
+        _curPso = nil;
         return;
     }
     _hasPipeline = YES;
-    [_retained addObject:pipelineState];
-    bool ok = xm2v_render_encoder_set_pipeline(_handle, ((XcmRenderPipeline *)pipelineState)->_handle);
+    _curPso = (XcmRenderPipeline *)pipelineState;
+    [_cmdBuf retainResource:pipelineState];
+    bool ok = xm2v_render_encoder_set_pipeline(_handle, _curPso->_handle);
     if (!ok) fprintf(stderr, "XCM setRenderPipelineState FAILED: %s\n", xm2v_last_error());
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)depthStencilState {
     if (!_handle) return;
-    if (depthStencilState) [_retained addObject:depthStencilState];
-    Xm2vDepthStencil *h = depthStencilState ? ((XcmDepthStencil *)depthStencilState)->_handle : nullptr;
+    Xm2vDepthStencil *h = nullptr;
+    if (depthStencilState && [(id)depthStencilState isKindOfClass:[XcmDepthStencil class]]) {
+        [_cmdBuf retainResource:depthStencilState];
+        h = ((XcmDepthStencil *)depthStencilState)->_handle;
+    }
+    if (xcmTraceOn()) fprintf(stderr, "XCM setDepthStencil(%p)\n", (void *)h);
     xm2v_render_encoder_set_depth_stencil(_handle, h);
 }
 - (void)setViewport:(MTLViewport)vp {
+    if (xcmTraceOn()) { _tHasVp = YES; _tVp = vp; }
     if (_handle) xm2v_render_encoder_set_viewport(_handle, vp.originX, vp.originY, vp.width, vp.height, vp.znear, vp.zfar);
 }
 - (void)setScissorRect:(MTLScissorRect)r {
+    if (xcmTraceOn()) { _tHasScissor = YES; _tScissor = r; }
     if (_handle) xm2v_render_encoder_set_scissor(_handle, r.x, r.y, r.width, r.height);
 }
 - (void)setCullMode:(MTLCullMode)cullMode {
-    if (_handle) xm2v_render_encoder_set_cull_mode(_handle, (uint64_t)cullMode);
+    if (_handle) if (xcmTraceOn()) fprintf(stderr, "XCM setCullMode(%lu)\n", (unsigned long)cullMode);
+    xm2v_render_encoder_set_cull_mode(_handle, (uint64_t)cullMode);
 }
 - (void)setFrontFacingWinding:(MTLWinding)winding {
     if (_handle) xm2v_render_encoder_set_front_facing_winding(_handle, (uint64_t)winding);
@@ -1276,42 +1524,71 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     if (!_handle) return;
     if (!_vbufs) _vbufs = [NSMutableDictionary dictionary];
     if (buffer) _vbufs[@(index)] = buffer; else [_vbufs removeObjectForKey:@(index)];
-    if (buffer) [_retained addObject:buffer];
-    xm2v_render_encoder_set_vertex_buffer(_handle, buffer ? ((XcmBuffer *)buffer)->_handle : nullptr, offset, (uint32_t)index);
+    Xm2vBuffer *bh = nullptr;
+    if (buffer && [(id)buffer isKindOfClass:[XcmBuffer class]]) {
+        [_cmdBuf retainResource:buffer];
+        bh = ((XcmBuffer *)buffer)->_handle;
+    }
+    if (xcmTraceOn() && index < 32) { if (bh) _tVbufMask |= (1u << index); else _tVbufMask &= ~(1u << index); }
+    xm2v_render_encoder_set_vertex_buffer(_handle, bh, offset, (uint32_t)index);
 }
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
+    if (xcmTraceOn() && index < 32) _tVbufMask |= (1u << index);
     if (_handle) xm2v_render_encoder_set_vertex_bytes(_handle, bytes, length, (uint32_t)index);
 }
 - (void)setVertexTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     if (!_handle) return;
+    Xm2vTexture *th = nullptr;
     if (texture && [texture isKindOfClass:[XcmTexture class]]) {
-        [_retained addObject:texture];
+        [_cmdBuf retainResource:texture];
         [(XcmTexture *)texture syncFromIOSurfaceIfNeeded];
+        th = ((XcmTexture *)texture)->_handle;
     }
-    xm2v_render_encoder_set_vertex_texture(_handle, texture ? ((XcmTexture *)texture)->_handle : nullptr, (uint32_t)index);
+    xm2v_render_encoder_set_vertex_texture(_handle, th, (uint32_t)index);
 }
 - (void)setVertexSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
     if (!_handle) return;
-    if (sampler) [_retained addObject:sampler];
-    xm2v_render_encoder_set_vertex_sampler(_handle, sampler ? ((XcmSampler *)sampler)->_handle : nullptr, (uint32_t)index);
+    Xm2vSampler *sh = nullptr;
+    if (sampler && [(id)sampler isKindOfClass:[XcmSampler class]]) {
+        [_cmdBuf retainResource:sampler];
+        sh = ((XcmSampler *)sampler)->_handle;
+    }
+    xm2v_render_encoder_set_vertex_sampler(_handle, sh, (uint32_t)index);
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     if (!_handle) return;
     if (!_fbufs) _fbufs = [NSMutableDictionary dictionary];
     if (buffer) _fbufs[@(index)] = buffer; else [_fbufs removeObjectForKey:@(index)];
-    if (buffer) [_retained addObject:buffer];
-    xm2v_render_encoder_set_fragment_buffer(_handle, buffer ? ((XcmBuffer *)buffer)->_handle : nullptr, offset, (uint32_t)index);
+    Xm2vBuffer *bh = nullptr;
+    if (buffer && [(id)buffer isKindOfClass:[XcmBuffer class]]) {
+        [_cmdBuf retainResource:buffer];
+        bh = ((XcmBuffer *)buffer)->_handle;
+    }
+    if (xcmTraceOn() && index < 32) { if (bh) _tFbufMask |= (1u << index); else _tFbufMask &= ~(1u << index); }
+    if (!xm2v_render_encoder_set_fragment_buffer(_handle, bh, offset, (uint32_t)index))
+        fprintf(stderr, "XCM setFragmentBuffer(%lu) FAILED: %s\n", (unsigned long)index, xm2v_last_error());
 }
 - (void)setFragmentBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
+    if (xcmTraceOn()) {
+        if (index < 32) _tFbufMask |= (1u << index);
+        _tFbytesSlot = (uint32_t)index;
+        _tFbytesLen = length;
+        memset(_tFbytesHead, 0, sizeof(_tFbytesHead));
+        if (bytes && length) memcpy(_tFbytesHead, bytes, length < 16 ? length : 16);
+    }
     if (_handle) xm2v_render_encoder_set_fragment_bytes(_handle, bytes, length, (uint32_t)index);
 }
 - (void)setFragmentTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     if (!_handle) return;
+    Xm2vTexture *th = nullptr;
     if (texture && [texture isKindOfClass:[XcmTexture class]]) {
-        [_retained addObject:texture];
+        [_cmdBuf retainResource:texture];
         [(XcmTexture *)texture syncFromIOSurfaceIfNeeded];
+        th = ((XcmTexture *)texture)->_handle;
     }
-    xm2v_render_encoder_set_fragment_texture(_handle, texture ? ((XcmTexture *)texture)->_handle : nullptr, (uint32_t)index);
+    if (xcmTraceOn() && index < 32) { if (th) _tFtexMask |= (1u << index); else _tFtexMask &= ~(1u << index); }
+    if (!xm2v_render_encoder_set_fragment_texture(_handle, th, (uint32_t)index))
+        fprintf(stderr, "XCM setFragmentTexture(%lu) FAILED: %s\n", (unsigned long)index, xm2v_last_error());
 }
 - (void)setFragmentTextures:(const id<MTLTexture> *)textures withRange:(NSRange)range {
     for (NSUInteger i = 0; i < range.length; i++)
@@ -1319,8 +1596,13 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
     if (!_handle) return;
-    if (sampler) [_retained addObject:sampler];
-    xm2v_render_encoder_set_fragment_sampler(_handle, sampler ? ((XcmSampler *)sampler)->_handle : nullptr, (uint32_t)index);
+    Xm2vSampler *sh = nullptr;
+    if (sampler && [(id)sampler isKindOfClass:[XcmSampler class]]) {
+        [_cmdBuf retainResource:sampler];
+        sh = ((XcmSampler *)sampler)->_handle;
+    }
+    if (xcmTraceOn() && index < 32) { if (sh) _tFsampMask |= (1u << index); else _tFsampMask &= ~(1u << index); }
+    xm2v_render_encoder_set_fragment_sampler(_handle, sh, (uint32_t)index);
 }
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> *)samplers withRange:(NSRange)range {
     for (NSUInteger i = 0; i < range.length; i++)
@@ -1362,7 +1644,7 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 - (void)setVisibilityResultMode:(MTLVisibilityResultMode)mode offset:(NSUInteger)offset { (void)mode; (void)offset; }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u stages:(MTLRenderStages)st {
     if (!_handle || !r) return;
-    [_retained addObject:r];
+    [_cmdBuf retainResource:r];
     if ([r isKindOfClass:[XcmBuffer class]]) {
         xm2v_render_encoder_use_buffer(_handle, ((XcmBuffer *)r)->_handle, (uint64_t)u, (uint64_t)st);
     } else if ([r isKindOfClass:[XcmTexture class]]) {
@@ -1392,10 +1674,34 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 - (void)memoryBarrierWithResources:(const id<MTLResource> *)resources count:(NSUInteger)count afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before {
     (void)resources; (void)count; (void)after; (void)before;
 }
+- (void)_traceDraw:(const char *)kind prim:(MTLPrimitiveType)prim start:(NSUInteger)start count:(NSUInteger)count inst:(NSUInteger)inst {
+    if (!xcmTraceOn()) return;
+    char fbHex[40] = "-";
+    if (_tFbytesLen > 0) {
+        size_t n = _tFbytesLen < 16 ? _tFbytesLen : 16;
+        char *p = fbHex;
+        for (size_t i = 0; i < n; i++) p += snprintf(p, 4, "%02x", _tFbytesHead[i]);
+    }
+    fprintf(stderr, "XCM %s(prim=%lu start=%lu cnt=%lu inst=%lu pso=%s/%s blend=%d mask=0x%llx vb=0x%x fb=0x%x ft=0x%x fs=0x%x fbytes[%u]=%lu:%s vp=%.0f,%.0f,%.0fx%.0f sc=%lu,%lu,%lux%lu)\n",
+            kind, (unsigned long)prim, (unsigned long)start, (unsigned long)count, (unsigned long)inst,
+            _curPso && _curPso->_vName ? _curPso->_vName.UTF8String : "?",
+            _curPso && _curPso->_fName ? _curPso->_fName.UTF8String : "?",
+            _curPso ? (int)_curPso->_blendEnabled : -1,
+            _curPso ? (unsigned long long)_curPso->_writeMask : 0ull,
+            _tVbufMask, _tFbufMask, _tFtexMask, _tFsampMask,
+            _tFbytesSlot, (unsigned long)_tFbytesLen, fbHex,
+            _tHasVp ? _tVp.originX : -1.0, _tHasVp ? _tVp.originY : -1.0,
+            _tHasVp ? _tVp.width : 0.0, _tHasVp ? _tVp.height : 0.0,
+            _tHasScissor ? (unsigned long)_tScissor.x : 0ul,
+            _tHasScissor ? (unsigned long)_tScissor.y : 0ul,
+            _tHasScissor ? (unsigned long)_tScissor.width : 0ul,
+            _tHasScissor ? (unsigned long)_tScissor.height : 0ul);
+}
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart
            vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount
           baseInstance:(NSUInteger)baseInstance {
     if (_handle && _hasPipeline) {
+        [self _traceDraw:"draw" prim:primitiveType start:vertexStart count:vertexCount inst:instanceCount];
         bool ok = xm2v_render_encoder_draw_primitives(_handle, (uint64_t)primitiveType, vertexStart, vertexCount, instanceCount, baseInstance);
         if (!ok) fprintf(stderr, "XCM drawPrimitives FAILED: %s\n", xm2v_last_error());
     }
@@ -1407,8 +1713,9 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
                     indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer
             indexBufferOffset:(NSUInteger)indexBufferOffset instanceCount:(NSUInteger)instanceCount
                    baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {
-    if (!_handle || !_hasPipeline || !indexBuffer) return;
-    [_retained addObject:indexBuffer];
+    if (!_handle || !_hasPipeline || !indexBuffer || ![(id)indexBuffer isKindOfClass:[XcmBuffer class]]) return;
+    [self _traceDraw:"drawIdx" prim:primitiveType start:indexBufferOffset count:indexCount inst:instanceCount];
+    [_cmdBuf retainResource:indexBuffer];
     bool ok = xm2v_render_encoder_draw_indexed_primitives(_handle, (uint64_t)primitiveType, indexCount, (uint64_t)indexType,
         ((XcmBuffer *)indexBuffer)->_handle, indexBufferOffset, instanceCount, baseVertex, baseInstance);
     if (!ok) fprintf(stderr, "XCM drawIndexedPrimitives FAILED: %s\n", xm2v_last_error());
@@ -1431,8 +1738,22 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
            vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount {
     [self drawPrimitives:primitiveType vertexStart:vertexStart vertexCount:vertexCount instanceCount:instanceCount baseInstance:0];
 }
+- (void)updateFence:(id<MTLFence>)fence afterStages:(MTLRenderStages)stages {
+    if (!_handle || !fence || ![(id)fence isKindOfClass:[XcmFence class]]) return;
+    [_cmdBuf retainResource:fence];
+    xm2v_render_encoder_update_fence(_handle, ((XcmFence *)fence)->_handle, (uint64_t)stages);
+}
+- (void)waitForFence:(id<MTLFence>)fence beforeStages:(MTLRenderStages)stages {
+    if (!_handle || !fence || ![(id)fence isKindOfClass:[XcmFence class]]) return;
+    [_cmdBuf retainResource:fence];
+    xm2v_render_encoder_wait_fence(_handle, ((XcmFence *)fence)->_handle, (uint64_t)stages);
+}
 - (void)endEncoding {
-    if (_handle) { xm2v_render_encoder_end(_handle); _handle = nullptr; }
+    if (_handle) {
+        bool ok = xm2v_render_encoder_end(_handle);
+        if (!ok) fprintf(stderr, "XCM render endEncoding FAILED: %s\n", xm2v_last_error());
+        _handle = nullptr;
+    }
     [_retained removeAllObjects];
 }
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
@@ -1459,17 +1780,17 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 - (id<MTLDevice>)device { return _device; }
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)srcOff
               toBuffer:(id<MTLBuffer>)dst destinationOffset:(NSUInteger)dstOff size:(NSUInteger)size {
-    if (!_handle || !src || !dst) return;
-    [_retained addObject:src]; [_retained addObject:dst];
+    if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmBuffer class]] || ![(id)dst isKindOfClass:[XcmBuffer class]]) return;
+    [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
     xm2v_blit_encoder_copy_buffer_to_buffer(_handle, ((XcmBuffer *)src)->_handle, srcOff, ((XcmBuffer *)dst)->_handle, dstOff, size);
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)srcOff
      sourceBytesPerRow:(NSUInteger)bpr sourceBytesPerImage:(NSUInteger)bpi
             sourceSize:(MTLSize)sz toTexture:(id<MTLTexture>)dst
       destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin {
-    if (!_handle || !src || !dst) return;
-    [_retained addObject:src]; [_retained addObject:dst];
-    if ([dst isKindOfClass:[XcmTexture class]] && ((XcmTexture *)dst)->_iosurface)
+    if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmBuffer class]] || ![(id)dst isKindOfClass:[XcmTexture class]]) return;
+    [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
+    if (((XcmTexture *)dst)->_iosurface)
         [_cmdBuf markDirtyIOSurfaceTexture:(XcmTexture *)dst];
     xm2v_blit_encoder_copy_buffer_to_texture(_handle, ((XcmBuffer *)src)->_handle, srcOff, bpr, bpi,
         sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, slice, level, origin.x, origin.y, origin.z);
@@ -1477,40 +1798,50 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level
            sourceOrigin:(MTLOrigin)origin sourceSize:(MTLSize)sz toBuffer:(id<MTLBuffer>)dst
       destinationOffset:(NSUInteger)dstOff destinationBytesPerRow:(NSUInteger)bpr destinationBytesPerImage:(NSUInteger)bpi {
-    if (!_handle || !src || !dst) return;
-    [_retained addObject:src]; [_retained addObject:dst];
-    if ([src isKindOfClass:[XcmTexture class]]) [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
+    if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmTexture class]] || ![(id)dst isKindOfClass:[XcmBuffer class]]) return;
+    [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
+    [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
     xm2v_blit_encoder_copy_texture_to_buffer(_handle, ((XcmTexture *)src)->_handle, slice, level,
         origin.x, origin.y, origin.z, sz.width, sz.height, sz.depth, ((XcmBuffer *)dst)->_handle, dstOff, bpr, bpi);
 }
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
            sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)sz toTexture:(id<MTLTexture>)dst
        destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)do_ {
-    if (!_handle || !src || !dst) return;
-    [_retained addObject:src]; [_retained addObject:dst];
-    if ([src isKindOfClass:[XcmTexture class]]) [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
-    if ([dst isKindOfClass:[XcmTexture class]] && ((XcmTexture *)dst)->_iosurface)
+    if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmTexture class]] || ![(id)dst isKindOfClass:[XcmTexture class]]) return;
+    [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
+    [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
+    if (((XcmTexture *)dst)->_iosurface)
         [_cmdBuf markDirtyIOSurfaceTexture:(XcmTexture *)dst];
     xm2v_blit_encoder_copy_texture_to_texture(_handle, ((XcmTexture *)src)->_handle, ss, sl,
         so.x, so.y, so.z, sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, ds, dl, do_.x, do_.y, do_.z);
 }
 - (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
-    if (!_handle || !buffer) return;
-    [_retained addObject:buffer];
+    if (!_handle || !buffer || ![(id)buffer isKindOfClass:[XcmBuffer class]]) return;
+    [_cmdBuf retainResource:buffer];
     xm2v_blit_encoder_fill_buffer(_handle, ((XcmBuffer *)buffer)->_handle, range.location, range.length, value);
 }
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
-    if (!_handle || !texture) return;
-    [_retained addObject:texture];
+    if (!_handle || !texture || ![(id)texture isKindOfClass:[XcmTexture class]]) return;
+    [_cmdBuf retainResource:texture];
     xm2v_blit_encoder_generate_mipmaps(_handle, ((XcmTexture *)texture)->_handle);
 }
 - (void)synchronizeResource:(id<MTLResource>)resource {
     if (!_handle || !resource) return;
-    [_retained addObject:resource];
+    [_cmdBuf retainResource:resource];
     if ([resource isKindOfClass:[XcmBuffer class]])
         xm2v_blit_encoder_synchronize_buffer(_handle, ((XcmBuffer *)resource)->_handle);
     else if ([resource isKindOfClass:[XcmTexture class]])
         xm2v_blit_encoder_synchronize_texture(_handle, ((XcmTexture *)resource)->_handle);
+}
+- (void)updateFence:(id<MTLFence>)fence {
+    if (!_handle || !fence || ![(id)fence isKindOfClass:[XcmFence class]]) return;
+    [_cmdBuf retainResource:fence];
+    xm2v_blit_encoder_update_fence(_handle, ((XcmFence *)fence)->_handle);
+}
+- (void)waitForFence:(id<MTLFence>)fence {
+    if (!_handle || !fence || ![(id)fence isKindOfClass:[XcmFence class]]) return;
+    [_cmdBuf retainResource:fence];
+    xm2v_blit_encoder_wait_fence(_handle, ((XcmFence *)fence)->_handle);
 }
 - (void)endEncoding {
     if (_handle) { xm2v_blit_encoder_end(_handle); _handle = nullptr; }
@@ -1532,15 +1863,28 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
         _scheduledHandlers = [NSMutableArray array];
         _completedHandlers = [NSMutableArray array];
         _dirtyIOSurfaceTextures = [NSMutableArray array];
+        _retainedResources = [NSMutableArray array];
+        _handlersGroup = dispatch_group_create();
     }
     return self;
 }
 - (void)dealloc { if (_handle) { xm2v_command_buffer_release(_handle); _handle = nullptr; } }
-- (void)markDirtyIOSurfaceTexture:(XcmTexture *)tex {
-    if (tex && tex->_iosurface && ![_dirtyIOSurfaceTextures containsObject:tex]) {
-        [_dirtyIOSurfaceTextures addObject:tex];
-        xcmRecordIOSurfaceWriter(tex->_iosurface, self);
+- (void)retainResource:(id)obj {
+    if (!obj) return;
+    @synchronized(self) {
+        if (!_retainedReleased) [_retainedResources addObject:obj];
     }
+}
+- (void)markDirtyIOSurfaceTexture:(XcmTexture *)tex {
+    if (!tex || !tex->_iosurface) return;
+    BOOL added = NO;
+    @synchronized(self) {
+        if (!_iosurfaceFlushed && ![_dirtyIOSurfaceTextures containsObject:tex]) {
+            [_dirtyIOSurfaceTextures addObject:tex];
+            added = YES;
+        }
+    }
+    if (added) xcmRecordIOSurfaceWriter(tex->_iosurface, self);
 }
 - (id<MTLDevice>)device { return _device; }
 - (id<MTLCommandQueue>)commandQueue { return _queue; }
@@ -1555,16 +1899,28 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     return _handle ? (MTLCommandBufferStatus)xm2v_command_buffer_status(_handle) : MTLCommandBufferStatusError;
 }
 - (NSError *)error {
-    if (self.status == MTLCommandBufferStatusError)
+    if (self.status == MTLCommandBufferStatusError) {
+        char buf[512] = {};
+        if (_handle && xm2v_command_buffer_error(_handle, buf, sizeof(buf)) > 0) {
+            os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: command buffer error (cb=%p): %{public}s", (__bridge void *)self, buf);
+            return xcmError(MTLCommandBufferErrorDomain, MTLCommandBufferErrorInternal, buf);
+        }
         return xcmError(MTLCommandBufferErrorDomain, MTLCommandBufferErrorInternal, "Command buffer failed");
+    }
     return nil;
 }
 - (void)enqueue {}
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {
-    if (block) [_scheduledHandlers addObject:[block copy]];
+    if (!block) return;
+    @synchronized(self) {
+        if (!_handlersFired) [_scheduledHandlers addObject:[block copy]];
+    }
 }
 - (void)addCompletedHandler:(MTLCommandBufferHandler)block {
-    if (block) [_completedHandlers addObject:[block copy]];
+    if (!block) return;
+    @synchronized(self) {
+        if (!_handlersFired) [_completedHandlers addObject:[block copy]];
+    }
 }
 - (void)_flushIOSurfacesOnce {
     @synchronized(self) {
@@ -1575,37 +1931,101 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     }
 }
 - (void)_fireHandlersOnce {
+    NSArray<MTLCommandBufferHandler> *sched = nil;
+    NSArray<MTLCommandBufferHandler> *comp = nil;
+    BOOL shouldRun = NO;
     @synchronized(self) {
-        if (_handlersFired) return;
-        _handlersFired = YES;
-        NSArray<MTLCommandBufferHandler> *sched = [_scheduledHandlers copy];
-        NSArray<MTLCommandBufferHandler> *comp = [_completedHandlers copy];
-        [_scheduledHandlers removeAllObjects];
-        [_completedHandlers removeAllObjects];
+        if (!_handlersFired) {
+            _handlersFired = YES;
+            sched = [_scheduledHandlers copy];
+            comp = [_completedHandlers copy];
+            [_scheduledHandlers removeAllObjects];
+            [_completedHandlers removeAllObjects];
+            if (sched.count || comp.count) {
+                shouldRun = YES;
+                _handlersThread = pthread_self();
+                dispatch_group_enter(_handlersGroup);
+            }
+        }
+    }
+    if (shouldRun) {
         for (MTLCommandBufferHandler h in sched) h((id<MTLCommandBuffer>)self);
         for (MTLCommandBufferHandler h in comp) h((id<MTLCommandBuffer>)self);
+        @synchronized(self) {
+            _handlersThread = nullptr;
+        }
+        dispatch_group_leave(_handlersGroup);
+    } else {
+        BOOL isSameThread = NO;
+        @synchronized(self) {
+            isSameThread = (_handlersThread != nullptr && pthread_equal(_handlersThread, pthread_self()) != 0);
+        }
+        if (!isSameThread) {
+            dispatch_group_wait(_handlersGroup, DISPATCH_TIME_FOREVER);
+        }
     }
 }
+- (void)_releaseRetainedResourcesOnce {
+    NSArray *toRelease = nil;
+    @synchronized(self) {
+        if (_retainedReleased) return;
+        _retainedReleased = YES;
+        toRelease = [_retainedResources copy];
+        [_retainedResources removeAllObjects];
+    }
+    if (toRelease.count && _handle &&
+        (MTLCommandBufferStatus)xm2v_command_buffer_status(_handle) == MTLCommandBufferStatusError) {
+        char ebuf[256] = {};
+        if (xm2v_command_buffer_error(_handle, ebuf, sizeof(ebuf)) > 0 &&
+            (strstr(ebuf, "GpuHang") || strstr(ebuf, "DeviceLost"))) {
+            // Driver may still be executing in-flight draws on a parked device; keep resources alive
+            // rather than running fallback deallocators or freeing backing memory under lavapipe.
+            static NSMutableArray *gParkedResources;
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{ gParkedResources = [NSMutableArray array]; });
+            @synchronized(gParkedResources) { [gParkedResources addObjectsFromArray:toRelease]; }
+            return;
+        }
+    }
+    (void)toRelease;
+}
 - (void)commit {
-    if (xcmTraceOn()) fprintf(stderr, "XCM commit cb=%p sched=%lu comp=%lu dirty=%lu\n",
-                              (__bridge void *)self, (unsigned long)_scheduledHandlers.count,
-                              (unsigned long)_completedHandlers.count, (unsigned long)_dirtyIOSurfaceTextures.count);
+    BOOL needsWait = NO;
+    NSUInteger nSched = 0, nComp = 0, nDirty = 0, nRet = 0;
+    @synchronized(self) {
+        if (_committed) return;
+        _committed = YES;
+        nSched = _scheduledHandlers.count;
+        nComp = _completedHandlers.count;
+        nDirty = _dirtyIOSurfaceTextures.count;
+        nRet = _retainedResources.count;
+        needsWait = (nSched || nComp || nDirty || nRet);
+    }
+    if (xcmTraceOn()) fprintf(stderr, "XCM commit cb=%p sched=%lu comp=%lu dirty=%lu ret=%lu\n",
+                              (__bridge void *)self, (unsigned long)nSched,
+                              (unsigned long)nComp, (unsigned long)nDirty, (unsigned long)nRet);
     if (_handle) {
         bool ok = xm2v_command_buffer_commit(_handle);
         if (!ok) fprintf(stderr, "XCM commit FAILED cb=%p err=%s\n", (__bridge void *)self, xm2v_last_error());
     }
-    if (_scheduledHandlers.count || _completedHandlers.count || _dirtyIOSurfaceTextures.count) {
+    if (needsWait) {
         static dispatch_queue_t waitQ;
         static dispatch_once_t once;
         dispatch_once(&once, ^{ waitQ = dispatch_queue_create("xcm.cb.wait", DISPATCH_QUEUE_CONCURRENT); });
         dispatch_async(waitQ, ^{
             if (_handle) {
-                bool wok = xm2v_command_buffer_wait_until_completed(_handle, 60000);
-                if (!wok) fprintf(stderr, "XCM wait FAILED cb=%p status=%u err=%s\n",
-                                  (__bridge void *)self, xm2v_command_buffer_status(_handle), xm2v_last_error());
+                bool wok = xm2v_command_buffer_wait_until_completed(_handle, 0);
+                uint32_t st = xm2v_command_buffer_status(_handle);
+                if (!wok || xcmTraceOn()) {
+                    char ebuf[256] = {};
+                    if (!wok) xm2v_command_buffer_error(_handle, ebuf, sizeof(ebuf));
+                    fprintf(stderr, "XCM cb-done cb=%p wok=%d status=%u err=%s\n",
+                            (__bridge void *)self, wok, st, ebuf[0] ? ebuf : (wok ? "ok" : xm2v_last_error()));
+                }
             }
             [self _flushIOSurfacesOnce];
             [self _fireHandlersOnce];
+            [self _releaseRetainedResourcesOnce];
         });
     }
 }
@@ -1616,9 +2036,10 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     [self waitUntilCompleted];
 }
 - (void)waitUntilCompleted {
-    if (_handle) xm2v_command_buffer_wait_until_completed(_handle, 60000);
+    if (_handle) xm2v_command_buffer_wait_until_completed(_handle, 0);
     [self _flushIOSurfacesOnce];
     [self _fireHandlersOnce];
+    [self _releaseRetainedResourcesOnce];
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
     if (!_handle) return nil;
@@ -1638,6 +2059,7 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
         MTLRenderPassColorAttachmentDescriptor *ca = desc.colorAttachments[i];
         if (ca && ca.texture && [ca.texture isKindOfClass:[XcmTexture class]]) {
             XcmTexture *xt = (XcmTexture *)ca.texture;
+            [self retainResource:xt];
             if (ca.loadAction == MTLLoadActionLoad) [xt syncFromIOSurfaceIfNeeded];
             if (xt->_iosurface && ca.storeAction != MTLStoreActionDontCare)
                 [self markDirtyIOSurfaceTexture:xt];
@@ -1653,19 +2075,30 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
         }
     }
     if (desc.depthAttachment.texture && [desc.depthAttachment.texture isKindOfClass:[XcmTexture class]]) {
+        [self retainResource:desc.depthAttachment.texture];
         rd.depth_texture = ((XcmTexture *)desc.depthAttachment.texture)->_handle;
         rd.depth_load_action = (uint64_t)desc.depthAttachment.loadAction;
         rd.depth_store_action = (uint64_t)desc.depthAttachment.storeAction;
         rd.clear_depth = desc.depthAttachment.clearDepth;
     }
     if (desc.stencilAttachment.texture && [desc.stencilAttachment.texture isKindOfClass:[XcmTexture class]]) {
+        [self retainResource:desc.stencilAttachment.texture];
         rd.stencil_texture = ((XcmTexture *)desc.stencilAttachment.texture)->_handle;
         rd.stencil_load_action = (uint64_t)desc.stencilAttachment.loadAction;
         rd.stencil_store_action = (uint64_t)desc.stencilAttachment.storeAction;
         rd.clear_stencil = desc.stencilAttachment.clearStencil;
     }
     Xm2vRenderEncoder *eh = xm2v_render_encoder_new(_handle, &rd);
-    if (xcmTraceOn()) fprintf(stderr, "XCM renderEncoder -> %p\n", (void *)eh);
+    if (xcmTraceOn()) {
+        MTLRenderPassColorAttachmentDescriptor *ca0 = desc.colorAttachments[0];
+        id t0 = ca0 ? ca0.texture : nil;
+        fprintf(stderr, "XCM renderEncoder -> %p c0=%p(%lux%lu load=%lu store=%lu clear=%.2f,%.2f,%.2f,%.2f) d=%p s=%p\n",
+                (void *)eh, (__bridge void *)t0,
+                t0 ? (unsigned long)[t0 width] : 0ul, t0 ? (unsigned long)[t0 height] : 0ul,
+                ca0 ? (unsigned long)ca0.loadAction : 0ul, ca0 ? (unsigned long)ca0.storeAction : 0ul,
+                ca0 ? ca0.clearColor.red : 0.0, ca0 ? ca0.clearColor.green : 0.0,
+                ca0 ? ca0.clearColor.blue : 0.0, ca0 ? ca0.clearColor.alpha : 0.0, (__bridge void *)desc.depthAttachment.texture, (__bridge void *)desc.stencilAttachment.texture);
+    }
     return eh ? (id<MTLRenderCommandEncoder>)[[XcmRenderEncoder alloc] initWithHandle:eh device:_device commandBuffer:self] : nil;
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
@@ -1674,12 +2107,35 @@ static void xcmExtractConstants(MTLFunctionConstantValues *constantValues,
     return eh ? (id<MTLBlitCommandEncoder>)[[XcmBlitEncoder alloc] initWithHandle:eh device:_device commandBuffer:self] : nil;
 }
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value {
-    if (_handle && [event isKindOfClass:[XcmEvent class]])
-        xm2v_command_buffer_encode_signal_event(_handle, ((XcmEvent *)event)->_handle, value);
+    if (!_handle || !event) return;
+    [self retainResource:event];
+    if ([event isKindOfClass:[XcmSharedEvent class]]) {
+        if (!xm2v_command_buffer_encode_signal_shared_event(_handle, ((XcmSharedEvent *)event)->_handle, value))
+            os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: encodeSignalEvent(shared) failed: %{public}s", xm2v_last_error() ?: "?");
+    } else if ([event isKindOfClass:[XcmEvent class]]) {
+        if (!xm2v_command_buffer_encode_signal_event(_handle, ((XcmEvent *)event)->_handle, value))
+            os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: encodeSignalEvent failed: %{public}s", xm2v_last_error() ?: "?");
+    }
+}
+- (void)encodeSignalEventScheduled:(id<MTLEvent>)event value:(uint64_t)value {
+    if (!_handle || !event) return;
+    [self retainResource:event];
+    if ([event isKindOfClass:[XcmSharedEvent class]]) {
+        xm2v_command_buffer_encode_signal_shared_event_scheduled(_handle, ((XcmSharedEvent *)event)->_handle, value);
+    } else if ([event isKindOfClass:[XcmEvent class]]) {
+        xm2v_command_buffer_encode_signal_event_scheduled(_handle, ((XcmEvent *)event)->_handle, value);
+    }
 }
 - (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value {
-    if (_handle && [event isKindOfClass:[XcmEvent class]])
-        xm2v_command_buffer_encode_wait_event(_handle, ((XcmEvent *)event)->_handle, value);
+    if (!_handle || !event) return;
+    [self retainResource:event];
+    if ([event isKindOfClass:[XcmSharedEvent class]]) {
+        if (!xm2v_command_buffer_encode_wait_shared_event(_handle, ((XcmSharedEvent *)event)->_handle, value))
+            os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: encodeWaitForEvent(shared) failed: %{public}s", xm2v_last_error() ?: "?");
+    } else if ([event isKindOfClass:[XcmEvent class]]) {
+        if (!xm2v_command_buffer_encode_wait_event(_handle, ((XcmEvent *)event)->_handle, value))
+            os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: encodeWaitForEvent failed: %{public}s", xm2v_last_error() ?: "?");
+    }
 }
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
@@ -1738,8 +2194,8 @@ static NSString *xcmDev_name(id, SEL) {
     return @"XnuCpuMetal (lavapipe)";
 }
 static uint64_t xcmDev_registryID(id, SEL) { return gRegistryID; }
-static BOOL xcmDev_isLowPower(id, SEL) { return YES; }
-static BOOL xcmDev_isHeadless(id, SEL) { return YES; }
+static BOOL xcmDev_isLowPower(id, SEL) { return NO; }
+static BOOL xcmDev_isHeadless(id, SEL) { return NO; }
 static BOOL xcmDev_isRemovable(id, SEL) { return NO; }
 static BOOL xcmDev_hasUnifiedMemory(id, SEL) { return YES; }
 static NSUInteger xcmDev_maxBufferLength(id, SEL) {
@@ -1763,7 +2219,17 @@ static BOOL xcmDev_yes(id, SEL) { return YES; }
 static BOOL xcmDev_supportsSampleCount(id, SEL, NSUInteger c) { return c == 1; }
 static BOOL xcmDev_supportsFeatureSet(id, SEL, NSUInteger) { return YES; }
 static BOOL xcmDev_supportsFamily(id, SEL, MTLGPUFamily family) {
-    return gXm2vDevice ? xm2v_device_supports_family(gXm2vDevice, (int64_t)family) : NO;
+    if (gXm2vDevice && xm2v_device_supports_family(gXm2vDevice, (int64_t)family)) return YES;
+    // Report Apple1/Apple2, Mac1/Mac2, Common1..3 so QuartzCore enables framebuffer fetch (programmable blending)
+    // and standard macOS/Apple GPU paths that lavapipe + metal2vulkan support.
+    switch ((int64_t)family) {
+        case 1001: case 1002:             // MTLGPUFamilyApple1..Apple2
+        case 2001: case 2002:             // MTLGPUFamilyMac1..Mac2
+        case 3001: case 3002: case 3003:  // MTLGPUFamilyCommon1..Common3
+            return YES;
+        default:
+            return NO;
+    }
 }
 
 static id xcmDev_newCommandQueue(id self, SEL) NS_RETURNS_RETAINED;
@@ -1790,6 +2256,9 @@ static id xcmDev_newRenderPSOOpts(id self, SEL, MTLRenderPipelineDescriptor *, M
 static id xcmDev_newSampler(id self, SEL, MTLSamplerDescriptor *) NS_RETURNS_RETAINED;
 static id xcmDev_newDepthStencil(id self, SEL, MTLDepthStencilDescriptor *) NS_RETURNS_RETAINED;
 static id xcmDev_newEvent(id self, SEL) NS_RETURNS_RETAINED;
+static id xcmDev_newSharedEvent(id self, SEL) NS_RETURNS_RETAINED;
+static id xcmDev_newSharedEventOpts(id self, SEL, NSUInteger) NS_RETURNS_RETAINED;
+static id xcmDev_newSharedEventWithHandle(id self, SEL, MTLSharedEventHandle *) NS_RETURNS_RETAINED;
 static id xcmDev_newFence(id self, SEL) NS_RETURNS_RETAINED;
 static id xcmDev_newHeap(id self, SEL, MTLHeapDescriptor *) NS_RETURNS_RETAINED;
 
@@ -1802,22 +2271,41 @@ static id xcmDev_newCommandQueueMax(id self, SEL, NSUInteger) {
     return xcmDev_newCommandQueue(self, nullptr);
 }
 static id xcmDev_newBufferLen(id self, SEL, NSUInteger length, MTLResourceOptions opts) {
-    if (!gXm2vDevice) return nil;
+    if (!gXm2vDevice || length == 0) return nil;
     Xm2vBuffer *b = xm2v_buffer_new(gXm2vDevice, length, opts, nullptr);
     if (xcmTraceOn()) fprintf(stderr, "XCM newBufferLen(%lu, 0x%lx) -> %p\n", (unsigned long)length, (unsigned long)opts, (void *)b);
     return b ? [[XcmBuffer alloc] initWithHandle:b device:self options:opts] : nil;
 }
 static id xcmDev_newBufferBytes(id self, SEL, const void *pointer, NSUInteger length, MTLResourceOptions opts) {
-    if (!gXm2vDevice) return nil;
+    if (!gXm2vDevice || !pointer || length == 0) return nil;
     Xm2vBuffer *b = xm2v_buffer_new(gXm2vDevice, length, opts, pointer);
     return b ? [[XcmBuffer alloc] initWithHandle:b device:self options:opts] : nil;
 }
+static void xcmBufferDeallocCallback(void *ptr, uint64_t length, void *ctx) {
+    if (!ctx) return;
+    void (^block)(void *, NSUInteger) = (__bridge_transfer void (^)(void *, NSUInteger))ctx;
+    block(ptr, (NSUInteger)length);
+}
 static id xcmDev_newBufferNoCopy(id self, SEL, void *pointer, NSUInteger length, MTLResourceOptions opts, void (^deallocator)(void *, NSUInteger)) {
-    (void)deallocator;
-    if (!gXm2vDevice) return nil;
-    Xm2vBuffer *b = xm2v_buffer_new_no_copy(gXm2vDevice, pointer, length, opts);
-    if (!b) b = xm2v_buffer_new(gXm2vDevice, length, opts, pointer);
-    return b ? [[XcmBuffer alloc] initWithHandle:b device:self options:opts] : nil;
+    // Match real macOS Metal: NULL pointer or 0 length returns nil without invoking deallocator.
+    if (!gXm2vDevice || !pointer || length == 0) return nil;
+    void *ctx = deallocator ? (__bridge_retained void *)[deallocator copy] : nullptr;
+    Xm2vBuffer *b = xm2v_buffer_new_no_copy_dealloc(gXm2vDevice, pointer, length, opts,
+                                                    ctx ? xcmBufferDeallocCallback : nullptr, ctx);
+    if (!b) {
+        if (ctx) (void)(__bridge_transfer id)ctx;
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: newBufferWithBytesNoCopy failed (ptr=%p len=%lu opts=0x%lx), falling back to copy: %{public}s",
+                     pointer, (unsigned long)length, (unsigned long)opts, xm2v_last_error() ?: "?");
+        b = xm2v_buffer_new(gXm2vDevice, length, opts, pointer);
+        if (!b) return nil;
+        XcmBuffer *buf = [[XcmBuffer alloc] initWithHandle:b device:self options:opts];
+        if (buf && deallocator) {
+            buf->_fallbackDeallocator = [deallocator copy];
+            buf->_fallbackPtr = pointer;
+        }
+        return buf;
+    }
+    return [[XcmBuffer alloc] initWithHandle:b device:self options:opts];
 }
 static id xcmDev_newTexture(id self, SEL, MTLTextureDescriptor *desc) {
     if (!gXm2vDevice || !desc) return nil;
@@ -1862,6 +2350,22 @@ static id xcmDev_newTextureIOSurfaceSlice(id self, SEL, MTLTextureDescriptor *de
     (void)slice;
     return xcmDev_newTextureIOSurface(self, nullptr, desc, surface, plane);
 }
+static id xcmDev_newLibraryFromNSData(id self, NSData *nsdata, const char *origin, NSError **error) {
+    if (!gXm2vDevice || !nsdata || nsdata.length == 0) {
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: newLibrary empty (origin=%{public}s data=%p len=%lu)",
+                     origin ?: "?", (__bridge void *)nsdata, (unsigned long)nsdata.length);
+        if (error) *error = xcmError(MTLLibraryErrorDomain, MTLLibraryErrorInternal, "empty library data");
+        return nil;
+    }
+    Xm2vLibrary *lib = xm2v_library_new_with_data(gXm2vDevice, nsdata.bytes, nsdata.length);
+    if (!lib) {
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: xm2v_library_new_with_data failed (origin=%{public}s len=%lu): %{public}s",
+                     origin ?: "?", (unsigned long)nsdata.length, xm2v_last_error() ?: "?");
+        if (error) *error = xcmError(MTLLibraryErrorDomain, MTLLibraryErrorCompileFailure, "Library load failed");
+        return nil;
+    }
+    return [[XcmLibrary alloc] initWithHandle:lib device:self data:nsdata];
+}
 static id xcmDev_newLibraryWithData(id self, SEL, dispatch_data_t data, NSError **error) {
     if (!gXm2vDevice || !data) {
         if (error) *error = xcmError(MTLLibraryErrorDomain, MTLLibraryErrorInternal, "Null library data");
@@ -1870,20 +2374,39 @@ static id xcmDev_newLibraryWithData(id self, SEL, dispatch_data_t data, NSError 
     const void *buf = nullptr;
     size_t len = 0;
     dispatch_data_t contig = dispatch_data_create_map(data, &buf, &len);
-    NSData *nsCopy = (buf && len) ? [NSData dataWithBytes:buf length:len] : nil;
-    Xm2vLibrary *lib = xm2v_library_new_with_data(gXm2vDevice, buf, len);
-    (void)contig;
-    if (!lib) {
-        if (error) *error = xcmError(MTLLibraryErrorDomain, MTLLibraryErrorCompileFailure, "Library load failed");
-        return nil;
+    NSData *nsdata = nil;
+    if (contig && buf && len > 0) {
+        // dispatch_data_t is toll-free bridged to NSData; avoid copying 187 MB default.metallib into dirty heap.
+        nsdata = (NSData *)contig;
+    } else {
+        size_t total = dispatch_data_get_size(data);
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: newLibraryWithData map returned empty (data=%p cls=%{public}s total=%zu buf=%p len=%zu)",
+                     (__bridge void *)data, object_getClassName((id)data), total, buf, len);
+        if (total > 0) {
+            NSMutableData *flat = [NSMutableData dataWithCapacity:total];
+            if (flat) {
+                dispatch_data_apply(data, ^bool(dispatch_data_t, size_t, const void *ptr, size_t sz) {
+                    [flat appendBytes:ptr length:sz];
+                    return true;
+                });
+                nsdata = flat;
+            }
+        }
     }
-    return [[XcmLibrary alloc] initWithHandle:lib device:self data:nsCopy];
+    return xcmDev_newLibraryFromNSData(self, nsdata, "dispatch_data", error);
 }
 static id xcmDev_newLibraryWithURL(id self, SEL, NSURL *url, NSError **error) {
-    NSData *nsdata = [NSData dataWithContentsOfURL:url options:0 error:error];
-    if (!nsdata) return nil;
-    dispatch_data_t d = dispatch_data_create(nsdata.bytes, nsdata.length, nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-    return xcmDev_newLibraryWithData(self, nullptr, d, error);
+    if (!url) {
+        if (error) *error = xcmError(MTLLibraryErrorDomain, MTLLibraryErrorFileNotFound, "Nil library URL");
+        return nil;
+    }
+    NSData *nsdata = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:error];
+    if (!nsdata) {
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: newLibraryWithURL read failed (url=%{public}s): %{public}s",
+                     url.path.UTF8String ?: "?", (error && *error) ? (*error).localizedDescription.UTF8String : "?");
+        return nil;
+    }
+    return xcmDev_newLibraryFromNSData(self, nsdata, url.path.UTF8String ?: "url", error);
 }
 static id xcmDev_newLibraryWithFile(id self, SEL, NSString *filepath, NSError **error) {
     return xcmDev_newLibraryWithURL(self, nullptr, [NSURL fileURLWithPath:filepath], error);
@@ -1964,8 +2487,7 @@ static id xcmDev_newLibraryWithSource(id self, SEL, NSString *source, MTLCompile
                                             userInfo:@{NSLocalizedDescriptionKey: failure ?: @"Metal source compilation failed"}];
         return nil;
     }
-    dispatch_data_t data = dispatch_data_create(metallib.bytes, metallib.length, nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-    id<MTLLibrary> lib = xcmDev_newLibraryWithData(self, nullptr, data, error);
+    id<MTLLibrary> lib = xcmDev_newLibraryFromNSData(self, metallib, "source", error);
     if (lib && warnings.length && error)
         *error = [NSError errorWithDomain:MTLLibraryErrorDomain code:MTLLibraryErrorCompileWarning
                                  userInfo:@{NSLocalizedDescriptionKey: warnings}];
@@ -2024,8 +2546,7 @@ static id xcmDev_newLibraryWithStitched(id self, SEL, MTLStitchedLibraryDescript
                                             userInfo:@{NSLocalizedDescriptionKey: failure ?: @"Stitched library compilation failed"}];
         return nil;
     }
-    dispatch_data_t data = dispatch_data_create(metallib.bytes, metallib.length, nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-    return xcmDev_newLibraryWithData(self, nullptr, data, error);
+    return xcmDev_newLibraryFromNSData(self, metallib, "stitched", error);
 }
 static id xcmDev_newLibraryWithStitchedArchive(id self, SEL, MTLStitchedLibraryDescriptor *d, id, NSError **error) {
     return xcmDev_newLibraryWithStitched(self, nullptr, d, error);
@@ -2250,11 +2771,16 @@ static id xcmDev_newRenderPSO(id self, SEL, MTLRenderPipelineDescriptor *desc, N
         break;
     }
     if (xcmTraceOn() || !pso) {
-        fprintf(stderr, "XCM newRenderPSO(v=%s,f=%s, vl=%zu+%zu, fl=%zu+%zu, fLinkedObj=%p) -> %p err=%s\n",
+        const auto &c0 = rd.color_attachments[0];
+        fprintf(stderr, "XCM newRenderPSO(v=%s,f=%s, fmt0=%llu blend=%d[op=%llu/%llu rgb=%llu,%llu a=%llu,%llu] mask=0x%llx, vl=%zu+%zu, fl=%zu+%zu) -> %p err=%s\n",
                 desc.vertexFunction.name.UTF8String ?: "?",
                 desc.fragmentFunction.name.UTF8String ?: "-",
+                (unsigned long long)c0.pixel_format, (int)c0.blending_enabled,
+                (unsigned long long)c0.rgb_blend_op, (unsigned long long)c0.alpha_blend_op,
+                (unsigned long long)c0.src_rgb_blend, (unsigned long long)c0.dst_rgb_blend,
+                (unsigned long long)c0.src_alpha_blend, (unsigned long long)c0.dst_alpha_blend,
+                (unsigned long long)c0.write_mask,
                 vPub.size(), vPriv.size(), fPub.size(), fPriv.size(),
-                (__bridge void *)desc.fragmentLinkedFunctions,
                 (void *)pso, pso ? "ok" : xm2v_last_error());
         if (!pso && !vattrs.empty()) {
             fprintf(stderr, "  vattrs(%zu):", vattrs.size());
@@ -2280,7 +2806,14 @@ static id xcmDev_newRenderPSO(id self, SEL, MTLRenderPipelineDescriptor *desc, N
         if (error) *error = xcmError(MTLLibraryErrorDomain, MTLLibraryErrorCompileFailure, "Render PSO failed");
         return nil;
     }
-    return [[XcmRenderPipeline alloc] initWithHandle:pso device:self];
+    XcmRenderPipeline *rp = [[XcmRenderPipeline alloc] initWithHandle:pso device:self];
+    if (rp) {
+        rp->_vName = [desc.vertexFunction.name copy];
+        rp->_fName = [desc.fragmentFunction.name copy];
+        rp->_blendEnabled = rd.color_attachments[0].blending_enabled ? YES : NO;
+        rp->_writeMask = rd.color_attachments[0].write_mask;
+    }
+    return rp;
 }
 static id xcmDev_newRenderPSOOpts(id self, SEL, MTLRenderPipelineDescriptor *desc, MTLPipelineOption, MTLRenderPipelineReflection **refl, NSError **error) {
     if (refl) *refl = nil;
@@ -2328,6 +2861,22 @@ static id xcmDev_newEvent(id self, SEL) {
     Xm2vEvent *ev = xm2v_event_new(gXm2vDevice);
     return ev ? [[XcmEvent alloc] initWithHandle:ev device:self] : nil;
 }
+static id xcmDev_newSharedEvent(id self, SEL) {
+    (void)self;
+    if (!gXm2vDevice) return nil;
+    Xm2vSharedEvent *ev = xm2v_shared_event_new(gXm2vDevice);
+    return ev ? [[XcmSharedEvent alloc] initWithHandle:ev] : nil;
+}
+static id xcmDev_newSharedEventOpts(id self, SEL, NSUInteger options) {
+    (void)options;
+    return xcmDev_newSharedEvent(self, nullptr);
+}
+static id xcmDev_newSharedEventWithHandle(id self, SEL, MTLSharedEventHandle *handle) {
+    (void)self;
+    if (!gXm2vDevice || !handle || ![(id)handle isKindOfClass:[XcmSharedEventHandle class]]) return nil;
+    Xm2vSharedEvent *ev = xm2v_shared_event_new_with_handle(gXm2vDevice, ((XcmSharedEventHandle *)handle)->_handle);
+    return ev ? [[XcmSharedEvent alloc] initWithHandle:ev] : nil;
+}
 static id xcmDev_newFence(id self, SEL) {
     if (!gXm2vDevice) return nil;
     Xm2vFence *f = xm2v_fence_new(gXm2vDevice);
@@ -2372,6 +2921,54 @@ static id xcmDev_targetDeviceArchitecture(id, SEL) {
 }
 
 static MTLArgumentBuffersTier xcmDev_argBufTier(id, SEL) { return MTLArgumentBuffersTier2; }
+static BOOL xcmDev_no(id, SEL) { return NO; }
+static void xcmDev_noop(id, SEL) {}
+static void xcmDev_noopBool(id, SEL, BOOL) {}
+static void xcmDev_noopReserve(id, SEL, NSUInteger, NSUInteger *, NSUInteger) {}
+static NSUInteger xcmDev_zeroU(id, SEL) { return 0; }
+static NSUInteger xcmDev_zeroU1(id, SEL, NSUInteger) { return 0; }
+static NSUInteger xcmDev_singleFPConfig(id, SEL) { return 0x54; }
+static NSUInteger xcmDev_halfFPConfig(id, SEL) { return 0xe; }
+static NSUInteger xcmDev_maxViewportCount(id, SEL) { return 16; }
+static NSUInteger xcmDev_maxArgBufSamplers(id, SEL) { return 16; }
+static MTLSize xcmDev_sparseTileSize(id, SEL, MTLTextureType, MTLPixelFormat, NSUInteger) { return MTLSizeMake(0, 0, 0); }
+static MTLSize xcmDev_sparseTileSizePage(id, SEL, MTLTextureType, MTLPixelFormat, NSUInteger, NSInteger) { return MTLSizeMake(0, 0, 0); }
+static MTLSize xcmDev_tileSizeSparse(id, SEL, NSInteger, MTLTextureType, MTLPixelFormat, NSUInteger) { return MTLSizeMake(0, 0, 0); }
+static id xcmDev_nil1(id, SEL, id) { return nil; }
+static id xcmDev_nilPtr1(id, SEL, void *) { return nil; }
+static id xcmDev_nil2(id, SEL, id, BOOL) { return nil; }
+static id xcmDev_nilResGrp(id, SEL, const id *, NSUInteger) { return nil; }
+static id xcmDev_nilICB(id, SEL, id, NSUInteger, MTLResourceOptions) { return nil; }
+static id xcmDev_nilTexNoCopy(id, SEL, void *, NSUInteger, id, id) { return nil; }
+static BOOL xcmDev_noMapSample(id, SEL, void *, NSUInteger, NSUInteger) { return NO; }
+static id xcmDev_newTilePSO(id, SEL, id, NSError **error) {
+    if (error) *error = xcmError(MTLLibraryErrorDomain, MTLLibraryErrorUnsupported, "Tile render pipelines not supported on CPU device");
+    return nil;
+}
+static void xcmDev_newTilePSOAsync(id self, SEL, id desc, void (^handler)(id, NSError *)) {
+    NSError *err = nil;
+    id pso = xcmDev_newTilePSO(self, nullptr, desc, &err);
+    if (handler) handler(pso, err);
+}
+static id xcmDev_newBufferWithDescriptor(id self, SEL, id desc) NS_RETURNS_RETAINED;
+static id xcmDev_newBufferWithDescriptor(id self, SEL, id desc) {
+    if (!gXm2vDevice || !desc) return nil;
+    NSUInteger len = [desc respondsToSelector:@selector(length)] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(desc, @selector(length)) : 0;
+    if (len == 0) return nil;
+    MTLResourceOptions opts = [desc respondsToSelector:@selector(resourceOptions)]
+        ? ((MTLResourceOptions (*)(id, SEL))objc_msgSend)(desc, @selector(resourceOptions)) : MTLResourceStorageModeShared;
+    void *contents = [desc respondsToSelector:@selector(contents)] ? ((void *(*)(id, SEL))objc_msgSend)(desc, @selector(contents)) : nullptr;
+    BOOL noCopy = [desc respondsToSelector:@selector(noCopy)] ? ((BOOL (*)(id, SEL))objc_msgSend)(desc, @selector(noCopy)) : NO;
+    if (contents && noCopy) {
+        typedef void (^XcmBufDealloc)(void *, NSUInteger);
+        XcmBufDealloc dealloc = nil;
+        if ([desc respondsToSelector:@selector(deallocator)])
+            dealloc = ((XcmBufDealloc (*)(id, SEL))objc_msgSend)(desc, @selector(deallocator));
+        return xcmDev_newBufferNoCopy(self, nullptr, contents, len, opts, dealloc);
+    }
+    if (contents) return xcmDev_newBufferBytes(self, nullptr, contents, len, opts);
+    return xcmDev_newBufferLen(self, nullptr, len, opts);
+}
 
 static Class createBackendDeviceClass(void) {
     static Class cls = nil;
@@ -2401,6 +2998,8 @@ static Class createBackendDeviceClass(void) {
             {"maxTextureDepth3D", (IMP)xcmDev_maxTex3D, "Q16@0:8"},
             {"maxTextureLayers", (IMP)xcmDev_maxTexLayers, "Q16@0:8"},
             {"maxColorAttachments", (IMP)xcmDev_maxColorAtt, "Q16@0:8"},
+            {"maxViewportCount", (IMP)xcmDev_maxViewportCount, "Q16@0:8"},
+            {"maxArgumentBufferSamplerCount", (IMP)xcmDev_maxArgBufSamplers, "Q16@0:8"},
             {"maxThreadgroupMemoryLength", (IMP)xcmDev_maxTGMem, "Q16@0:8"},
             {"minimumLinearTextureAlignmentForPixelFormat:", (IMP)xcmDev_minLinearAlign, "Q24@0:8Q16"},
             {"minimumTextureBufferAlignmentForPixelFormat:", (IMP)xcmDev_minTileAlign, "Q24@0:8Q16"},
@@ -2416,9 +3015,42 @@ static Class createBackendDeviceClass(void) {
             {"supportsLinearTextureFromSharedBuffer", (IMP)xcmDev_yes, "B16@0:8"},
             {"supportsTextureSwizzle", (IMP)xcmDev_yes, "B16@0:8"},
             {"supportsNonPrivateDepthStencilTextures", (IMP)xcmDev_yes, "B16@0:8"},
+            {"supportsUnalignedVertexFetch", (IMP)xcmDev_yes, "B16@0:8"},
+            {"supportsBaseVertexInstanceDrawing", (IMP)xcmDev_yes, "B16@0:8"},
+            {"supportsDepthClipMode", (IMP)xcmDev_yes, "B16@0:8"},
+            {"supportsTextureCubeArray", (IMP)xcmDev_yes, "B16@0:8"},
+            {"supportsNonUniformThreadgroupSize", (IMP)xcmDev_yes, "B16@0:8"},
+            {"supportsProgrammableBlending", (IMP)xcmDev_yes, "B16@0:8"},
+            {"isFramebufferReadSupported", (IMP)xcmDev_yes, "B16@0:8"},
+            {"isDepth24Stencil8PixelFormatSupported", (IMP)xcmDev_no, "B16@0:8"},
+            {"sparseTileSizeWithTextureType:pixelFormat:sampleCount:", (IMP)xcmDev_sparseTileSize, "{?=QQQ}40@0:8Q16Q24Q32"},
+            {"sparseTileSizeWithTextureType:pixelFormat:sampleCount:sparsePageSize:", (IMP)xcmDev_sparseTileSizePage, "{?=QQQ}48@0:8Q16Q24Q32q40"},
+            {"tileSizeWithSparsePageSize:textureType:pixelFormat:sampleCount:", (IMP)xcmDev_tileSizeSparse, "{?=QQQ}48@0:8q16Q24Q32Q40"},
             {"supportsTextureSampleCount:", (IMP)xcmDev_supportsSampleCount, "B24@0:8Q16"},
+            {"supportsSampleCount:", (IMP)xcmDev_supportsSampleCount, "B24@0:8Q16"},
             {"supportsFeatureSet:", (IMP)xcmDev_supportsFeatureSet, "B24@0:8Q16"},
             {"supportsFamily:", (IMP)xcmDev_supportsFamily, "B24@0:8q16"},
+            {"singleFPConfig", (IMP)xcmDev_singleFPConfig, "Q16@0:8"},
+            {"doubleFPConfig", (IMP)xcmDev_zeroU, "Q16@0:8"},
+            {"halfFPConfig", (IMP)xcmDev_halfFPConfig, "Q16@0:8"},
+            {"metalAssertionsEnabled", (IMP)xcmDev_no, "B16@0:8"},
+            {"setMetalAssertionsEnabled:", (IMP)xcmDev_noopBool, "v20@0:8B16"},
+            {"copyIOSurfaceSharedTextureProperties:", (IMP)xcmDev_nil1, "@24@0:8@16"},
+            {"mapShaderSampleBufferWithBuffer:capacity:size:", (IMP)xcmDev_noMapSample, "B40@0:8^{?=III}16Q24Q32"},
+            {"unmapShaderSampleBuffer", (IMP)xcmDev_noop, "v16@0:8"},
+            {"newBufferWithDescriptor:", (IMP)xcmDev_newBufferWithDescriptor, "@24@0:8@16"},
+            {"newBufferWithIOSurface:", (IMP)xcmDev_nilPtr1, "@24@0:8^{__IOSurface=}16"},
+            {"newIndirectCommandBufferWithDescriptor:maxCount:options:", (IMP)xcmDev_nilICB, "@40@0:8@16Q24Q32"},
+            {"newIndirectComputeCommandEncoderWithBuffer:", (IMP)xcmDev_nil1, "@24@0:8@16"},
+            {"newIndirectRenderCommandEncoderWithBuffer:", (IMP)xcmDev_nil1, "@24@0:8@16"},
+            {"newRenderPipelineStateWithTileDescriptor:error:", (IMP)xcmDev_newTilePSO, "@32@0:8@16^@24"},
+            {"newRenderPipelineStateWithTileDescriptor:completionHandler:", (IMP)xcmDev_newTilePSOAsync, "v32@0:8@16@?24"},
+            {"newResourceGroupFromResources:count:", (IMP)xcmDev_nilResGrp, "@32@0:8r^@16Q24"},
+            {"newTextureLayoutWithDescriptor:isHeapOrBufferBacked:", (IMP)xcmDev_nil2, "@28@0:8@16B24"},
+            {"newTextureWithBytesNoCopy:length:descriptor:deallocator:", (IMP)xcmDev_nilTexNoCopy, "@48@0:8^v16Q24@32@?40"},
+            {"newVisibleFunctionTableWithDescriptor:", (IMP)xcmDev_nil1, "@24@0:8@16"},
+            {"reserveResourceIndicesForResourceType:indices:indexCount:", (IMP)xcmDev_noopReserve, "v40@0:8Q16^Q24Q32"},
+            {"resourcePatchingTypeForResourceType:", (IMP)xcmDev_zeroU1, "Q24@0:8Q16"},
             {"newCommandQueue", (IMP)xcmDev_newCommandQueue, "@16@0:8"},
             {"newCommandQueueWithMaxCommandBufferCount:", (IMP)xcmDev_newCommandQueueMax, "@24@0:8Q16"},
             {"newBufferWithLength:options:", (IMP)xcmDev_newBufferLen, "@32@0:8Q16Q24"},
@@ -2446,6 +3078,9 @@ static Class createBackendDeviceClass(void) {
             {"newSamplerStateWithDescriptor:", (IMP)xcmDev_newSampler, "@24@0:8@16"},
             {"newDepthStencilStateWithDescriptor:", (IMP)xcmDev_newDepthStencil, "@24@0:8@16"},
             {"newEvent", (IMP)xcmDev_newEvent, "@16@0:8"},
+            {"newSharedEvent", (IMP)xcmDev_newSharedEvent, "@16@0:8"},
+            {"newSharedEventWithOptions:", (IMP)xcmDev_newSharedEventOpts, "@24@0:8Q16"},
+            {"newSharedEventWithHandle:", (IMP)xcmDev_newSharedEventWithHandle, "@24@0:8@16"},
             {"newFence", (IMP)xcmDev_newFence, "@16@0:8"},
             {"newHeapWithDescriptor:", (IMP)xcmDev_newHeap, "@24@0:8@16"},
             {"heapTextureSizeAndAlignWithDescriptor:", (IMP)xcmDev_heapTexSizeAndAlign, "{?=QQ}24@0:8@16"},
@@ -2511,7 +3146,12 @@ static void fillBaseLimits(id device) {
         {"maxInterpolants", 32},
         {"maxViewports", 16},
         {"maxCustomSamplePositions", 0},
-        {"linearTextureAlignmentBytes", 256},
+        {"linearTextureAlignmentBytes", 64},
+        {"linearTextureArrayAlignmentBytes", 16},
+        {"linearTextureArrayAlignmentSlice", 128},
+        {"minConstantBufferAlignmentBytes", 4},
+        {"minBufferNoCopyAlignmentBytes", 4096},
+        {"maxComputeThreadgroupMemoryAlignmentBytes", 16},
     };
     for (const auto &lv : kLimits) {
         SEL s = sel_registerName(lv.sel);
@@ -2553,7 +3193,10 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
     if (gSingletonDevice) return gSingletonDevice;
     gXm2vDevice = xm2v_device_open(loader, icd_json, cache_dir);
     if (!gXm2vDevice) {
-        fprintf(stderr, "XnuCpuMetal: xm2v_device_open failed: %s\n", xm2v_last_error());
+        const char *err = xm2v_last_error();
+        fprintf(stderr, "XnuCpuMetal: xm2v_device_open failed (cache=%s): %s\n", cache_dir ?: "(null)", err ?: "?");
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: xm2v_device_open failed (prog=%{public}s uid=%u cache=%{public}s): %{public}s",
+                     getprogname(), (unsigned)getuid(), cache_dir ?: "(null)", err ?: "?");
         return nil;
     }
     if (port) {
@@ -2605,11 +3248,22 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
     const char *envIcd = getenv("XNU_CPU_METAL_ICD");
     if (envIcd && envIcd[0]) icdJson = envIcd;
 
+    // IOSurfaces read/written by this CPU Metal device must be linear uncompressed rows (WindowServer/QuartzCore).
+    // Use in-memory NSRegistrationDomain (never persisted to any app's plist on disk).
+    [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"CAEnableIOSurfaceCompression": @NO}];
+
     char cacheDir[512] = {};
     auto tryCacheDir = [&](const char *path) -> bool {
         if (!path || !path[0]) return false;
         mkdir(path, 0700);
-        if (access(path, W_OK | X_OK) == 0) {
+        // Verify actual file-creation permission (matches metal2vulkan ShaderCache write probe;
+        // prevents WindowServer uid=88 from failing on root-owned or sandboxed directories).
+        char probe[560];
+        snprintf(probe, sizeof(probe), "%s/.xcm_probe_%d", path, (int)getpid());
+        int fd = open(probe, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        if (fd >= 0) {
+            close(fd);
+            unlink(probe);
             strlcpy(cacheDir, path, sizeof(cacheDir));
             return true;
         }
@@ -2622,6 +3276,17 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
         if (confstr(_CS_DARWIN_USER_CACHE_DIR, darwinCache, sizeof(darwinCache) - 32) > 0) {
             strlcat(darwinCache, "xnu-cpu-metal-m2v", sizeof(darwinCache));
             ok = tryCacheDir(darwinCache);
+        }
+        if (!ok && confstr(_CS_DARWIN_USER_TEMP_DIR, darwinCache, sizeof(darwinCache) - 32) > 0) {
+            strlcat(darwinCache, "xnu-cpu-metal-m2v", sizeof(darwinCache));
+            ok = tryCacheDir(darwinCache);
+        }
+        if (!ok) {
+            NSString *tmp = NSTemporaryDirectory();
+            if (tmp.length > 0) {
+                snprintf(darwinCache, sizeof(darwinCache), "%s/xnu-cpu-metal-%u", tmp.fileSystemRepresentation, (unsigned)getuid());
+                ok = tryCacheDir(darwinCache);
+            }
         }
         if (!ok) {
             char fallback[128];

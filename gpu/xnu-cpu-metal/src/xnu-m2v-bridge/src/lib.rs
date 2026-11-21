@@ -16,17 +16,18 @@ use metal2vulkan::pipeline::{
 };
 use metal2vulkan_runtime::{
     ArgumentEncoder, BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer,
-    CommandBufferStatus, CommandQueue, ComputeCommandEncoder, ComputePipelineState,
+    CommandBufferStatus, CommandQueue, ComputeCommandEncoder, ComputePipelineState, Deallocator,
     DepthStencilState, Device, DeviceOptions, Event, EventRef, Fence, Function,
     FunctionDescriptor, HostMemory, Library, LoadAction, Origin, PipelineOptions, Region,
     RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, ResourceRef,
-    SamplerState, ScissorRect, ShaderCacheOptions, Size, StoreAction, Texture, TextureDescriptor,
-    Viewport,
+    SamplerState, ScissorRect, ShaderCacheOptions, SharedEvent, SharedEventHandle,
+    SharedEventListener, Size, StoreAction, Texture, TextureDescriptor, Viewport,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
 use std::path::PathBuf;
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 thread_local! {
@@ -409,6 +410,28 @@ pub extern "C" fn xm2v_buffer_new(
     })
 }
 
+pub type Xm2vDeallocatorFn = extern "C" fn(*mut c_void, u64, *mut c_void);
+pub type Xm2vSharedEventNotifyFn = extern "C" fn(*mut c_void, u64);
+
+fn build_texture_descriptor(d: &Xm2vTextureDesc) -> Result<TextureDescriptor, String> {
+    let pixel_format: PixelFormat = raw_enum(d.pixel_format, "PixelFormat")?;
+    let texture_type: TextureType = raw_enum(d.texture_type, "TextureType")?;
+    let mut td = TextureDescriptor::texture_2d(
+        pixel_format,
+        d.width.max(1),
+        d.height.max(1),
+        d.mipmap_level_count > 1,
+    );
+    td.texture_type = texture_type;
+    td.depth = d.depth.max(1);
+    td.mipmap_level_count = d.mipmap_level_count.max(1);
+    td.sample_count = d.sample_count.max(1);
+    td.array_length = d.array_length.max(1);
+    td.resource_options = raw_opts(d.resource_options)?;
+    td.usage = raw_enum::<TextureUsage>(d.usage, "TextureUsage")?;
+    Ok(td)
+}
+
 #[no_mangle]
 pub extern "C" fn xm2v_buffer_new_no_copy(
     dev: *mut Device,
@@ -416,14 +439,71 @@ pub extern "C" fn xm2v_buffer_new_no_copy(
     length: u64,
     resource_options: u64,
 ) -> *mut Buffer {
+    xm2v_buffer_new_no_copy_dealloc(dev, ptr, length, resource_options, None, std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_buffer_new_no_copy_dealloc(
+    dev: *mut Device,
+    ptr: *mut c_void,
+    length: u64,
+    resource_options: u64,
+    dealloc_fn: Option<Xm2vDeallocatorFn>,
+    dealloc_ctx: *mut c_void,
+) -> *mut Buffer {
     guard(std::ptr::null_mut(), || {
         let dev = get(dev)?;
         let opts = raw_opts(resource_options)?;
         let nn = NonNull::new(ptr.cast::<u8>()).ok_or_else(|| "null ptr".to_string())?;
         let hm = unsafe { HostMemory::new(nn) };
-        let buf = unsafe { dev.new_buffer_with_bytes_no_copy(hm, length, opts, None) }
+        let dealloc: Option<Deallocator> = dealloc_fn.map(|f| {
+            let ctx_addr = dealloc_ctx as usize;
+            Box::new(move |p: NonNull<u8>, len: u64| {
+                f(p.as_ptr().cast::<c_void>(), len, ctx_addr as *mut c_void);
+            }) as Deallocator
+        });
+        let buf = unsafe { dev.new_buffer_with_bytes_no_copy(hm, length, opts, dealloc) }
             .map_err(|e| format!("new_buffer_no_copy: {e:?}"))?;
         Ok(boxed(buf))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_buffer_new_texture(
+    buf: *mut Buffer,
+    desc: *const Xm2vTextureDesc,
+    offset: u64,
+    bytes_per_row: u64,
+) -> *mut Texture {
+    guard(std::ptr::null_mut(), || {
+        let buf = get(buf)?;
+        let td = build_texture_descriptor(get(desc)?)?;
+        let tex = buf
+            .new_texture(&td, offset, bytes_per_row)
+            .map_err(|e| format!("buffer.new_texture(off={offset}, bpr={bytes_per_row}): {e:?}"))?;
+        Ok(boxed(tex))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_buffer_new_linear_texture(
+    buf: *mut Buffer,
+    desc: *const Xm2vTextureDesc,
+    offset: u64,
+    bytes_per_row: u64,
+    bytes_per_image: u64,
+) -> *mut Texture {
+    guard(std::ptr::null_mut(), || {
+        let buf = get(buf)?;
+        let td = build_texture_descriptor(get(desc)?)?;
+        let tex = buf
+            .new_linear_texture(&td, offset, bytes_per_row, bytes_per_image)
+            .map_err(|e| {
+                format!(
+                    "buffer.new_linear_texture(off={offset}, bpr={bytes_per_row}, bpi={bytes_per_image}): {e:?}"
+                )
+            })?;
+        Ok(boxed(tex))
     })
 }
 
@@ -469,22 +549,7 @@ pub extern "C" fn xm2v_texture_new(
 ) -> *mut Texture {
     guard(std::ptr::null_mut(), || {
         let dev = get(dev)?;
-        let d = get(desc)?;
-        let pixel_format: PixelFormat = raw_enum(d.pixel_format, "PixelFormat")?;
-        let texture_type: TextureType = raw_enum(d.texture_type, "TextureType")?;
-        let mut td = TextureDescriptor::texture_2d(
-            pixel_format,
-            d.width.max(1),
-            d.height.max(1),
-            d.mipmap_level_count > 1,
-        );
-        td.texture_type = texture_type;
-        td.depth = d.depth.max(1);
-        td.mipmap_level_count = d.mipmap_level_count.max(1);
-        td.sample_count = d.sample_count.max(1);
-        td.array_length = d.array_length.max(1);
-        td.resource_options = raw_opts(d.resource_options)?;
-        td.usage = raw_enum::<TextureUsage>(d.usage, "TextureUsage")?;
+        let td = build_texture_descriptor(get(desc)?)?;
         let tex = dev
             .new_texture(&td)
             .map_err(|e| format!("new_texture: {e:?}"))?;
@@ -1361,6 +1426,33 @@ pub extern "C" fn xm2v_command_buffer_status(cb: *const CommandBuffer) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn xm2v_command_buffer_error(
+    cb: *const CommandBuffer,
+    out: *mut c_char,
+    size: usize,
+) -> usize {
+    guard(0, || {
+        let cb = get(cb)?;
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(err) = cb.error() {
+            parts.push(format!("{err:?}"));
+        }
+        if let Some(refusal) = cb.refusal() {
+            parts.push(format!("refusal={refusal:?}"));
+        }
+        if let Some(desc) = cb.error_description() {
+            if !desc.is_empty() {
+                parts.push(desc);
+            }
+        }
+        if parts.is_empty() {
+            return Ok(0);
+        }
+        Ok(copy_str(&parts.join(": "), out, size))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn xm2v_command_buffer_encode_signal_event(
     cb: *mut CommandBuffer,
     ev: *mut Event,
@@ -1375,6 +1467,20 @@ pub extern "C" fn xm2v_command_buffer_encode_signal_event(
 }
 
 #[no_mangle]
+pub extern "C" fn xm2v_command_buffer_encode_signal_event_scheduled(
+    cb: *mut CommandBuffer,
+    ev: *mut Event,
+    value: u64,
+) -> bool {
+    guard(false, || {
+        get(cb)?
+            .encode_signal_event(EventRef::Event(get(ev)?), value)
+            .map_err(|e| format!("encode_signal_event_scheduled: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn xm2v_command_buffer_encode_wait_event(
     cb: *mut CommandBuffer,
     ev: *mut Event,
@@ -1384,6 +1490,48 @@ pub extern "C" fn xm2v_command_buffer_encode_wait_event(
         get(cb)?
             .encode_wait_for_event(EventRef::Event(get(ev)?), value)
             .map_err(|e| format!("encode_wait_for_event: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_command_buffer_encode_signal_shared_event(
+    cb: *mut CommandBuffer,
+    ev: *mut SharedEvent,
+    value: u64,
+) -> bool {
+    guard(false, || {
+        get(cb)?
+            .encode_signal_event(EventRef::Shared(get(ev)?), value)
+            .map_err(|e| format!("encode_signal_shared_event: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_command_buffer_encode_signal_shared_event_scheduled(
+    cb: *mut CommandBuffer,
+    ev: *mut SharedEvent,
+    value: u64,
+) -> bool {
+    guard(false, || {
+        get(cb)?
+            .encode_signal_event_scheduled(get(ev)?, value)
+            .map_err(|e| format!("encode_signal_shared_event_scheduled: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_command_buffer_encode_wait_shared_event(
+    cb: *mut CommandBuffer,
+    ev: *mut SharedEvent,
+    value: u64,
+) -> bool {
+    guard(false, || {
+        get(cb)?
+            .encode_wait_for_event(EventRef::Shared(get(ev)?), value)
+            .map_err(|e| format!("encode_wait_shared_event: {e:?}"))?;
         Ok(true)
     })
 }
@@ -1555,6 +1703,32 @@ pub extern "C" fn xm2v_compute_encoder_dispatch_threads(
         get_mut(enc)?
             .dispatch_threads(Size::new(gx, gy, gz), Size::new(tx, ty, tz))
             .map_err(|e| format!("dispatch_threads: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_compute_encoder_update_fence(
+    enc: *mut ComputeCommandEncoder,
+    fence: *mut Fence,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .update_fence(get(fence)?)
+            .map_err(|e| format!("compute update_fence: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_compute_encoder_wait_fence(
+    enc: *mut ComputeCommandEncoder,
+    fence: *mut Fence,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .wait_for_fence(get(fence)?)
+            .map_err(|e| format!("compute wait_for_fence: {e:?}"))?;
         Ok(true)
     })
 }
@@ -1955,6 +2129,36 @@ pub extern "C" fn xm2v_render_encoder_draw_indexed_primitives(
 }
 
 #[no_mangle]
+pub extern "C" fn xm2v_render_encoder_update_fence(
+    enc: *mut RenderCommandEncoder,
+    fence: *mut Fence,
+    after_stages: u64,
+) -> bool {
+    guard(false, || {
+        let stages = raw_enum::<RenderStages>(after_stages, "RenderStages")?;
+        get_mut(enc)?
+            .update_fence(get(fence)?, stages)
+            .map_err(|e| format!("render update_fence: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_wait_fence(
+    enc: *mut RenderCommandEncoder,
+    fence: *mut Fence,
+    before_stages: u64,
+) -> bool {
+    guard(false, || {
+        let stages = raw_enum::<RenderStages>(before_stages, "RenderStages")?;
+        get_mut(enc)?
+            .wait_for_fence(get(fence)?, stages)
+            .map_err(|e| format!("render wait_for_fence: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn xm2v_render_encoder_end(enc: *mut RenderCommandEncoder) -> bool {
     guard(false, || {
         take_box(enc)?
@@ -2158,6 +2362,32 @@ pub extern "C" fn xm2v_blit_encoder_synchronize_texture(
 }
 
 #[no_mangle]
+pub extern "C" fn xm2v_blit_encoder_update_fence(
+    enc: *mut BlitCommandEncoder,
+    fence: *mut Fence,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .update_fence(get(fence)?)
+            .map_err(|e| format!("blit update_fence: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_blit_encoder_wait_fence(
+    enc: *mut BlitCommandEncoder,
+    fence: *mut Fence,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .wait_for_fence(get(fence)?)
+            .map_err(|e| format!("blit wait_for_fence: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn xm2v_blit_encoder_end(enc: *mut BlitCommandEncoder) -> bool {
     guard(false, || {
         take_box(enc)?
@@ -2168,6 +2398,8 @@ pub extern "C" fn xm2v_blit_encoder_end(enc: *mut BlitCommandEncoder) -> bool {
 }
 
 /* ---- Events & Fences ---- */
+
+static SHARED_EVENT_LISTENER: OnceLock<SharedEventListener> = OnceLock::new();
 
 #[no_mangle]
 pub extern "C" fn xm2v_event_new(dev: *mut Device) -> *mut Event {
@@ -2182,6 +2414,98 @@ pub extern "C" fn xm2v_event_new(dev: *mut Device) -> *mut Event {
 #[no_mangle]
 pub extern "C" fn xm2v_event_release(ev: *mut Event) {
     release(ev);
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_new(dev: *mut Device) -> *mut SharedEvent {
+    guard(std::ptr::null_mut(), || {
+        let ev = get(dev)?
+            .new_shared_event()
+            .map_err(|e| format!("new_shared_event: {e:?}"))?;
+        Ok(boxed(ev))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_new_with_handle(
+    dev: *mut Device,
+    handle: *const SharedEventHandle,
+) -> *mut SharedEvent {
+    guard(std::ptr::null_mut(), || {
+        let ev = get(dev)?
+            .new_shared_event_with_handle(get(handle)?)
+            .map_err(|e| format!("new_shared_event_with_handle: {e:?}"))?;
+        Ok(boxed(ev))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_release(ev: *mut SharedEvent) {
+    release(ev);
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_signaled_value(ev: *const SharedEvent) -> u64 {
+    guard(0, || Ok(get(ev)?.signaled_value()))
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_set_signaled_value(ev: *const SharedEvent, value: u64) {
+    let _ = guard((), || {
+        get(ev)?.set_signaled_value(value);
+        Ok(())
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_wait_until(
+    ev: *const SharedEvent,
+    value: u64,
+    timeout_ms: u64,
+) -> bool {
+    guard(false, || {
+        let dur = if timeout_ms == u64::MAX {
+            Duration::MAX
+        } else {
+            Duration::from_millis(timeout_ms)
+        };
+        Ok(get(ev)?.wait_until_signaled_value(value, dur))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_notify(
+    ev: *const SharedEvent,
+    value: u64,
+    cb: Option<Xm2vSharedEventNotifyFn>,
+    ctx: *mut c_void,
+) -> bool {
+    guard(false, || {
+        let ev = get(ev)?;
+        let cb = cb.ok_or_else(|| "null notify callback".to_string())?;
+        let listener = SHARED_EVENT_LISTENER.get_or_init(SharedEventListener::new);
+        let ctx_addr = ctx as usize;
+        ev.notify_listener(
+            listener,
+            value,
+            Box::new(move |_event, signaled| {
+                cb(ctx_addr as *mut c_void, signaled);
+            }),
+        );
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_new_handle(ev: *const SharedEvent) -> *mut SharedEventHandle {
+    guard(std::ptr::null_mut(), || {
+        Ok(boxed(get(ev)?.new_shared_event_handle()))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_shared_event_handle_release(h: *mut SharedEventHandle) {
+    release(h);
 }
 
 #[no_mangle]

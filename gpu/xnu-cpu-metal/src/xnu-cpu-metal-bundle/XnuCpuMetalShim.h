@@ -43,6 +43,7 @@ static Class referenceClass(Class cls) {
         {"XcmBlitEncoder", "IOGPUMetalBlitCommandEncoder"},
         {"XcmFence", "IOGPUMetalFence"},
         {"XcmEvent", "IOGPUMetalEvent"},
+        {"XcmSharedEvent", "IOGPUMetalSharedEvent"},
         {"XcmHeap", "IOGPUMetalHeap"},
         {"XcmLibrary", "_MTLLibrary"},
         {"XcmFunction", "_MTLFunction"},
@@ -165,6 +166,7 @@ static void install(id device, io_service_t port) {
         {"currentAllocatedSize", (IMP)zero, "Q16@0:8", false},
         {"gpuCoreCount", (IMP)gpuCoreCount, "Q16@0:8", false},
         {"featureProfile", (IMP)zero, "Q16@0:8", false},
+        {"compilerPropagatesThreadPriority:", (IMP)nothingWith, "v20@0:8B16", false},
     };
     Class cls = object_getClass(device);
     addMethods(cls, deviceMethods, sizeof deviceMethods / sizeof *deviceMethods);
@@ -176,6 +178,8 @@ static void install(id device, io_service_t port) {
         {"setGPUPriority:", (IMP)setGPUPriority, "B24@0:8Q16", false},
         {"setGPUPriority:offset:", (IMP)setGPUPriorityOffset, "B32@0:8Q16Q24", false},
         {"_setGPUPriority:backgroundPriority:", (IMP)setBothGPUPriorities, "B32@0:8Q16Q24", false},
+        {"setCompletionQueue:", (IMP)nothingWith, "v24@0:8@16", false},
+        {"setSubmissionQueue:", (IMP)nothingWith, "v24@0:8@16", false},
     };
     if (Class q = objc_getClass("XcmQueue"))
         addMethods(q, queueMethods, sizeof queueMethods / sizeof *queueMethods);
@@ -200,7 +204,7 @@ static void install(id device, io_service_t port) {
         {"XcmComputePipeline", "MTLComputePipelineState"},
         {"XcmRenderPipeline", "MTLRenderPipelineState"},
         {"XcmSampler", "MTLSamplerState"}, {"XcmDepthStencil", "MTLDepthStencilState"},
-        {"XcmEvent", "MTLEvent"}, {"XcmFence", "MTLFence"},
+        {"XcmEvent", "MTLEvent"}, {"XcmSharedEvent", "MTLEvent"}, {"XcmSharedEvent", "MTLSharedEvent"}, {"XcmFence", "MTLFence"},
         {"XcmHeap", "MTLHeap"},
         {"XcmQueue", "MTLCommandQueue"}, {"XcmCommandBuffer", "MTLCommandBuffer"},
         {"XcmComputeEncoder", "MTLComputeCommandEncoder"},
