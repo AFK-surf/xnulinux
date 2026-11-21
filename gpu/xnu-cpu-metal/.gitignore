@@ -1,6 +1,7 @@
 src/metal2vulkan/
 src/Vulkan-Loader/
 src/llvm-project/
+src/AdrenoMetal/
 src/mesa/
 build/
 dist/
