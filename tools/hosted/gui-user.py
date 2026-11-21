@@ -70,9 +70,28 @@ seen = {k: True for k in ['DidSeeCloudSetup', 'DidSeePrivacy', 'DidSeeSiriSetup'
         'DidSeeAppearanceSetup', 'DidSeeAccessibility', 'DidSeeActivationLock', 'DidSeeTermsOfAddress', 'DidSeeIntelligence',
         'DidSeeApplePaySetup', 'DidSeeAvatarSetup', 'DidSeeiCloudLoginForStorageServices', 'DidSeeSyncSetup',
         'DidSeeSyncSetup2', 'DidSeeTrueTonePrivacy', 'DidSeeWalletSetup', 'SkipFirstLoginOptimization']}
-seen.update({'LastSeenCloudProductVersion': '99.0', 'LastSeenBuddyBuildVersion': '99Z999',
-             'LastPreLoginTasksPerformedVersion': '99.0', 'LastPreLoginTasksPerformedBuild': '99Z999'})
+# Setup Assistant compares these with the running system: a version or build it has not seen yet (or none) starts
+# MiniBuddy at login (the upgrade panes), and loginwindow holds the Dock and Finder until it ends. They are the system's own,
+# from the System volume's SystemVersion.plist next to the template.
+sv = plistlib.load(open(os.path.join(os.path.dirname(template.rstrip('/')), 'CoreServices', 'SystemVersion.plist'), 'rb'))
+ver, build = sv['ProductVersion'], sv['ProductBuildVersion']
+seen.update({k: ver for k in ['LastSeenCloudProductVersion', 'LastSeenDiagnosticsProductVersion', 'LastSeenSiriProductVersion',
+             'LastSeenGlassTintUpsellProductVersion', 'LastSeenIntelligenceProductVersion', 'LastSeenSyncProductVersion',
+             'LastSeeniCloudStorageServicesProductVersion', 'LastSeenAgeRangeSelectionProductVersion',
+             'LastPreLoginTasksPerformedVersion', 'PreviousSystemVersion', 'InitialSetupProductVersion',
+             'LastLaunchedMiniBuddyForStorageServicesVersion']})
+seen.update({k: build for k in ['LastSeenBuddyBuildVersion', 'LastPreLoginTasksPerformedBuild', 'PreviousBuildVersion',
+             'InitialSetupBuildVersion']})
+seen.update({'MiniBuddyLaunchReason': 0, 'MiniBuddyShouldLaunchToResumeSetup': False, 'LastPrivacyBundleVersion': '2',
+             'selectedFDEEscrowType': 'DeclinedFDE', 'InitialAccountOnMac': False})
 dump(home + '/Library/Preferences/com.apple.SetupAssistant.plist', seen, 0o644)
+# The template's loginwindow preferences ask for MiniBuddy at the user's first login (MiniBuddyLaunch), as for an account
+# made by Setup Assistant; this user has been set up already.
+lwp = home + '/Library/Preferences/com.apple.loginwindow.plist'
+if os.path.exists(lwp):
+    ulw = plistlib.load(open(lwp, 'rb'))
+    ulw.pop('MiniBuddyLaunch', None)
+    dump(lwp, ulw, 0o644)
 subprocess.run(['chown', '-R', '%d:20' % uid, home], check=True)
 os.chmod(home, 0o755)
 print('gui-user: %s (%d), admin, automatic login, home from the template' % (name, uid))
