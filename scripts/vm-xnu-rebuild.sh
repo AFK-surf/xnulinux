@@ -2,7 +2,7 @@
 # Inside the VM: apply xnulinux's XNU patches to the k27 tree, rebuild the kernel incrementally, and (when the macOS 27.2
 # kernelcache is there) relink the kernel collection with Apple's kexts. The kernel's segment slots inside the collection
 # (k27/segaddrs.sh) follow the kernel's size: when kc27-layout.py moves them, the kernel is linked again.
-set -e
+set -e -o pipefail	# a failed kernel build stops here: never repackage the previous kernel
 cd ~/w/dvm
 export PATH=$PATH:/usr/lib/llvm-21/bin
 T=out/k27/xnu
