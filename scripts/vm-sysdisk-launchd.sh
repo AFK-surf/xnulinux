@@ -86,6 +86,14 @@ GP
 </dict>
 </plist>
 PL
+  # en0 (XNU's link to the host's xnu0): address, route and DNS at boot (tools/hosted/net-up.sh)
+  sudo mkdir -p /mnt/sys/Library/xnulinux
+  sudo install -m 755 ~/w/poc/tools/hosted/net-up.sh /mnt/sys/Library/xnulinux/net-up.sh
+  sudo python3 - <<'PY'
+import plistlib
+plistlib.dump({"Label": "xnulinux.network", "RunAtLoad": True, "ProgramArguments": ["/bin/sh", "/Library/xnulinux/net-up.sh"]},
+  open("/mnt/sys/System/Library/LaunchDaemons/xnulinux.network.plist", "wb"))
+PY
   # xcodebuild test needs the per-user agent com.apple.testmanagerd, which macOS limits to Aqua/LoginWindow sessions;
   # the headless system has none: a copy limited to Background sessions, bootstrapped into root's user domain at boot.
   if [ -e /mnt/sys/System/Library/LaunchAgents/com.apple.testmanagerd.plist ]; then
