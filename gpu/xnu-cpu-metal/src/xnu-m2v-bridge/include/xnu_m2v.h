@@ -25,6 +25,7 @@ typedef struct Xm2vRenderEncoder Xm2vRenderEncoder;
 typedef struct Xm2vBlitEncoder Xm2vBlitEncoder;
 typedef struct Xm2vEvent Xm2vEvent;
 typedef struct Xm2vFence Xm2vFence;
+typedef struct Xm2vArgumentEncoder Xm2vArgumentEncoder;
 
 typedef struct Xm2vTextureDesc {
     uint64_t texture_type;
@@ -167,6 +168,7 @@ Xm2vTexture *xm2v_texture_new_view(Xm2vTexture *tex, uint64_t pixel_format, uint
                                    uint64_t level_start, uint64_t level_len,
                                    uint64_t slice_start, uint64_t slice_len);
 void xm2v_texture_release(Xm2vTexture *tex);
+uint64_t xm2v_texture_gpu_resource_id(const Xm2vTexture *tex);
 bool xm2v_texture_replace_region(const Xm2vTexture *tex,
                                  uint64_t x, uint64_t y, uint64_t z,
                                  uint64_t w, uint64_t h, uint64_t d,
@@ -205,6 +207,21 @@ Xm2vFunction *xm2v_library_new_function_with_descriptor(Xm2vLibrary *lib, const 
                                                         uint64_t options);
 void xm2v_function_release(Xm2vFunction *fn);
 uint32_t xm2v_function_type(const Xm2vFunction *fn);
+Xm2vArgumentEncoder *xm2v_function_new_argument_encoder(Xm2vFunction *fn, uint32_t buffer_index);
+
+/* Argument Encoder */
+void xm2v_argument_encoder_release(Xm2vArgumentEncoder *enc);
+uint64_t xm2v_argument_encoder_encoded_length(const Xm2vArgumentEncoder *enc);
+uint64_t xm2v_argument_encoder_alignment(const Xm2vArgumentEncoder *enc);
+bool xm2v_argument_encoder_set_argument_buffer(Xm2vArgumentEncoder *enc, Xm2vBuffer *buf, uint64_t offset);
+bool xm2v_argument_encoder_set_argument_buffer_array_element(Xm2vArgumentEncoder *enc, Xm2vBuffer *buf, uint64_t start_offset, uint64_t array_element);
+bool xm2v_argument_encoder_set_buffer(const Xm2vArgumentEncoder *enc, Xm2vBuffer *buf, uint64_t offset, uint32_t index);
+bool xm2v_argument_encoder_set_texture(const Xm2vArgumentEncoder *enc, Xm2vTexture *tex, uint32_t index);
+bool xm2v_argument_encoder_set_sampler(const Xm2vArgumentEncoder *enc, Xm2vSampler *samp, uint32_t index);
+bool xm2v_argument_encoder_set_compute_pipeline(const Xm2vArgumentEncoder *enc, Xm2vComputePipeline *pso, uint32_t index);
+bool xm2v_argument_encoder_set_render_pipeline(const Xm2vArgumentEncoder *enc, Xm2vRenderPipeline *pso, uint32_t index);
+void *xm2v_argument_encoder_constant_data(const Xm2vArgumentEncoder *enc, uint32_t index);
+Xm2vArgumentEncoder *xm2v_argument_encoder_new_nested(const Xm2vArgumentEncoder *enc, uint32_t index);
 
 /* Pipelines & States */
 Xm2vComputePipeline *xm2v_compute_pipeline_new(Xm2vDevice *dev, Xm2vFunction *fn);
@@ -221,6 +238,7 @@ void xm2v_render_pipeline_release(Xm2vRenderPipeline *pso);
 
 Xm2vSampler *xm2v_sampler_new(Xm2vDevice *dev, const Xm2vSamplerDesc *desc);
 void xm2v_sampler_release(Xm2vSampler *s);
+uint64_t xm2v_sampler_gpu_resource_id(const Xm2vSampler *s);
 
 Xm2vDepthStencil *xm2v_depth_stencil_new(Xm2vDevice *dev, const Xm2vDepthStencilDesc *desc);
 void xm2v_depth_stencil_release(Xm2vDepthStencil *ds);
@@ -245,6 +263,8 @@ bool xm2v_compute_encoder_set_bytes(Xm2vComputeEncoder *enc, const void *bytes, 
 bool xm2v_compute_encoder_set_texture(Xm2vComputeEncoder *enc, Xm2vTexture *tex, uint32_t index);
 bool xm2v_compute_encoder_set_sampler(Xm2vComputeEncoder *enc, Xm2vSampler *samp, uint32_t index);
 bool xm2v_compute_encoder_set_threadgroup_memory_length(Xm2vComputeEncoder *enc, uint32_t length, uint32_t index);
+bool xm2v_compute_encoder_use_buffer(Xm2vComputeEncoder *enc, Xm2vBuffer *buf, uint64_t usage);
+bool xm2v_compute_encoder_use_texture(Xm2vComputeEncoder *enc, Xm2vTexture *tex, uint64_t usage);
 bool xm2v_compute_encoder_dispatch_threadgroups(Xm2vComputeEncoder *enc,
                                                 uint64_t gx, uint64_t gy, uint64_t gz,
                                                 uint64_t tx, uint64_t ty, uint64_t tz);
@@ -271,6 +291,8 @@ bool xm2v_render_encoder_set_fragment_buffer(Xm2vRenderEncoder *enc, Xm2vBuffer 
 bool xm2v_render_encoder_set_fragment_bytes(Xm2vRenderEncoder *enc, const void *bytes, size_t len, uint32_t index);
 bool xm2v_render_encoder_set_fragment_texture(Xm2vRenderEncoder *enc, Xm2vTexture *tex, uint32_t index);
 bool xm2v_render_encoder_set_fragment_sampler(Xm2vRenderEncoder *enc, Xm2vSampler *samp, uint32_t index);
+bool xm2v_render_encoder_use_buffer(Xm2vRenderEncoder *enc, Xm2vBuffer *buf, uint64_t usage, uint64_t stages);
+bool xm2v_render_encoder_use_texture(Xm2vRenderEncoder *enc, Xm2vTexture *tex, uint64_t usage, uint64_t stages);
 bool xm2v_render_encoder_draw_primitives(Xm2vRenderEncoder *enc, uint64_t prim, uint64_t vertex_start, uint64_t vertex_count,
                                          uint64_t instance_count, uint64_t base_instance);
 bool xm2v_render_encoder_draw_indexed_primitives(Xm2vRenderEncoder *enc, uint64_t prim, uint64_t index_count, uint64_t index_type,

@@ -248,3 +248,31 @@ dist/XnuCpuMetal.bundle/
 - **双架构回归全通过**：
   - `bash scripts/test-bundle.sh arm64` / `arm64e`：`bad=0`，退出码 0。
   - `bash scripts/test-render-ci.sh arm64` / `arm64e`：Render Pass PASS，CoreImage `CIGaussianBlur` 误差随常量 UAF 修复进一步降至 **`maxErr=1, meanErr=0.0161`**（`nonZeroDiff=264/16384`）！
+
+---
+
+## Round 6: `MTLArgumentEncoder` + `useResource(s):`（Stats `MenuBarIcon.icon` scale 1 & 2）
+
+### 根因
+- Stats 的 "Generate menu bar icon" 阶段将 `Stats.icon` 的 `fill` 改为线性渐变并把 `grid.svg` 替换为 `#D8D8D8` 后，分别以 `--scale 1` 和 `--scale 2` 调用 `ictool`。
+- `--scale 2` 在 `ImageIO` 的 `-[HDRImageConverter_Metal encodeInputImage:transform:toBuffer:offset:withArgumentEncoder:computeEncoder:index:textures:]` 路径中调用 `-[XcmFunction newArgumentEncoderWithBufferIndex:]`；此前该函数被 `XnuCpuMetalShim.h` stub 返回 `nil`，导致 `[argEnc constantDataAtIndex:]` 返回 `NULL` 并在 `offset 0x20` 处 `SIGSEGV`（exit 139）。
+
+### 修复
+1. **Rust C ABI 桥（`src/xnu-m2v-bridge/include/xnu_m2v.h`、`src/xnu-m2v-bridge/src/lib.rs`）**：
+   - 暴露 `metal2vulkan_runtime::ArgumentEncoder`：`xm2v_function_new_argument_encoder`、`xm2v_argument_encoder_release` / `encoded_length` / `alignment` / `set_argument_buffer` / `set_argument_buffer_array_element` / `set_buffer` / `set_texture` / `set_sampler` / `set_compute_pipeline` / `set_render_pipeline` / `constant_data` / `new_nested`。
+   - 暴露 `xm2v_texture_gpu_resource_id`、`xm2v_sampler_gpu_resource_id`。
+   - 暴露真实资源驻留接口：`xm2v_compute_encoder_use_buffer` / `xm2v_compute_encoder_use_texture` 与 `xm2v_render_encoder_use_buffer` / `xm2v_render_encoder_use_texture`（直连 `ComputeCommandEncoder::use_resource` 与 `RenderCommandEncoder::use_resource`）。
+2. **ObjC 插件（`src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm`、`XnuCpuMetalShim.h`）**：
+   - 新增 `XcmArgumentEncoder` 实现 `<MTLArgumentEncoder>`（并在 `XnuCpuMetalShim.h` 注册协议与参考类 `_MTLArgumentEncoder`），写入 texture 时自动触发 `syncFromIOSurfaceIfNeeded`。
+   - `XcmFunction` 实现 `newArgumentEncoderWithBufferIndex:` 与 `newArgumentEncoderWithBufferIndex:reflection:`。
+   - `XcmComputeEncoder` 与 `XcmRenderEncoder` 的 `useResource:` / `useResources:` 接入真实 `xm2v_*_use_buffer` / `use_texture`，并同步处理 IOSurface 读写（读前 `syncFromIOSurfaceIfNeeded`，写后 `markDirtyIOSurfaceTexture:`）。
+   - `XcmTexture` / `XcmSampler` 暴露 `gpuResourceID`；`XcmBackendDevice` 暴露 `argumentBuffersSupport`（`MTLArgumentBuffersTier2`）。
+
+### 验证结果（通用 `arm64 + arm64e` `dist/XnuCpuMetal.bundle`）
+- **Modified `MenuBarIcon.icon`（`build/ic-repro/MenuBarIcon.icon`）**：
+  - `--scale 1`：`EXIT=0`，无任何 `stubbed` / 错误日志；`16×16` `nonZero=1008/1024`，对比原生 GPU `MenuBarIcon1_native.png`：`maxErr=42, meanErr=7.8740`。
+  - `--scale 2`：`EXIT=0`，无任何 `stubbed` / 错误日志；`32×32` `nonZero=3968/4096`，对比原生 GPU `MenuBarIcon2_native.png`：`maxErr=38, meanErr=4.3428`。
+- **全量回归**：
+  - `bash scripts/test-bundle.sh arm64` / `arm64e`：`vecadd N=1024, status=4, completedHandler=1, bad=0`。
+  - `bash scripts/test-render-ci.sh arm64` / `arm64e`：Render Pass PASS，CoreImage `CIGaussianBlur` PASS（`maxErr=1, meanErr=0.0161, nonZeroDiff=264/16384`）。
+  - Plain `Stats.icon` `--scale 2`：`EXIT=0`，无 `stubbed` 日志；`32×32` `nonZero=3944/4096`，对比 `build/stats_native.png`：`maxErr=51, meanErr=3.7783`。
