@@ -297,6 +297,10 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		}
 		return 0;
 	}
+	if (stage == 812) {		/* the host's wall clock for XNU's calendar: a1 -> u64[2] {seconds, nanoseconds} UTC */
+		if (a1) fki_realtime(&((fki_u64 *)a1)[0], &((fki_u64 *)a1)[1]);
+		return 0;
+	}
 	if (stage == 995) {		/* host disk size in bytes into *a1, 0 when there is none */
 		if (a1) *(u64_t *)a1 = hd_file ? hd_size : 0;
 		return 0;
