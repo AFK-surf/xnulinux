@@ -68,6 +68,12 @@ shell = {"Label": "xnulinux.shell", "ProgramArguments": ["/bin/bash", "-i"], "Ru
                                   "PATH": "/bin:/usr/bin:/sbin:/usr/sbin", "PS1": "xnulinux# "}}
 p = D + "/Library/LaunchDaemons/xnulinux.shell.plist"
 plistlib.dump(shell, open(p, "wb")); os.chown(p, 0, 0); os.chmod(p, 0o644)
+# No display or system sleep: a hosted display has no one to wake it, and its sleep locks the screen after ten idle
+# minutes (loginwindow's lock-screen request, reason 5), taking the session to the lock screen.
+awake = {"Label": "xnulinux.awake", "RunAtLoad": True,
+         "ProgramArguments": ["/usr/bin/pmset", "-a", "displaysleep", "0", "sleep", "0", "disksleep", "0"]}
+p = D + "/Library/LaunchDaemons/xnulinux.awake.plist"
+plistlib.dump(awake, open(p, "wb")); os.chown(p, 0, 0); os.chmod(p, 0o644)
 p = D + "/private/var/db/com.apple.xpc.launchd/disabled.plist"
 disabled = plistlib.load(open(p, "rb")) if os.path.exists(p) else {}
 disabled.update({label: True for label in os.environ["DISABLE"].split()})
