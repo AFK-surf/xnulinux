@@ -1,3 +1,15 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 7a2a873..27843d7 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -177,6 +177,7 @@ bsd/net/ether_if_module.c		optional ether bound-checks
+ bsd/net/ether_inet_pr_module.c		optional ether inet bound-checks
+ bsd/net/ether_inet6_pr_module.c		optional ether inet bound-checks
+ bsd/net/if_loop.c			optional loop bound-checks
++bsd/net/if_linux64.c			optional ether
+ bsd/net/if_mib.c			optional networking bound-checks
+ bsd/net/if_vlan.c			optional vlan bound-checks
+ bsd/net/if_fake.c			optional if_fake bound-checks
 diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
 index 5a7b717..5c12c8f 100644
 --- a/bsd/dev/arm/systemcalls.c
@@ -242,7 +254,7 @@ index ec19ee7..6baf626 100644
  	}
  }
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index 5362b32..cd43d8e 100644
+index 5362b32..8028c48 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -585,7 +585,7 @@ bsd_init(void)
@@ -254,6 +266,18 @@ index 5362b32..cd43d8e 100644
  
  #if DEBUG_BSDINIT
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+@@ -963,6 +963,11 @@ bsd_init(void)
+ 	/* Register the built-in dlil ethernet interface family */
+ 	bsd_init_kprintf("calling ether_family_init\n");
+ 	ether_family_init();
++	{
++		/* LINUX64: the hosted kernel's Ethernet interface en0, framed through the host's xnu0 (bsd/net/if_linux64.c) */
++		extern void linux64_net_attach(void);
++		linux64_net_attach();
++	}
+ #endif /* ETHER */
+ 
+ #if NETWORKING
 diff --git a/bsd/kern/kern_descrip.c b/bsd/kern/kern_descrip.c
 index fac307f..23e1d06 100644
 --- a/bsd/kern/kern_descrip.c
@@ -630,6 +654,214 @@ index c08a74c..1e26f75 100644
  353	AUE_GETAUID	ALL	{ int getauid(au_id_t *auid); }
  354	AUE_SETAUID	ALL	{ int setauid(au_id_t *auid); }
  355	AUE_NULL	ALL	{ int nosys(void); }	{ old getaudit }
+diff --git a/bsd/net/if_linux64.c b/bsd/net/if_linux64.c
+new file mode 100644
+index 0000000..1f459b3
+--- /dev/null
++++ b/bsd/net/if_linux64.c
+@@ -0,0 +1,202 @@
++/*
++ * LINUX64 (xnulinux): the hosted kernel's Ethernet interface en0.
++ *
++ * Its frames travel through the host: upcall 816 hands an outgoing frame to Linux (it arrives on the Linux netdev
++ * "xnu0"), upcall 817 takes the next frame Linux sent on xnu0, upcall 815 says how many wait. Linux routes, NATs and
++ * answers DHCP on xnu0. A receive thread polls the host (every 2 ms, and at once when the idle loop sees a frame).
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/kernel.h>
++#include <sys/mbuf.h>
++#include <sys/socket.h>
++#include <sys/sockio.h>
++#include <sys/kpi_mbuf.h>
++#include <net/if.h>
++#include <net/if_types.h>
++#include <net/if_ether.h>
++#include <net/ethernet.h>
++#include <net/kpi_interface.h>
++#include <kern/thread.h>
++#include <kern/locks.h>
++#include <kern/sched_prim.h>
++
++extern uintptr_t linux64_hook;
++extern void linux64_stage_arg(unsigned long, unsigned long);
++
++struct linux64_net_req {
++	void            *buf;
++	uint64_t        len;
++	long            result;
++};
++
++#define L64_FRAME_MAX   (ETHER_MAX_LEN + 64)
++
++static ifnet_t l64_ifp;
++static uint8_t l64_txbuf[L64_FRAME_MAX];
++static uint8_t l64_rxbuf[L64_FRAME_MAX];
++static LCK_GRP_DECLARE(l64_lck_grp, "linux64_net");
++static LCK_MTX_DECLARE(l64_tx_lock, &l64_lck_grp);
++static int l64_rx_event;
++
++/* the MAC is locally administered: 02:58:4e:55:00:01 ("XNU") */
++static const uint8_t l64_mac[ETHER_ADDR_LEN] = { 0x02, 0x58, 0x4e, 0x55, 0x00, 0x01 };
++
++static errno_t
++l64_output(ifnet_t ifp, mbuf_t m)
++{
++	size_t len = mbuf_pkthdr_len(m);
++
++	if (len < ETHER_HDR_LEN || len > sizeof(l64_txbuf)) {
++		ifnet_stat_increment_out(ifp, 0, 0, 1);
++		mbuf_freem(m);
++		return 0;
++	}
++	lck_mtx_lock(&l64_tx_lock);
++	if (mbuf_copydata(m, 0, len, l64_txbuf) == 0) {
++		struct linux64_net_req q = { .buf = l64_txbuf, .len = len, .result = 0 };
++		linux64_stage_arg(816, (unsigned long)&q);
++		if (q.result > 0) {
++			ifnet_stat_increment_out(ifp, 1, (uint32_t)len, 0);
++		} else {
++			ifnet_stat_increment_out(ifp, 0, 0, 1);
++		}
++	}
++	lck_mtx_unlock(&l64_tx_lock);
++	mbuf_freem(m);
++	return 0;
++}
++
++static errno_t
++l64_ioctl(ifnet_t ifp, u_long cmd, void *data)
++{
++	switch (cmd) {
++	case SIOCSIFFLAGS:
++		/* the link to the host is always there: running whenever it is up */
++		ifnet_set_flags(ifp, (ifnet_flags(ifp) & IFF_UP) ? IFF_RUNNING : 0, IFF_RUNNING);
++		return 0;
++	case SIOCSIFADDR:
++	case SIOCAIFADDR:
++	case SIOCADDMULTI:
++	case SIOCDELMULTI:
++		return 0;
++	case SIOCSIFMTU: {
++		struct ifreq *ifr = (struct ifreq *)data;
++		if (ifr->ifr_mtu < 68 || ifr->ifr_mtu > ETHERMTU) {
++			return EINVAL;
++		}
++		return ifnet_set_mtu(ifp, (uint32_t)ifr->ifr_mtu);
++	}
++	default:
++		return EOPNOTSUPP;
++	}
++}
++
++static void
++l64_input_one(long len)
++{
++	mbuf_t m = NULL;
++	struct ifnet_stat_increment_param stats = {};
++
++	/* one packet-header mbuf with a 2 KB cluster holds any frame (ETHER_MAX_LEN 1518): no chain to walk */
++	if (len > MCLBYTES || mbuf_getpacket(MBUF_WAITOK, &m) != 0 || m == NULL) {
++		return;
++	}
++	memcpy(mbuf_data(m), l64_rxbuf, (size_t)len);
++	mbuf_setlen(m, (size_t)len);
++	mbuf_pkthdr_setlen(m, (size_t)len);
++	mbuf_pkthdr_setrcvif(m, l64_ifp);
++	mbuf_pkthdr_setheader(m, mbuf_data(m));
++	mbuf_setdata(m, (char *)mbuf_data(m) + ETHER_HDR_LEN, mbuf_len(m) - ETHER_HDR_LEN);
++	mbuf_pkthdr_adjustlen(m, -ETHER_HDR_LEN);
++	stats.packets_in = 1;
++	stats.bytes_in = (uint32_t)len;
++	ifnet_input(l64_ifp, m, &stats);
++}
++
++static void
++l64_rx_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	for (;;) {
++		for (int n = 0; n < 256; n++) {
++			struct linux64_net_req q = { .buf = l64_rxbuf, .len = sizeof(l64_rxbuf), .result = 0 };
++			linux64_stage_arg(817, (unsigned long)&q);
++			if (q.result < ETHER_HDR_LEN) {
++				break;
++			}
++			l64_input_one(q.result);
++		}
++		assert_wait_timeout((event_t)&l64_rx_event, THREAD_UNINT, 2, NSEC_PER_MSEC);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++/* From the hosted idle loop, after the host let it sleep: wake the receive thread when Linux queued frames. */
++void linux64_net_idle_poll(void);
++void
++linux64_net_idle_poll(void)
++{
++	uint64_t waiting = 0;
++
++	if (l64_ifp == NULL) {
++		return;
++	}
++	linux64_stage_arg(815, (unsigned long)&waiting);
++	if (waiting != 0) {
++		thread_wakeup((event_t)&l64_rx_event);
++	}
++}
++
++void linux64_net_attach(void);
++void
++linux64_net_attach(void)
++{
++	struct ifnet_init_eparams init = {};
++	ifnet_t ifp = NULL;
++	thread_t th = THREAD_NULL;
++	errno_t err;
++
++	if (linux64_hook == 0) {
++		return;
++	}
++	init.ver = IFNET_INIT_CURRENT_VERSION;
++	init.len = sizeof(init);
++	init.flags = IFNET_INIT_LEGACY | IFNET_INIT_NX_NOAUTO;
++	init.uniqueid = "linux64-en0";
++	init.uniqueid_len = sizeof("linux64-en0") - 1;
++	init.name = "en";
++	init.unit = 0;
++	init.family = IFNET_FAMILY_ETHERNET;
++	init.type = IFT_ETHER;
++	init.output = l64_output;
++	init.demux = ether_demux;
++	init.add_proto = ether_add_proto;
++	init.del_proto = ether_del_proto;
++	init.check_multi = ether_check_multi;
++	init.framer_extended = ether_frameout_extended;
++	init.ioctl = l64_ioctl;
++	init.broadcast_addr = etherbroadcastaddr;
++	init.broadcast_len = ETHER_ADDR_LEN;
++	err = ifnet_allocate_extended(&init, &ifp);
++	if (err != 0) {
++		printf("linux64: en0 allocate failed %d\n", err);
++		return;
++	}
++	ifnet_set_mtu(ifp, ETHERMTU);
++	ifnet_set_hdrlen(ifp, ETHER_HDR_LEN);
++	ifnet_set_flags(ifp, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST | IFF_RUNNING, 0xffff);
++	ifnet_set_baudrate(ifp, 1000ULL * 1000 * 1000);
++	err = ifnet_attach(ifp, NULL);
++	if (err != 0) {
++		printf("linux64: en0 attach failed %d\n", err);
++		ifnet_release(ifp);
++		return;
++	}
++	ifnet_set_lladdr(ifp, l64_mac, sizeof(l64_mac));
++	l64_ifp = ifp;
++	if (kernel_thread_start(l64_rx_thread, NULL, &th) == KERN_SUCCESS) {
++		thread_deallocate(th);
++	}
++	printf("linux64: en0 attached (%02x:%02x:%02x:%02x:%02x:%02x), frames through the host's xnu0\n",
++	    l64_mac[0], l64_mac[1], l64_mac[2], l64_mac[3], l64_mac[4], l64_mac[5]);
++}
 diff --git a/bsd/pthread/pthread_shims.c b/bsd/pthread/pthread_shims.c
 index e5e58b5..6e6596d 100644
 --- a/bsd/pthread/pthread_shims.c
@@ -1858,7 +2090,7 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..15e2fb4 100644
+index d10d7a1..7f195a2 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -100,6 +100,7 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
@@ -1882,7 +2114,7 @@ index d10d7a1..15e2fb4 100644
  	if (unmask) {
  		/* Latch SW IRQ+FIQ counter prior to unmasking
  		 * interrupts.
-@@ -506,6 +513,34 @@ cpu_idle(void)
+@@ -506,6 +513,35 @@ cpu_idle(void)
  	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
  	bool idle_disallowed = false;
  
@@ -1908,6 +2140,7 @@ index d10d7a1..15e2fb4 100644
 +				}
 +			}
 +			linux64_stage_arg(810, deadline);
++			{ extern void linux64_net_idle_poll(void); linux64_net_idle_poll(); }	/* frames from the host: wake en0's receive thread */
 +			cpu_data_ptr->cpu_decrementer = -1;
 +			rtclock_intr(FALSE);
 +			ClearIdlePop(TRUE);
@@ -1917,7 +2150,7 @@ index d10d7a1..15e2fb4 100644
  	if (__improbable((!idle_enable))) {
  		idle_disallowed = true;
  		os_atomic_inc(&virt_idle_disallowed[0], relaxed);
-@@ -570,7 +605,9 @@ cpu_idle(void)
+@@ -570,7 +606,9 @@ cpu_idle(void)
  		}
  	}
  
@@ -1928,7 +2161,7 @@ index d10d7a1..15e2fb4 100644
  		if (idle_wfe_poll && idle_proximate_timer_wfe == 1) {
  			/* Poll issuing WFEs until the expected
  			 * timer FIQ arrives.
-@@ -614,6 +651,28 @@ cpu_idle(void)
+@@ -614,6 +652,29 @@ cpu_idle(void)
  	cpc_cpu_transition(CPC_CPU_IDLE, cpu_data_ptr);
  #endif /* CONFIG_CPU_COUNTERS */
  
@@ -1947,6 +2180,7 @@ index d10d7a1..15e2fb4 100644
 +			}
 +			{ extern unsigned long linux64_dbg[16]; linux64_dbg[3]++; }	/* LINUX64 debug */
 +			linux64_stage_arg(810, deadline);
++			{ extern void linux64_net_idle_poll(void); linux64_net_idle_poll(); }	/* frames from the host: wake en0's receive thread */
 +			cpu_data_ptr->cpu_decrementer = -1;
 +			rtclock_intr(FALSE);
 +			ClearIdlePop(TRUE);
@@ -1957,7 +2191,7 @@ index d10d7a1..15e2fb4 100644
  	if (wfi) {
  #if !defined(APPLE_ARM64_ARCH_FAMILY)
  		platform_cache_idle_enter();
-@@ -735,20 +794,27 @@ cpu_idle_exit(boolean_t from_reset)
+@@ -735,20 +796,27 @@ cpu_idle_exit(boolean_t from_reset)
  void
  cpu_init(void)
  {
@@ -1985,7 +2219,7 @@ index d10d7a1..15e2fb4 100644
  		} else {
  			/*
  			 * We initialize non-boot CPUs here; the boot CPU is
-@@ -758,9 +824,11 @@ cpu_init(void)
+@@ -758,9 +826,11 @@ cpu_init(void)
  		}
  
  		do_cacheid();
@@ -1997,7 +2231,7 @@ index d10d7a1..15e2fb4 100644
  
  		cpu_info_p = cpuid_info();
  
-@@ -780,6 +848,7 @@ cpu_init(void)
+@@ -780,6 +850,7 @@ cpu_init(void)
  		}
  
  		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;

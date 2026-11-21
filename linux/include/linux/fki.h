@@ -76,6 +76,13 @@ void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns);
 void fki_yield(void);
 /* The host's wall clock (UTC): seconds and nanoseconds since 1970. */
 void fki_realtime(fki_u64 *sec, fki_u64 *nsec);
+/*
+ * A virtual Ethernet link to Linux (the netdev "xnu0"): send one frame (header included, no FCS); receive the next
+ * frame Linux sent (its length, 0 when none waits); how many frames wait.
+ */
+long fki_net_send(const void *frame, unsigned long len);
+long fki_net_recv(void *buf, unsigned long len);
+long fki_net_pending(void);
 /* Keep the calling task on one CPU (the hosted kernel sees that CPU's MPIDR). */
 int fki_bind_cpu(int cpu);
 /*
