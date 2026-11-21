@@ -391,7 +391,7 @@ index fac307f..23e1d06 100644
  
  		break;
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 2bf34ab..6637b71 100644
+index 2bf34ab..5eb1c78 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -2888,6 +2888,7 @@ badtoolate:
@@ -433,7 +433,32 @@ index 2bf34ab..6637b71 100644
  
  		if (error_msg != NULL) {
  			uint32_t error_msg_len = (uint32_t)strlen(error_msg) + 1;
-@@ -8850,6 +8861,7 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -8843,6 +8854,24 @@ process_signature(proc_t p, struct image_params *imgp)
+ 	 * which is unexpected but security framework does not
+ 	 * approve of exec, kill and return immediately.
+ 	 */
++	if (imgp->ip_mac_return != 0) {
++		/*
++		 * LINUX64 (xnulinux): under amfi_get_out_of_my_way AMFI's other verdicts on code are already skipped (F_CHECK_LV, exec
++		 * mmap); its execve hook still refuses some of Apple's own daemons ("dyld signature cannot be verified": system_installd,
++		 * MobileSoftwareUpdate services), so the same mode lets those execs go on.
++		 */
++		extern int linux64_amfi_off(void);
++		if (linux64_amfi_off()) {
++			kprintf("linux64: exec \"%s\": MAC policy verdict %d ignored (amfi_get_out_of_my_way)\n",
++			    imgp->ip_vp ? imgp->ip_vp->v_name : "?", imgp->ip_mac_return);
++			imgp->ip_mac_return = 0;
++			if (imgp->ip_cs_error != OS_REASON_NULL) {
++				/* the same hook files its refusal as a code-signing exit reason too */
++				os_reason_free(imgp->ip_cs_error);
++				imgp->ip_cs_error = OS_REASON_NULL;
++			}
++		}
++	}
+ 	if (imgp->ip_mac_return != 0) {
+ 		boot_progress_process_stage(proc_getpid(p),p->p_name,"exec MAC policy REFUSED");
+ 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+@@ -8850,6 +8879,7 @@ process_signature(proc_t p, struct image_params *imgp)
  		signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY);
  		error = imgp->ip_mac_return;
  		unexpected_failure = TRUE;
@@ -441,7 +466,7 @@ index 2bf34ab..6637b71 100644
  		goto done;
  	}
  
-@@ -8857,6 +8869,8 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -8857,6 +8887,8 @@ process_signature(proc_t p, struct image_params *imgp)
  		signature_failure_reason = imgp->ip_cs_error;
  		imgp->ip_cs_error = OS_REASON_NULL;
  		error = EACCES;
@@ -450,7 +475,7 @@ index 2bf34ab..6637b71 100644
  		goto done;
  	}
  
-@@ -8864,6 +8878,7 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -8864,6 +8896,7 @@ process_signature(proc_t p, struct image_params *imgp)
  	os_reason_t launch_constraint_reason;
  	if ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {
  		signature_failure_reason = launch_constraint_reason;
@@ -458,7 +483,7 @@ index 2bf34ab..6637b71 100644
  		goto done;
  	}
  
-@@ -9059,6 +9074,7 @@ done:
+@@ -9059,6 +9092,7 @@ done:
  			proc_csflags_set(p, CS_KILLED);
  		}
  		/* make very sure execution fails */
