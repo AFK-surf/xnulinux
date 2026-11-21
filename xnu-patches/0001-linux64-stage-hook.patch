@@ -278,6 +278,24 @@ index 5362b32..8028c48 100644
  #endif /* ETHER */
  
  #if NETWORKING
+diff --git a/bsd/kern/kern_csr.c b/bsd/kern/kern_csr.c
+index 604f16a..7cffe13 100644
+--- a/bsd/kern/kern_csr.c
++++ b/bsd/kern/kern_csr.c
+@@ -226,6 +226,13 @@ csr_bootstrap(void)
+ 	} else {
+ 		csr_config &= ~CSR_ALLOW_UNAUTHENTICATED_ROOT;
+ 	}
++
++	/* LINUX64 (xnulinux): hosted XNU has no boot policy in its device tree; the boot-arg lp-sip0 stands in for it (0x2 lets
++	 * rootless_check_trusted_class accept /Library/GPUBundles, where Metal finds the hosted system's plugin). */
++	uint32_t hosted_sip;
++	if (PE_parse_boot_argn("lp-sip0", &hosted_sip, sizeof(hosted_sip))) {
++		csr_config |= hosted_sip & ~CSR_ALLOW_APPLE_INTERNAL;
++	}
+ }
+ STARTUP(TUNABLES, STARTUP_RANK_FIRST, csr_bootstrap);
+ 
 diff --git a/bsd/kern/kern_descrip.c b/bsd/kern/kern_descrip.c
 index fac307f..23e1d06 100644
 --- a/bsd/kern/kern_descrip.c

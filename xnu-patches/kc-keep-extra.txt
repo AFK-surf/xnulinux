@@ -1,2 +1,3 @@
 # Apple kexts the hosted macOS needs beyond configs/kc-keep.txt (bundle IDs, one per line)
 com.apple.iokit.IOSurface
+com.apple.iokit.IOGraphicsFamily

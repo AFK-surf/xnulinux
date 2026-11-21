@@ -20,7 +20,16 @@ if [ -e out/kc/kc27.bin ]; then
     echo "kernel slots moved: linking the kernel again"
     JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -3
   fi
-  K27_NO_BOOT=1 NATIVE= bash k27/try.sh 0 2>&1 | tail -3
+  # xnulinux's own kexts (kexts/*/NAME.json + NAME.cpp), built against the k27 kernel's objects and linked into the collection
+  NATIVE=
+  for j in ~/w/poc/kexts/*/*.json; do
+    [ -e "$j" ] || continue
+    n=$(basename $j .json)
+    python3 scripts/build-native-kext.py $n $(dirname $j)/$n.cpp --obj ${KEXT_OBJ:-k27-obj}
+    NATIVE="$NATIVE $j"
+  done
+  K27_NO_BOOT=1 NATIVE="$NATIVE" bash k27/try.sh 0 2>&1 | tail -3
+  grep -iE 'error|unresolved|XnuCpuMetal' out/k27/kc-build.log | tail -8 || true
   sudo cp out/k27/kc-k27.bin /lib/firmware/xnu/kc.bin
 fi
 ls -la out/k27/kernel-k27.macho
