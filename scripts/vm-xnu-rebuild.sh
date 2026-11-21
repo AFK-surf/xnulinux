@@ -22,10 +22,16 @@ if [ -e out/kc/kc27.bin ]; then
   fi
   # xnulinux's own kexts (kexts/*/NAME.json + NAME.cpp), built against the k27 kernel's objects and linked into the collection
   NATIVE=
+  # IONetworkingFamily's kernel headers (IOKit/network/*.h) for XnuEthernet: Apple's open source IONetworkingFamily-188 (APSL,
+  # fetched here, not kept in the repository), whose __PRIVATE_SPI__ declarations name the reserved slots 2-5 the shipped family
+  # uses (the SDK's headers leave slot 5 a reserved stub the collection does not export)
+  NETINC=~/w/poc/build/netinc; NETSRC=~/w/poc/build/IONetworkingFamily-188; mkdir -p $NETINC/IOKit
+  [ -e $NETSRC/IOEthernetController.h ] || git clone -q --depth 1 --branch IONetworkingFamily-188 https://github.com/apple-oss-distributions/IONetworkingFamily.git $NETSRC
+  ln -sfn $NETSRC $NETINC/IOKit/network
   for j in ~/w/poc/kexts/*/*.json; do
     [ -e "$j" ] || continue
     n=$(basename $j .json)
-    python3 scripts/build-native-kext.py $n $(dirname $j)/$n.cpp --obj ${KEXT_OBJ:-k27-obj}
+    python3 scripts/build-native-kext.py $n $(dirname $j)/$n.cpp -I $NETINC --obj ${KEXT_OBJ:-k27-obj}
     NATIVE="$NATIVE $j"
   done
   K27_NO_BOOT=1 NATIVE="$NATIVE" bash k27/try.sh 0 2>&1 | tail -3

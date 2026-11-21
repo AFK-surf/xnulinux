@@ -2,3 +2,5 @@
 com.apple.iokit.IOSurface
 com.apple.iokit.IOGraphicsFamily
 com.apple.filesystems.lifs
+com.apple.iokit.IOMobileGraphicsFamily
+com.apple.iokit.IOAVFamily

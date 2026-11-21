@@ -20,11 +20,12 @@ if [ "${MODE:-launchd}" = launchd ]; then
     [ -e /mnt/sys/private/var/select/sh ] || sudo ln -s /bin/bash /mnt/sys/private/var/select/sh
     [ -e /mnt/sys/private/var/select/developer_dir ] || sudo ln -s /Applications/Xcode.app/Contents/Developer /mnt/sys/private/var/select/developer_dir
     # no third-party software of the host (its own /Library/LaunchDaemons, /usr/local); GUI and hardware-only
-    # daemons (no display, no watchdog hardware) are parked in /private/var/xnulinux-parked (DISABLE adds more)
+    # daemons (no watchdog hardware; loginwindow until the graphical session works) are parked in /private/var/xnulinux-parked
+    # (DISABLE adds more). WindowServer stays: it drives XnuDisplay (kexts/XnuDisplay).
     sudo rm -rf /mnt/sys/usr/local
     sudo find /mnt/sys/Library/LaunchDaemons /mnt/sys/Library/LaunchAgents -name '*.plist' ! -name 'com.apple.*' -delete 2>/dev/null || true
     sudo mkdir -p /mnt/sys/private/var/xnulinux-parked
-    for d in com.apple.loginwindow com.apple.WindowServer com.apple.watchdogd com.apple.iomfb_bics_daemon com.apple.audiomxd com.apple.audio.coreaudiod com.apple.PerfPowerServices com.apple.PerfPowerServicesExtended ${DISABLE:-}; do
+    for d in com.apple.loginwindow com.apple.watchdogd com.apple.iomfb_bics_daemon com.apple.audiomxd com.apple.audio.coreaudiod com.apple.PerfPowerServices com.apple.PerfPowerServicesExtended ${DISABLE:-}; do
       [ -e /mnt/sys/System/Library/LaunchDaemons/$d.plist ] && sudo mv /mnt/sys/System/Library/LaunchDaemons/$d.plist /mnt/sys/private/var/xnulinux-parked/
     done
   else

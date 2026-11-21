@@ -732,10 +732,10 @@ index c08a74c..1e26f75 100644
  355	AUE_NULL	ALL	{ int nosys(void); }	{ old getaudit }
 diff --git a/bsd/net/if_linux64.c b/bsd/net/if_linux64.c
 new file mode 100644
-index 0000000..1f459b3
+index 0000000..55fe82d
 --- /dev/null
 +++ b/bsd/net/if_linux64.c
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,239 @@
 +/*
 + * LINUX64 (xnulinux): the hosted kernel's Ethernet interface en0.
 + *
@@ -758,6 +758,7 @@ index 0000000..1f459b3
 +#include <kern/thread.h>
 +#include <kern/locks.h>
 +#include <kern/sched_prim.h>
++#include <pexpert/pexpert.h>
 +
 +extern uintptr_t linux64_hook;
 +extern void linux64_stage_arg(unsigned long, unsigned long);
@@ -869,6 +870,37 @@ index 0000000..1f459b3
 +	}
 +}
 +
++/*
++ * The transport for the IOKit driver (kexts/XnuEthernet), which is en0 normally: an IOEthernetInterface is what IOTimeSync takes
++ * its clock identifier from (WindowServer waits on it). One frame to the host (its length when sent, 0 when not), and the next
++ * frame from it (its length, 0 when none waits).
++ */
++long linux64_net_send(const void *frame, unsigned long length);
++long
++linux64_net_send(const void *frame, unsigned long length)
++{
++	struct linux64_net_req q = { .buf = (void *)(uintptr_t)frame, .len = length, .result = 0 };
++
++	if (linux64_hook == 0 || length < ETHER_HDR_LEN || length > L64_FRAME_MAX) {
++		return 0;
++	}
++	linux64_stage_arg(816, (unsigned long)&q);
++	return q.result > 0 ? (long)length : 0;
++}
++
++long linux64_net_recv(void *buffer, unsigned long size);
++long
++linux64_net_recv(void *buffer, unsigned long size)
++{
++	struct linux64_net_req q = { .buf = buffer, .len = size, .result = 0 };
++
++	if (linux64_hook == 0) {
++		return 0;
++	}
++	linux64_stage_arg(817, (unsigned long)&q);
++	return q.result > 0 ? q.result : 0;
++}
++
 +/* From the hosted idle loop, after the host let it sleep: wake the receive thread when Linux queued frames. */
 +void linux64_net_idle_poll(void);
 +void
@@ -895,6 +927,11 @@ index 0000000..1f459b3
 +	errno_t err;
 +
 +	if (linux64_hook == 0) {
++		return;
++	}
++	/* the kernel's own en0 only on request (boot-arg linux64-ifnet=1): XnuEthernet is en0 otherwise */
++	int own = 0;
++	if (!PE_parse_boot_argn("linux64-ifnet", &own, sizeof(own)) || !own) {
 +		return;
 +	}
 +	init.ver = IFNET_INIT_CURRENT_VERSION;
