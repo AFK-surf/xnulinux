@@ -551,8 +551,8 @@ void *fki_file_open(const char *path, int writable, fki_u64 *size)
 
 	if (IS_ERR(f))
 		return NULL;
-	if (size)
-		*size = i_size_read(file_inode(f));
+	if (size)	/* the mapping's host: a block device's own size (a device node's inode says 0) */
+		*size = i_size_read(f->f_mapping->host);
 	return f;
 }
 EXPORT_SYMBOL(fki_file_open);
