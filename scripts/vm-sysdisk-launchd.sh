@@ -58,12 +58,15 @@ if [ "${MODE:-launchd}" = launchd ]; then
 UP
   }
   u root 0 0 /var/root "System Administrator"; u daemon 1 1 /var/root "System Services"
-  sudo tee $D/groups/wheel.plist >/dev/null <<'GP'
+  # the same groups as /etc/group, so the directory node and libinfo's file module agree (CPython's test_grp checks both)
+  g() { sudo tee $D/groups/$1.plist >/dev/null <<GP
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>name</key><array><string>wheel</string></array><key>gid</key><array><string>0</string></array>
-<key>users</key><array><string>root</string></array><key>generateduid</key><array><string>ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000000</string></array></dict></plist>
+<plist version="1.0"><dict><key>name</key><array><string>$1</string></array><key>gid</key><array><string>$2</string></array>
+<key>users</key><array>${3:+<string>$3</string>}</array><key>generateduid</key><array><string>ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000$4</string></array></dict></plist>
 GP
+  }
+  g wheel 0 root 0000; g daemon 1 root 0001; g nobody -2 "" FFFE; g staff 20 root 0014
   sudo chmod -R go-rwx /mnt/sys/private/var/db/dslocal
   # flat files for libinfo's file module
   printf 'root:*:0:0:System Administrator:/var/root:/bin/sh\ndaemon:*:1:1:System Services:/var/root:/usr/bin/false\nnobody:*:-2:-2:Unprivileged User:/var/empty:/usr/bin/false\n' | sudo tee /mnt/sys/private/etc/passwd >/dev/null
