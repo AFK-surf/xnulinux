@@ -13,10 +13,11 @@ if [ -n "$HOSTDISK" ] && [ "${HOSTDISK#/dev/}" = "$HOSTDISK" ]; then
 fi
 # XNU's DRAM is one physically contiguous block (GBs): free the page cache and compact first, or the allocation fails
 sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+[ -n "${FB_DUMP:-}" ] && { : > "$FB_DUMP"; }   # xnu.ko writes the framebuffer into this existing file
 for K in "$@"; do
   sudo dmesg -C
   echo ">>> kmax=$K"; sync
-  sudo insmod xnu-ko/xnu.ko mode=3 stop=899 kmax=$K idle_max=${IDLE_MAX:-200} ram_mb=${RAM_MB:-128} ${IMAGE:+image=$IMAGE} ${RAMDISK:+ramdisk=$RAMDISK} ${TRUSTCACHE:+trustcache=$TRUSTCACHE} ${HOSTDISK:+hostdisk=$HOSTDISK hostdisk_rw=1} ${CONSOLE_IN:+console_in=$CONSOLE_IN} ${BOOTARGS:+bootargs=\"$BOOTARGS\"}
+  sudo insmod xnu-ko/xnu.ko mode=3 stop=899 kmax=$K idle_max=${IDLE_MAX:-200} ram_mb=${RAM_MB:-128} ${IMAGE:+image=$IMAGE} ${RAMDISK:+ramdisk=$RAMDISK} ${TRUSTCACHE:+trustcache=$TRUSTCACHE} ${HOSTDISK:+hostdisk=$HOSTDISK hostdisk_rw=1} ${CONSOLE_IN:+console_in=$CONSOLE_IN} ${FB_DUMP:+fb_dump=$FB_DUMP} ${BOOTARGS:+bootargs=\"$BOOTARGS\"}
   echo "lines: $(sudo dmesg | grep -ac 'xnu\]')"
   sudo dmesg | grep -a "xnu\]\|XNU stage 4\|budget\|panic\|run ended" | tail -${SHOW:-4}
   sudo rmmod xnu

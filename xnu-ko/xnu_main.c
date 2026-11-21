@@ -66,7 +66,21 @@ static char *trustcache;
 module_param(trustcache, charp, 0444);
 static const void *tc_data; static unsigned long tc_size; static void *tc_blob;
 #define TC_SEG_SIZE (tc_size ? tc_size + 8 : 0)	/* trust_cache_offsets_t { num_caches = 1, offsets[1] } + the module */
-#define BOOT_EXTRA (((rd_size + 0x3fff) & ~0x3fffULL) + ((TC_SEG_SIZE + 0x3fff) & ~0x3fffULL))
+/*
+ * The display's framebuffer (boot_args Video, 32 bpp): reserved in the boot data like the RAM disk, so XNU never hands its pages
+ * out; XnuDisplay (kexts/XnuDisplay) copies each frame WindowServer swaps into it. fb_width=0 boots without one. A host thread
+ * writes it to fb_dump (raw BGRA, fb_width x fb_height) every fb_dump_ms milliseconds when both are set.
+ */
+static int fb_width = 1280, fb_height = 800;
+module_param(fb_width, int, 0444);
+module_param(fb_height, int, 0444);
+static char *fb_dump;
+module_param(fb_dump, charp, 0444);
+static int fb_dump_ms = 1000;
+module_param(fb_dump_ms, int, 0444);
+static u64_t fb_off;	/* the framebuffer's offset in the contiguous region (its Linux address: img.region.va + fb_off) */
+#define FB_SIZE (fb_width > 0 && fb_height > 0 ? (u64_t)fb_width * fb_height * 4 : 0)
+#define BOOT_EXTRA (((rd_size + 0x3fff) & ~0x3fffULL) + ((TC_SEG_SIZE + 0x3fff) & ~0x3fffULL) + ((FB_SIZE + 0x3fff) & ~0x3fffULL))
 /* A root disk backed by a host file (an HFS+ image): XNU's memdev md0 in host mode, stages 995 (size) and 994 (I/O). */
 static char *hostdisk;
 static int hostdisk_rw;
@@ -537,6 +551,7 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_u32(&a, "mix-n-match-prevention-status", 0);
 	u64_t off_rd = (off_dt + 0x40000 + 0x3fff) & ~0x3fffULL;	/* the RAM disk, after the ADT's room */
 	u64_t off_tc = (off_rd + rd_size + 0x3fff) & ~0x3fffULL;	/* the trust cache segment, after the RAM disk */
+	u64_t off_fb = (off_tc + TC_SEG_SIZE + 0x3fff) & ~0x3fffULL;	/* the framebuffer, after the trust cache */
 	adt_node(&a, 1 + (rd_size ? 1 : 0) + (tc_size ? 1 : 0), 0);	/* /chosen/memory-map (no AuxKC) */
 	adt_prop_str(&a, "name", "memory-map");
 	if (rd_size) {
@@ -571,10 +586,21 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_str(&a, "name", "product");
 	adt_node(&a, 1, 0);				/* /options: NVRAM's node (AppleImage4 keeps its nonce seeds there) */
 	adt_prop_str(&a, "name", "options");
-	adt_node(&a, 3, 0);				/* /arm-io: no devices; XNU needs a nonzero SoC base */
+	adt_node(&a, 3, FB_SIZE ? 1 : 0);		/* /arm-io: XNU needs a nonzero SoC base */
 	adt_prop_str(&a, "name", "arm-io");
 	adt_prop_str(&a, "device_type", "linux64-io");
 	{ u64_t ranges[3] = { 0, 0x7000000000ULL, 0x10000000ULL }; adt_prop(&a, "ranges", ranges, sizeof(ranges)); }
+	if (FB_SIZE) {
+		/*
+		 * /arm-io/gpu, compatible "paravirtualizedgraphics,gpu" as on Apple's VM: IOMobileFramebuffer.framework then waits
+		 * for the framebuffers of the AppleParavirtGPU services (XnuDisplay; it matches IOResources, not this node, which
+		 * no driver claims: /arm-io's device_type keeps Apple's ARM IO driver off). Without the node WindowServer counted
+		 * no framebuffer and ran headless.
+		 */
+		adt_node(&a, 2, 0);
+		adt_prop_str(&a, "name", "gpu");
+		adt_prop_str(&a, "compatible", "paravirtualizedgraphics,gpu");
+	}
 	if (a.err) { logs("xnu: ADT overflow"); return 0; }
 	u64_t dt_len = adt_size(&a);
 
@@ -595,6 +621,20 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 		x_memcpy(base_va + off_tc + 8, tc_data, tc_size);
 		ba->topOfKernelData = phys + ((off_tc + TC_SEG_SIZE + 0x3fff) & ~0x3fffULL);
 		logkv("xnu: static trust cache bytes", tc_size);
+	}
+	if (FB_SIZE) {
+		unsigned int *px = (unsigned int *)(base_va + off_fb);
+		for (u64_t i = 0; i < FB_SIZE / 4; i++)
+			px[i] = 0xff000000;	/* opaque black until the first frame */
+		ba->Video.v_baseAddr = phys + off_fb;
+		ba->Video.v_display = 0;	/* no boot console drawn into it (the console is the serial line) */
+		ba->Video.v_rowBytes = (u64_t)fb_width * 4;
+		ba->Video.v_width = (u64_t)fb_width;
+		ba->Video.v_height = (u64_t)fb_height;
+		ba->Video.v_depth = 32;
+		ba->topOfKernelData = phys + ((off_fb + FB_SIZE + 0x3fff) & ~0x3fffULL);
+		fb_off = off_fb;
+		logkv("xnu: framebuffer bytes", FB_SIZE);
 	}
 	ba->deviceTreeP = base_va + off_dt;
 	ba->deviceTreeLength = (unsigned)dt_len;
@@ -677,6 +717,21 @@ static int monitor_fn(void *arg)
 	return 0;
 }
 
+/* The framebuffer to fb_dump every fb_dump_ms (a host thread: plain Linux context, XNU keeps running on its CPU). */
+static void *fb_thread;
+static int fb_fn(void *arg)
+{
+	void *f = fki_file_open(fb_dump, 1, 0);
+	(void)arg;
+	if (!f) { logs("xnu: cannot open fb_dump (create the file first)"); return 0; }
+	while (!fki_thread_should_stop()) {
+		fki_msleep(fb_dump_ms);
+		fki_file_pwrite(f, (unsigned char *)img.region.va + fb_off, FB_SIZE, 0);
+	}
+	fki_file_close(f);
+	return 0;
+}
+
 static int enter_arm_init(struct boot_args_v2 *ba)
 {
 	if (img.filetype == MH_FILESET) {
@@ -707,6 +762,8 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	xnu_dbg = (const unsigned long *)macho_sym(&img, "_linux64_dbg");
 	if (xnu_dbg && monitor_cpu >= 0)
 		monitor = fki_thread_start(monitor_fn, 0, monitor_cpu, "xnu-monitor");
+	if (fb_off && fb_dump && fb_dump_ms > 0 && img.region.va)
+		fb_thread = fki_thread_start(fb_fn, 0, monitor_cpu >= 0 ? monitor_cpu : 1, "xnu-fb");
 	xnu_kfault = (void *)macho_sym(&img, "_linux64_kernel_fault");
 	xnu_kfault_recover = (void *)macho_sym(&img, "_linux64_kernel_fault_recover");
 	if (xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
@@ -736,6 +793,8 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	logkv("xnu: kernel faults forwarded to XNU", kfaults);
 	fki_thread_stop(monitor);
 	monitor = 0;
+	fki_thread_stop(fb_thread);
+	fb_thread = 0;
 	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: arm_init returned (unexpected), r =", (u64_t)r);
 	return 0;
 }

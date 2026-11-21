@@ -800,6 +800,16 @@ static long fki_file_rw_body(void *file, int write, void *buf, unsigned long len
 }
 
 
+long fki_file_pwrite(void *file, const void *buf, unsigned long len, fki_u64 off)
+{
+	loff_t pos = off;
+
+	if (!file)
+		return -EBADF;
+	return kernel_write(file, buf, len, &pos);
+}
+EXPORT_SYMBOL(fki_file_pwrite);
+
 void fki_file_close(void *file)
 {
 	if (file)
