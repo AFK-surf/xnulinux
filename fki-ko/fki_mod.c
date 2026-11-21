@@ -475,7 +475,21 @@ asm(
 "	.popsection\n");
 void fki_run_on_stack(void (*fn)(void *), void *arg, void *top);	/* x0 = fn, x1 = arg, x2 = stack top */
 
+static void fki_linux_runs_body(void (*fn)(void *), void *arg);
+
+/*
+ * Linux runs with SError (PSTATE.A) unmasked; the foreign kernel keeps D, A, I and F masked and asserts so in its
+ * idle loop. Give it back exactly the exception mask it called with.
+ */
 static void fki_linux_runs(void (*fn)(void *), void *arg)
+{
+	unsigned long daif = read_sysreg(daif);
+
+	fki_linux_runs_body(fn, arg);
+	write_sysreg(daif, daif);
+}
+
+static void fki_linux_runs_body(void (*fn)(void *), void *arg)
 {
 	unsigned long sp = current_stack_pointer;
 	int cpu = smp_processor_id();

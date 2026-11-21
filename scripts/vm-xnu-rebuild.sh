@@ -12,6 +12,8 @@ done
 for p in ~/w/poc/xnu-patches/*.patch; do git -C $T apply $p; echo "applied $(basename $p)"; done
 JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -15
 if [ -e out/kc/kc27.bin ]; then
+  # the hosted system's extra Apple kexts (in kc27, not kept by default): IOSurface for actool, CoreImage and friends
+  for id in $(grep -v '^#' ~/w/poc/xnu-patches/kc-keep-extra.txt); do grep -qx "$id" configs/kc-keep.txt || echo "$id" >> configs/kc-keep.txt; done
   cp k27/segaddrs.sh /tmp/segaddrs.before
   python3 k27/kc27-layout.py out/kc/kc27.bin out/k27/kernel-k27.macho --write k27/segaddrs.sh | tail -2
   if ! cmp -s /tmp/segaddrs.before k27/segaddrs.sh; then
