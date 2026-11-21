@@ -25,6 +25,19 @@ index 5a7b717..5c12c8f 100644
  
  	uthread->uu_rval[0] = 0;
  
+diff --git a/bsd/dev/arm64/sysctl.c b/bsd/dev/arm64/sysctl.c
+index f380ae5..7db22a8 100644
+--- a/bsd/dev/arm64/sysctl.c
++++ b/bsd/dev/arm64/sysctl.c
+@@ -303,7 +303,7 @@ static int
+ virtual_address_size SYSCTL_HANDLER_ARGS
+ {
+ #pragma unused(arg1, arg2, oidp)
+-	int return_value = 64 - T0SZ_BOOT;
++	int return_value = 64 - T0SZ_HW;   /* LINUX64: the user address width (pmap_user_va_bits) */
+ 	return SYSCTL_OUT(req, &return_value, sizeof(return_value));
+ }
+ 
 diff --git a/bsd/dev/memdev.c b/bsd/dev/memdev.c
 index d24535d..5c2aafb 100644
 --- a/bsd/dev/memdev.c
@@ -1738,10 +1751,52 @@ index b65f76c..b0692dd 100644
  		max_cpus_initialized = MAX_CPUS_WAIT;
  		lck_mtx_sleep(&max_cpus_lock, LCK_SLEEP_DEFAULT, &max_cpus_initialized, THREAD_UNINT);
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 79d0bc1..654dc70 100644
+index 79d0bc1..43e4474 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
-@@ -2254,6 +2254,7 @@ pmap_bootstrap(
+@@ -327,6 +327,32 @@ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_16k;
+ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_4k;
+ #endif /* !__ARM_16K_PG__ */
+ 
++#if !__ARM_16K_PG__ && !ARM_PARAMETERIZED_PMAP
++/*
++ * LINUX64 (xnulinux): user pmaps of a 4 KiB build walk from level 0 and span the 47 bits TTBR0 runs with (T0SZ_HW), as a macOS
++ * userland expects (ThreadSanitizer's shadow, nano malloc and MACH_VM_MAX_ADDRESS all sit above the 39 bits a level-1 root reaches).
++ * The kernel pmap keeps pmap_pt_attr_4k (TTBR1, level-1 root).
++ */
++const struct page_table_attr pmap_pt_attr_4k_user = {
++	.pta_level_info = pmap_table_level_info_4k,
++	.pta_root_level = PMAP_TT_L0_LEVEL,
++	.pta_commpage_level = PMAP_TT_L1_LEVEL,
++	.pta_max_level  = PMAP_TT_L3_LEVEL,
++	.pta_ops = &native_pt_ops,
++	.ap_ro = ARM_PTE_AP(AP_RORO),
++	.ap_rw = ARM_PTE_AP(AP_RWRW),
++	.ap_rona = ARM_PTE_AP(AP_RONA),
++	.ap_rwna = ARM_PTE_AP(AP_RWNA),
++	.ap_xn = ARM_PTE_PNX | ARM_PTE_NX,
++	.ap_x = ARM_PTE_PNX,
++	.pta_page_size  = 4096,
++	.pta_pagezero_size = 4096,
++	.pta_page_shift = 12,
++	.pta_va_valid_mask = (1ULL << (64 - T0SZ_HW)) - 1,
++};
++const struct page_table_attr * const user_pt_attr = &pmap_pt_attr_4k_user;
++#endif /* !__ARM_16K_PG__ && !ARM_PARAMETERIZED_PMAP */
++
+ 
+ #if DEVELOPMENT || DEBUG
+ int vm_footprint_suspend_allowed = 1;
+@@ -520,7 +546,7 @@ _Static_assert((ARM64_MAX_OFFSET_DEVICE_LARGE > ARM64_MIN_MAX_ADDRESS) && (ARM64
+ _Static_assert((ARM64_MAX_OFFSET_DEVICE_SMALL > ARM64_MIN_MAX_ADDRESS) && (ARM64_MAX_OFFSET_DEVICE_SMALL <= MACH_VM_MAX_ADDRESS),
+     "Small device address space size outside allowable range");
+ 
+-#  ifdef XNU_TARGET_OS_OSX
++#  if defined(XNU_TARGET_OS_OSX) || !__ARM_16K_PG__   /* LINUX64: macOS userland gets the whole 47-bit space by default */
+ SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = MACH_VM_MAX_ADDRESS;
+ #  else
+ SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = 0x0;
+@@ -2254,6 +2280,7 @@ pmap_bootstrap(
  	lck_grp_init(&pmap_lck_grp, "pmap", LCK_GRP_ATTR_NULL);
  	lck_attr_setdefault(&pmap_lck_rw_attr);
  	pmap_lck_rw_attr.lck_attr_val |= LCK_ATTR_RW_NO_SLEEP;
@@ -1749,7 +1804,7 @@ index 79d0bc1..654dc70 100644
  
  #if XNU_MONITOR
  #if (DEVELOPMENT || DEBUG) || CONFIG_CSR_FROM_DT
-@@ -2305,8 +2306,10 @@ pmap_bootstrap(
+@@ -2305,8 +2332,10 @@ pmap_bootstrap(
  	kernel_pmap->sw_asid = 0;
  
  	pmap_lock_init(kernel_pmap);
@@ -1760,7 +1815,7 @@ index 79d0bc1..654dc70 100644
  #if HAS_16BIT_ASID
  	asid_chunk_size = MAX_HW_ASIDS;
  #else
-@@ -2336,6 +2339,7 @@ pmap_bootstrap(
+@@ -2336,6 +2365,7 @@ pmap_bootstrap(
  	 * space for these data structures.
  	 */
  	pmap_data_bootstrap();
@@ -1768,7 +1823,7 @@ index 79d0bc1..654dc70 100644
  
  	/**
  	 * Bootstrap any necessary SART data structures and values needed from the device tree.
-@@ -2356,6 +2360,7 @@ pmap_bootstrap(
+@@ -2356,6 +2386,7 @@ pmap_bootstrap(
  	avail_start = round_page(avail_start + asid_table_size);
  
  	memset((char *)phystokv(pmap_struct_start), 0, avail_start - pmap_struct_start);
@@ -1776,7 +1831,7 @@ index 79d0bc1..654dc70 100644
  
  	vm_first_phys = gPhysBase;
  	vm_last_phys = trunc_page(avail_end);
-@@ -2373,6 +2378,7 @@ pmap_bootstrap(
+@@ -2373,6 +2404,7 @@ pmap_bootstrap(
  	virtual_space_end = VM_MAX_KERNEL_ADDRESS;
  
  	bitmap_full(&asid_bitmap[0], pmap_max_asids);
@@ -1784,7 +1839,62 @@ index 79d0bc1..654dc70 100644
  #if !HAS_16BIT_ASID
  	bitmap_full(&asid_plru_bitmap[0], MAX_HW_ASIDS);
  	// Clear the highest-order bit, which corresponds to MAX_HW_ASIDS + 1
-@@ -15385,3 +15391,31 @@ native_pmap_user_mappings(ppnum_t ppnum, void **first_pmap, uint64_t *first_va,
+@@ -2983,7 +3015,8 @@ pmap_root_alloc_size(pmap_t pmap)
+ 	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
+ 	unsigned int root_level = pt_attr_root_level(pt_attr);
+ 	const uint64_t index = pt_attr_va_valid_mask(pt_attr);
+-	return ((index >> pt_attr_ln_shift(pt_attr, root_level)) + 1) * sizeof(tt_entry_t);
++	vm_size_t size = ((index >> pt_attr_ln_shift(pt_attr, root_level)) + 1) * sizeof(tt_entry_t);
++	return (size < PMAP_ROOT_ALLOC_SIZE) ? PMAP_ROOT_ALLOC_SIZE : size;   /* LINUX64: a level-0 root fills half a page */
+ }
+ 
+ 
+@@ -3108,6 +3141,16 @@ pmap_create_options_internal(
+ 	}
+ 
+ 	p->ttep = ml_static_vtop((vm_offset_t)p->tte);
++	if (pt_attr_root_level(pmap_get_pt_attr(p)) == PMAP_TT_L0_LEVEL) {
++		/* LINUX64: the root already is the level-0 table TTBR0 walks from */
++		p->hw_tte = p->tte;
++		p->hw_ttep = p->ttep;
++		for (i = 0; i < tte_index_max; i++) {
++			p->tte[i] = ARM_TTE_TYPE_FAULT;
++		}
++		FLUSH_PTE();
++		goto root_ready;
++	}
+ 	p->hw_tte = pmap_tt1_allocate(p, pmap_root_alloc_size(p), 0);
+ 	if (!p->hw_tte) {
+ 		pmap_tt1_deallocate(p, p->tte, pmap_root_alloc_size(p), 0);
+@@ -3129,6 +3172,7 @@ pmap_create_options_internal(
+ 	p->hw_tte[0] = (p->ttep & ARM_TTE_TABLE_MASK) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;
+ 
+ 	FLUSH_PTE();
++root_ready:
+ 
+ 	/*
+ 	 *  initialize the rest of the structure
+@@ -3406,6 +3450,10 @@ pmap_destroy_internal(
+ 
+ 
+ 
++	if (pmap->hw_tte == pmap->tte) {
++		pmap->hw_tte = (tt_entry_t *) NULL;   /* LINUX64: a level-0 root is both; free it once, below */
++		pmap->hw_ttep = 0;
++	}
+ 	if (pmap->tte) {
+ 		pmap_tt1_deallocate(pmap, pmap->tte, pmap_root_alloc_size(pmap), 0);
+ 		pmap->tte = (tt_entry_t *) NULL;
+@@ -12980,6 +13028,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
+ #if __ARM_MIXED_PAGE_SIZE__
+ 	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
+ 	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
++#elif !__ARM_16K_PG__ && !ARM_PARAMETERIZED_PMAP
++	return 64 - T0SZ_HW;    /* LINUX64: user pmaps walk from level 0 (pmap_pt_attr_4k_user) */
+ #else
+ 	return 64 - T0SZ_BOOT;
+ #endif
+@@ -15385,3 +15435,31 @@ native_pmap_user_mappings(ppnum_t ppnum, void **first_pmap, uint64_t *first_va,
  	pvh_unlock(pai);
  	return count;
  }
@@ -1816,6 +1926,25 @@ index 79d0bc1..654dc70 100644
 +	}
 +	return d;
 +}
+diff --git a/osfmk/arm/pmap/pmap_pt_geometry.h b/osfmk/arm/pmap/pmap_pt_geometry.h
+index fc64830..aaff3fb 100644
+--- a/osfmk/arm/pmap/pmap_pt_geometry.h
++++ b/osfmk/arm/pmap/pmap_pt_geometry.h
+@@ -169,7 +169,14 @@ extern const struct page_table_ops native_pt_ops;
+ #else /* ARM_PARAMETERIZED_PMAP */
+ 
+ /* The page table attributes are fixed (to allow for const propagation) */
++#if !__ARM_16K_PG__
++/* LINUX64 (xnulinux): user pmaps walk from level 0 over 47 bits, the kernel pmap from level 1 (pmap.c, pmap_pt_attr_4k_user) */
++extern const struct page_table_attr * const user_pt_attr;
++extern const pmap_t kernel_pmap;   /* as in vm/pmap.h, which not every includer of this header has */
++#define pmap_get_pt_attr(pmap) ((pmap) == kernel_pmap ? native_pt_attr : user_pt_attr)
++#else
+ #define pmap_get_pt_attr(pmap) (native_pt_attr)
++#endif
+ #define pmap_get_pt_ops(pmap) (&native_pt_ops)
+ 
+ #endif /* ARM_PARAMETERIZED_PMAP */
 diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
 index a17a07d..6136425 100644
 --- a/osfmk/arm/rtclock.c
@@ -3688,6 +3817,31 @@ index 99971b0..efc6ab8 100644
  	        );                                                              \
  	        ml_pac_safe_interrupts_restore(_intr);                          \
  	} while (0)
+diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
+index bb62cdd..9bea611 100644
+--- a/osfmk/mach/arm/vm_param.h
++++ b/osfmk/mach/arm/vm_param.h
+@@ -149,6 +149,11 @@ extern int PAGE_SHIFT_CONST;
+ #undef MACH_VM_MAX_ADDRESS_RAW
+ #define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
+ #endif /* defined(XNU_PLATFORM_iPhoneOS) && EXTENDED_USER_VA_SUPPORT */
++#if !__ARM_16K_PG__ && !defined(XNU_PLATFORM_MacOSX)
++/* LINUX64 (xnulinux): 4 KiB user pmaps span 47 bits (pmap_pt_attr_4k_user), the macOS layout its userland expects */
++#undef MACH_VM_MAX_ADDRESS_RAW
++#define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
++#endif
+ /* threshold for allocations to be placed in the large file range */
+ #define VM_LARGE_FILE_THRESHOLD (1ULL << 30)
+ #define MACH_VM_JUMBO_ADDRESS ((mach_vm_offset_t) 0x0000000FC0000000ULL)
+@@ -294,7 +299,7 @@ extern int PAGE_SHIFT_CONST;
+ 
+ #if XNU_KERNEL_PRIVATE
+ #define VM_KERNEL_STRIP_MASK            (-1ULL << (64 - T1SZ_BOOT))
+-#define VM_USER_STRIP_MASK              (-1ULL >> (T0SZ_BOOT))
++#define VM_USER_STRIP_MASK              (-1ULL >> (T0SZ_HW))   /* LINUX64: user addresses span the width TTBR0 runs with */
+ #define _VM_KERNEL_STRIP_PTR(_va)       ({((_va) & 1ULL << 55) ? ((_va) | VM_KERNEL_STRIP_MASK) : ((_va) & VM_USER_STRIP_MASK);})
+ #else /* XNU_KERNEL_PRIVATE */
+ 
 diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
 index 44b993c..d21911d 100644
 --- a/osfmk/prng/prng_random.c
