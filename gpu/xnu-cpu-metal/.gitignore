@@ -1,0 +1,7 @@
+src/metal2vulkan/
+src/Vulkan-Loader/
+src/llvm-project/
+src/mesa/
+build/
+dist/
+src/xnu-m2v-bridge/target/
