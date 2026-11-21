@@ -61,6 +61,12 @@ static char *bootargs;
 module_param(bootargs, charp, 0444);
 module_param(ramdisk, charp, 0444);
 static const void *rd_data; static unsigned long rd_size; static void *rd_blob;
+/* The static trust cache a bootloader passes (raw trust cache module, e.g. the payload of the OS's StaticTrustCache.img4) */
+static char *trustcache;
+module_param(trustcache, charp, 0444);
+static const void *tc_data; static unsigned long tc_size; static void *tc_blob;
+#define TC_SEG_SIZE (tc_size ? tc_size + 8 : 0)	/* trust_cache_offsets_t { num_caches = 1, offsets[1] } + the module */
+#define BOOT_EXTRA (((rd_size + 0x3fff) & ~0x3fffULL) + ((TC_SEG_SIZE + 0x3fff) & ~0x3fffULL))
 /* A root disk backed by a host file (an HFS+ image): XNU's memdev md0 in host mode, stages 995 (size) and 994 (I/O). */
 static char *hostdisk;
 static int hostdisk_rw;
@@ -530,11 +536,16 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_u32(&a, "effective-security-mode-ap", 0);
 	adt_prop_u32(&a, "mix-n-match-prevention-status", 0);
 	u64_t off_rd = (off_dt + 0x40000 + 0x3fff) & ~0x3fffULL;	/* the RAM disk, after the ADT's room */
-	adt_node(&a, rd_size ? 2 : 1, 0);		/* /chosen/memory-map: no trust caches, no AuxKC */
+	u64_t off_tc = (off_rd + rd_size + 0x3fff) & ~0x3fffULL;	/* the trust cache segment, after the RAM disk */
+	adt_node(&a, 1 + (rd_size ? 1 : 0) + (tc_size ? 1 : 0), 0);	/* /chosen/memory-map (no AuxKC) */
 	adt_prop_str(&a, "name", "memory-map");
 	if (rd_size) {
 		u64_t rd[2] = { phys + off_rd, rd_size };
 		adt_prop(&a, "RAMDisk", rd, sizeof(rd));
+	}
+	if (tc_size) {
+		u64_t tc[2] = { phys + off_tc, TC_SEG_SIZE };	/* DTTrustCacheRange: load_static_trust_cache() */
+		adt_prop(&a, "TrustCache", tc, sizeof(tc));
 	}
 	adt_node(&a, 1, 0);				/* /chosen/manifest-properties: AppleImage4 reads it (empty: no manifest) */
 	adt_prop_str(&a, "name", "manifest-properties");
@@ -577,6 +588,13 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 		x_memcpy(base_va + off_rd, rd_data, rd_size);
 		ba->topOfKernelData = phys + ((off_rd + rd_size + 0x3fff) & ~0x3fffULL);
 		logkv("xnu: root RAM disk bytes", rd_size);
+	}
+	if (tc_size) {
+		unsigned int hdr[2] = { 1, 8 };
+		x_memcpy(base_va + off_tc, hdr, sizeof(hdr));
+		x_memcpy(base_va + off_tc + 8, tc_data, tc_size);
+		ba->topOfKernelData = phys + ((off_tc + TC_SEG_SIZE + 0x3fff) & ~0x3fffULL);
+		logkv("xnu: static trust cache bytes", tc_size);
 	}
 	ba->deviceTreeP = base_va + off_dt;
 	ba->deviceTreeLength = (unsigned)dt_len;
@@ -742,7 +760,7 @@ static int run_m2b(void)
 	u64_t image_size = img.vmhigh - img.vmlow;
 	if (img.vmlow < 0xffffffe000000000ULL) { logs("xnu: unexpected link address"); return -22; }
 	u64_t image_off = img.vmlow - XNU_WINDOW_BASE;
-	u64_t want = image_off + image_size + 0x60000 + ((rd_size + 0x3fff) & ~0x3fffULL) + ((u64_t)ram_mb << 20);
+	u64_t want = image_off + image_size + 0x60000 + BOOT_EXTRA + ((u64_t)ram_mb << 20);
 	int err = fki_contig_alloc(want, &img.region);
 	if (err) { logkv("xnu: contiguous allocation failed, err", (u64_t)err); return err; }
 	logkv("xnu: contiguous DRAM at phys", img.region.pa);
@@ -760,7 +778,7 @@ static int run_m2b(void)
 	 */
 	u64_t boot_map = img.region.size;
 	if (boot_map > ((u64_t)(512 - first) << 21)) boot_map = (u64_t)(512 - first) << 21;
-	if (boot_map < image_off + image_size + 0x60000 + ((rd_size + 0x3fff) & ~0x3fffULL) + (64ULL << 20)) {
+	if (boot_map < image_off + image_size + 0x60000 + BOOT_EXTRA + (64ULL << 20)) {
 		logs("xnu: image and boot data do not fit in the bootstrap window"); return -22;
 	}
 	logkv("xnu: bootstrap window base", XNU_WINDOW_BASE);
@@ -800,6 +818,10 @@ static int __init xnu_init(void)
 	if (ramdisk) {
 		err = fki_blob_get(ramdisk, &rd_data, &rd_size, &rd_blob);
 		if (err) { logkv("xnu: cannot read the RAM disk, err", (u64_t)err); return err; }
+	}
+	if (trustcache) {
+		err = fki_blob_get(trustcache, &tc_data, &tc_size, &tc_blob);
+		if (err) { logkv("xnu: cannot read the trust cache, err", (u64_t)err); return err; }
 	}
 	if (console_in) {
 		fki_u64 sz = 0;
@@ -842,6 +864,7 @@ static void __exit xnu_exit(void)
 	} else if (img.region.va) fki_region_free(&img.region);
 	if (blob) fki_blob_put(blob);
 	if (rd_blob) fki_blob_put(rd_blob);
+	if (tc_blob) fki_blob_put(tc_blob);
 	if (hd_file) fki_file_close(hd_file);
 	if (ci_file) fki_file_close(ci_file);
 }
