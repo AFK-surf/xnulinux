@@ -69,8 +69,15 @@ GP
   g wheel 0 root 0000; g daemon 1 root 0001; g nobody -2 "" FFFE; g staff 20 root 0014
   sudo chmod -R go-rwx /mnt/sys/private/var/db/dslocal
   # flat files for libinfo's file module
-  printf 'root:*:0:0:System Administrator:/var/root:/bin/sh\ndaemon:*:1:1:System Services:/var/root:/usr/bin/false\nnobody:*:-2:-2:Unprivileged User:/var/empty:/usr/bin/false\n' | sudo tee /mnt/sys/private/etc/passwd >/dev/null
-  printf 'wheel:*:0:root\ndaemon:*:1:root\nnobody:*:-2:\nstaff:*:20:root\n' | sudo tee /mnt/sys/private/etc/group >/dev/null
+  # Apple's stock flat files (system accounts only, from the system's own template): libinfo's file module answers lookups such as
+  # getgrgid(-1) (nogroup) from them, as on a real Mac
+  T=/mnt/sys/System/Library/Templates/Data/private/etc
+  if [ -f $T/group ] && [ -f $T/passwd ]; then
+    sudo cp $T/group $T/passwd /mnt/sys/private/etc/
+  else
+    printf 'root:*:0:0:System Administrator:/var/root:/bin/sh\ndaemon:*:1:1:System Services:/var/root:/usr/bin/false\nnobody:*:-2:-2:Unprivileged User:/var/empty:/usr/bin/false\n' | sudo tee /mnt/sys/private/etc/passwd >/dev/null
+    printf 'wheel:*:0:root\ndaemon:*:1:root\nnobody:*:-2:\nstaff:*:20:root\n' | sudo tee /mnt/sys/private/etc/group >/dev/null
+  fi
   sudo tee /mnt/sys/System/Library/LaunchDaemons/xnulinux.hello.plist >/dev/null <<'PL'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
