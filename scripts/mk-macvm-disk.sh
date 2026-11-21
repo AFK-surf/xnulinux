@@ -52,6 +52,13 @@ sudo -n python3 tools/hosted/gui-user.py "$D" "$W/sys/System/Library/User Templa
 sudo -n mkdir -p "$D/Library/GPUBundles" "$D/Library/LaunchDaemons" "$D/private/var/db/com.apple.xpc.launchd"
 sudo -n rm -rf "$D/Library/GPUBundles/XnuCpuMetal.bundle"; sudo -n ditto "$GPU" "$D/Library/GPUBundles/XnuCpuMetal.bundle"
 sudo -n chown -R root:wheel "$D/Library/GPUBundles"
+# Third-party applications for the hosted system (e.g. Google Chrome, fetched from its vendor on this host; never in the
+# repo): every *.app in $APPS goes to /Applications on the Data volume.
+for a in "${APPS:-$W/../apps}"/*.app; do
+  [ -d "$a" ] || continue
+  sudo -n rm -rf "$D/Applications/$(basename "$a")"; sudo -n ditto "$a" "$D/Applications/$(basename "$a")"
+  sudo -n chown -R root:admin "$D/Applications/$(basename "$a")"; echo "app: $(basename "$a")"
+done
 sudo -n D="$D" DISABLE="$DISABLE" python3 - <<'PY'
 import os, plistlib
 D = os.environ["D"]
