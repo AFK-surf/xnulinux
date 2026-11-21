@@ -65,7 +65,15 @@ p = D + "/private/var/db/com.apple.xpc.launchd/disabled.plist"
 disabled = plistlib.load(open(p, "rb")) if os.path.exists(p) else {}
 disabled.update({label: True for label in os.environ["DISABLE"].split()})
 plistlib.dump(disabled, open(p, "wb")); os.chown(p, 0, 0); os.chmod(p, 0o644)
-print("console shell job, %d daemons disabled" % len(disabled))
+# The hosted keyboard's type (ANSI), as Keyboard Setup Assistant records it for a keyboard it cannot identify by itself
+# (xnulinux Keyboard, vendor 0x1209, product 0x5801: "<product>-<vendor>-0"); without it the assistant opens at each login.
+p = D + "/Library/Preferences/com.apple.keyboardtype.plist"
+plistlib.dump({"keyboardtype": {"22529-4617-0": 40}}, open(p, "wb")); os.chown(p, 0, 0); os.chmod(p, 0o644)
+# Per-process memory limits (jetsam high-water marks) off: the CPU Metal device does a GPU's work in the process that asks
+# for it (WebKit's GPU process, WindowServer), over the limits set for a real GPU's clients. launchd applies sysctl.conf.
+p = D + "/private/etc/sysctl.conf"
+open(p, "w").write("kern.memorystatus_highwater_enabled=0\n"); os.chown(p, 0, 0); os.chmod(p, 0o644)
+print("console shell job, %d daemons disabled, keyboard type, sysctl.conf" % len(disabled))
 PY
 # The boot cryptexes' contents where dyld finds them without a graft: on a Mac, dyld in launchd grafts the OS and App
 # cryptexes (Preboot/<group>/cryptex1/current/{os,app}.dmg) onto Preboot/Cryptexes/{OS,App} from the ignition blob
