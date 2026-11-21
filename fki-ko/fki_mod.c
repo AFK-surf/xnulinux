@@ -16,6 +16,7 @@
 #include <linux/printk.h>
 #include <linux/random.h>
 #include <linux/slab.h>
+#include <linux/timekeeping.h>
 #include <linux/sched.h>
 #include <linux/cpumask.h>
 #include <linux/vmalloc.h>
@@ -541,6 +542,16 @@ void fki_yield(void)
 	fki_linux_runs(fki_yield_body, NULL);
 }
 EXPORT_SYMBOL(fki_yield);
+
+void fki_realtime(fki_u64 *sec, fki_u64 *nsec)
+{
+	struct timespec64 ts;
+
+	ktime_get_real_ts64(&ts);
+	*sec = ts.tv_sec;
+	*nsec = ts.tv_nsec;
+}
+EXPORT_SYMBOL(fki_realtime);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Foreign kernel interface v0 (out-of-tree form for stock kernels)");

@@ -74,6 +74,8 @@ void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns);
  * reschedule if it must (RCU, other tasks on this CPU), then return with IRQs and preemption off again.
  */
 void fki_yield(void);
+/* The host's wall clock (UTC): seconds and nanoseconds since 1970. */
+void fki_realtime(fki_u64 *sec, fki_u64 *nsec);
 /* Keep the calling task on one CPU (the hosted kernel sees that CPU's MPIDR). */
 int fki_bind_cpu(int cpu);
 /*
