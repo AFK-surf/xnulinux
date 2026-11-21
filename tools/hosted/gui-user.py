@@ -92,6 +92,9 @@ lwp = home + '/Library/Preferences/com.apple.loginwindow.plist'
 ulw = plistlib.load(open(lwp, 'rb')) if os.path.exists(lwp) else {}
 ulw['MiniBuddyLaunch'] = False
 dump(lwp, ulw, 0o600)
+# ... and the skip-buddy cookie, which tells Setup Assistant's per-user agents the account needs no setup at all (UserAccountUpdater's
+# MiniBuddy launcher otherwise writes MiniBuddyLaunch at the first login, over the value above).
+open(home + '/.skipbuddy', 'w').close()
 # WebKit draws pages in its GPU process (as on a Mac with Apple silicon) rather than in the web content process: it
 # would not for the CPU Metal device, and the web content sandbox does not let that process make IOSurfaces.
 gp = home + '/Library/Preferences/.GlobalPreferences.plist'
