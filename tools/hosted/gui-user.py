@@ -92,6 +92,12 @@ if os.path.exists(lwp):
     ulw = plistlib.load(open(lwp, 'rb'))
     ulw.pop('MiniBuddyLaunch', None)
     dump(lwp, ulw, 0o644)
+# WebKit draws pages in its GPU process (as on a Mac with Apple silicon) rather than in the web content process: it
+# would not for the CPU Metal device, and the web content sandbox does not let that process make IOSurfaces.
+gp = home + '/Library/Preferences/.GlobalPreferences.plist'
+g = plistlib.load(open(gp, 'rb')) if os.path.exists(gp) else {}
+g['WebKit2GPUProcessForDOMRendering'] = True
+dump(gp, g, 0o600)
 subprocess.run(['chown', '-R', '%d:20' % uid, home], check=True)
 os.chmod(home, 0o755)
 print('gui-user: %s (%d), admin, automatic login, home from the template' % (name, uid))
