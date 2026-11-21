@@ -5,7 +5,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT/src"
 
 git_at() {   # git_at DIR URL REV
-  [ -d "$1/.git" ] || git clone -q "$2" "$1"
+  if [ ! -d "$1/.git" ]; then
+    mkdir -p "$1" && git -C "$1" init -q && git -C "$1" remote add origin "$2"
+  fi
   git -C "$1" checkout -q -- . 2>/dev/null || true
   git -C "$1" fetch -q --depth 1 origin "$3" 2>/dev/null || git -C "$1" fetch -q origin
   git -C "$1" checkout -q "$3"
