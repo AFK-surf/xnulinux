@@ -267,7 +267,7 @@ index ec19ee7..6baf626 100644
  	}
  }
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index 5362b32..6d03460 100644
+index 5362b32..88414be 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -585,7 +585,7 @@ bsd_init(void)
@@ -309,7 +309,7 @@ index 5362b32..6d03460 100644
  		if (require_rootauth) {
  			/* enforce sealedness */
  			int autherr = VNOP_IOCTL(rootvnode, FSIOC_KERNEL_ROOTAUTH, NULL, 0, vfs_context_kernel());
-@@ -1177,6 +1193,25 @@ bsd_init(void)
+@@ -1177,6 +1193,42 @@ bsd_init(void)
  	}
  #endif /* DEVFS */
  
@@ -328,6 +328,23 @@ index 5362b32..6d03460 100644
 +			int perr = kernel_mount("apfs", NULLVP, NULLVP, prebootpath, rootvnode->v_mount, 0, 0,
 +			    KERNEL_MOUNT_PREBOOTVOL, vfs_context_kernel());
 +			printf("LINUX64: Preboot volume at %s: %d\n", prebootpath, perr);
++			/*
++			 * The cryptexes' graft points on the system volume, where dyld looks for their libraries (e.g.
++			 * /usr/lib/libLaunchServicesSupport.dylib lives only in the OS cryptex) and /Applications/Safari.app points:
++			 * bound to the cryptexes' trees in Preboot, read-only, as the grafts would show them.
++			 */
++			static const char *const grafts[][2] = {
++				{ "/System/Cryptexes/OS", "/System/Volumes/Preboot/Cryptexes/OS" },
++				{ "/System/Cryptexes/App", "/System/Volumes/Preboot/Cryptexes/App" },
++			};
++			for (int g = 0; perr == 0 && g < 2; g++) {
++				char at[64], from[64];
++				strlcpy(at, grafts[g][0], sizeof(at));
++				strlcpy(from, grafts[g][1], sizeof(from));
++				int berr = kernel_mount("bindfs", NULLVP, NULLVP, at, (void *)from, 0, MNT_RDONLY | MNT_DONTBROWSE,
++				    0, vfs_context_kernel());
++				printf("LINUX64: %s bound to %s: %d\n", at, from, berr);
++			}
 +		}
 +	}
 +#endif
@@ -789,6 +806,34 @@ index c08a74c..1e26f75 100644
  353	AUE_GETAUID	ALL	{ int getauid(au_id_t *auid); }
  354	AUE_SETAUID	ALL	{ int setauid(au_id_t *auid); }
  355	AUE_NULL	ALL	{ int nosys(void); }	{ old getaudit }
+diff --git a/bsd/miscfs/bindfs/bind_vfsops.c b/bsd/miscfs/bindfs/bind_vfsops.c
+index 4d50604..dc49a67 100644
+--- a/bsd/miscfs/bindfs/bind_vfsops.c
++++ b/bsd/miscfs/bindfs/bind_vfsops.c
+@@ -137,14 +137,21 @@ bindfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
+ 	}
+ 
+ 	/* check entitlement */
+-	if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) {
++	/* LINUX64 (xnulinux): the kernel's own bind mounts (bsd_init, a hosted APFS boot) pass the path from kernel memory */
++	boolean_t kernel_mount_path = vfs_iskernelmount(mp);
++	if (!kernel_mount_path && !IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) {
+ 		return EPERM;
+ 	}
+ 
+ 	/*
+ 	 * Get argument
+ 	 */
+-	error = copyinstr(user_data, data, MAXPATHLEN - 1, &count);
++	if (kernel_mount_path) {
++		count = strlcpy(data, (const char *)user_data, MAXPATHLEN - 1) + 1;
++		error = 0;
++	} else {
++		error = copyinstr(user_data, data, MAXPATHLEN - 1, &count);
++	}
+ 	if (error) {
+ 		BINDFSERROR("error copying data from user %d\n", error);
+ 		goto error;
 diff --git a/bsd/net/if_linux64.c b/bsd/net/if_linux64.c
 new file mode 100644
 index 0000000..29cf3df
