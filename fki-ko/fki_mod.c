@@ -32,6 +32,9 @@
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <asm/stacktrace.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 
 int fki_version(void)
 {
@@ -511,6 +514,8 @@ static void fki_linux_runs_body(void (*fn)(void *), void *arg)
 
 struct fki_idle_args { fki_u64 ns; };
 
+static struct task_struct *fki_idle_task;	/* the task sleeping in fki_idle_until, for fki_net's receive wakeup */
+
 static void fki_idle_body(void *p)
 {
 	struct fki_idle_args *a = p;
@@ -519,7 +524,9 @@ static void fki_idle_body(void *p)
 	local_irq_enable();
 	preempt_enable();
 	set_current_state(TASK_UNINTERRUPTIBLE);
+	WRITE_ONCE(fki_idle_task, current);
 	schedule_hrtimeout_range(&t, 50000, HRTIMER_MODE_REL);
+	WRITE_ONCE(fki_idle_task, NULL);
 	preempt_disable();
 	local_irq_disable();
 }
@@ -566,6 +573,151 @@ void fki_realtime(fki_u64 *sec, fki_u64 *nsec)
 	*nsec = ts.tv_nsec;
 }
 EXPORT_SYMBOL(fki_realtime);
+
+/*
+ * A virtual Ethernet link to the foreign kernel: the Linux netdev "xnu0". What Linux transmits on xnu0 is queued for
+ * the foreign kernel (fki_net_recv); what the foreign kernel sends (fki_net_send) arrives on xnu0 as received frames.
+ */
+#define FKI_NET_QLEN 1024
+static struct net_device *fki_netdev;
+static struct sk_buff_head fki_net_rxq;	/* Linux -> foreign */
+
+static netdev_tx_t fki_net_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	struct task_struct *t;
+
+	if (skb_queue_len(&fki_net_rxq) >= FKI_NET_QLEN) {
+		dev->stats.tx_dropped++;
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
+	}
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += skb->len;
+	skb_queue_tail(&fki_net_rxq, skb);
+	t = READ_ONCE(fki_idle_task);
+	if (t)
+		wake_up_process(t);	/* the foreign kernel is idle: let it see the frame now */
+	return NETDEV_TX_OK;
+}
+
+static int fki_net_up(struct net_device *dev) { netif_start_queue(dev); return 0; }
+static int fki_net_down(struct net_device *dev) { netif_stop_queue(dev); return 0; }
+
+static const struct net_device_ops fki_net_ops = {
+	.ndo_open = fki_net_up,
+	.ndo_stop = fki_net_down,
+	.ndo_start_xmit = fki_net_xmit,
+	.ndo_set_mac_address = eth_mac_addr,
+	.ndo_validate_addr = eth_validate_addr,
+};
+
+struct fki_net_io { const void *in; void *out; unsigned long len; long result; };
+
+static void fki_net_send_body(void *p)
+{
+	struct fki_net_io *io = p;
+	struct sk_buff *skb;
+
+	io->result = -ENODEV;
+	if (!fki_netdev || io->len < ETH_HLEN || io->len > ETH_FRAME_LEN + 4)
+		return;
+	skb = netdev_alloc_skb(fki_netdev, io->len + NET_IP_ALIGN);
+	if (!skb) {
+		fki_netdev->stats.rx_dropped++;
+		io->result = -ENOMEM;
+		return;
+	}
+	skb_reserve(skb, NET_IP_ALIGN);
+	skb_put_data(skb, io->in, io->len);
+	skb->protocol = eth_type_trans(skb, fki_netdev);
+	fki_netdev->stats.rx_packets++;
+	fki_netdev->stats.rx_bytes += io->len;
+	local_irq_enable();	/* netif_rx re-enables bottom halves, which must not happen with interrupts off */
+	netif_rx(skb);
+	local_irq_disable();
+	io->result = io->len;
+}
+
+/* The foreign kernel sends one Ethernet frame (header included, no FCS) out of its link: it arrives on xnu0. */
+long fki_net_send(const void *frame, unsigned long len)
+{
+	struct fki_net_io io = { .in = frame, .len = len };
+
+	fki_linux_runs(fki_net_send_body, &io);
+	return io.result;
+}
+EXPORT_SYMBOL(fki_net_send);
+
+static void fki_net_recv_body(void *p)
+{
+	struct fki_net_io *io = p;
+	struct sk_buff *skb = skb_dequeue(&fki_net_rxq);
+
+	io->result = 0;
+	if (!skb)
+		return;
+	if (skb->len > io->len) {
+		io->result = -EMSGSIZE;
+	} else if (skb_copy_bits(skb, 0, io->out, skb->len) == 0) {
+		io->result = skb->len;
+	} else {
+		io->result = -EIO;
+	}
+	dev_consume_skb_any(skb);
+}
+
+/* The next frame Linux sent on xnu0 into buf (at most len bytes): its length, 0 when none is waiting. */
+long fki_net_recv(void *buf, unsigned long len)
+{
+	struct fki_net_io io = { .out = buf, .len = len };
+
+	fki_linux_runs(fki_net_recv_body, &io);
+	return io.result;
+}
+EXPORT_SYMBOL(fki_net_recv);
+
+/* Frames waiting for the foreign kernel. */
+long fki_net_pending(void)
+{
+	return skb_queue_len(&fki_net_rxq);
+}
+EXPORT_SYMBOL(fki_net_pending);
+
+static int __init fki_init(void)
+{
+	struct net_device *dev;
+	int err;
+
+	skb_queue_head_init(&fki_net_rxq);
+	dev = alloc_etherdev(0);
+	if (!dev)
+		return 0;	/* no link; the rest of fki still works */
+	strscpy(dev->name, "xnu0", IFNAMSIZ);
+	dev->netdev_ops = &fki_net_ops;
+	eth_hw_addr_random(dev);
+	dev->min_mtu = 68;
+	dev->max_mtu = ETH_DATA_LEN;
+	err = register_netdev(dev);
+	if (err) {
+		free_netdev(dev);
+		pr_warn("fki: no xnu0 link (%d)\n", err);
+		return 0;
+	}
+	fki_netdev = dev;
+	return 0;
+}
+
+static void __exit fki_exit(void)
+{
+	if (fki_netdev) {
+		unregister_netdev(fki_netdev);
+		free_netdev(fki_netdev);
+		fki_netdev = NULL;
+	}
+	skb_queue_purge(&fki_net_rxq);
+}
+module_init(fki_init);
+module_exit(fki_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Foreign kernel interface v0 (out-of-tree form for stock kernels)");
