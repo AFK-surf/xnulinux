@@ -86,6 +86,29 @@ GP
 </dict>
 </plist>
 PL
+  # xcodebuild test needs the per-user agent com.apple.testmanagerd, which macOS limits to Aqua/LoginWindow sessions;
+  # the headless system has none: a copy limited to Background sessions, bootstrapped into root's user domain at boot.
+  if [ -e /mnt/sys/System/Library/LaunchAgents/com.apple.testmanagerd.plist ]; then
+    sudo mkdir -p /mnt/sys/Library/LaunchAgents
+    sudo python3 - <<'PY'
+import plistlib
+s = "/mnt/sys/System/Library/LaunchAgents/com.apple.testmanagerd.plist"
+d = plistlib.load(open(s, "rb")); d["LimitLoadToSessionType"] = "Background"
+plistlib.dump(d, open("/mnt/sys/Library/LaunchAgents/com.apple.testmanagerd.plist", "wb"))
+PY
+    sudo tee /mnt/sys/System/Library/LaunchDaemons/xnulinux.userdomain.plist >/dev/null <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>xnulinux.userdomain</string>
+	<key>ProgramArguments</key>
+	<array><string>/bin/launchctl</string><string>bootstrap</string><string>user/0</string><string>/Library/LaunchAgents/com.apple.testmanagerd.plist</string></array>
+	<key>RunAtLoad</key><true/>
+</dict>
+</plist>
+PL
+  fi
   sudo tee /mnt/sys/System/Library/LaunchDaemons/xnulinux.shell.plist >/dev/null <<'PL'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
