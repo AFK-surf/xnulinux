@@ -1,0 +1,2 @@
+# In the hosted macOS: fetch the Metal plugin bundle from the Linux side and replace /Library/GPUBundles/XnuCpuMetal.bundle
+cd /tmp && curl -sS -o XnuCpuMetal.bundle.tgz http://192.168.77.1:8765/XnuCpuMetal.bundle.tgz && rm -rf /Library/GPUBundles/XnuCpuMetal.bundle && tar -C /Library/GPUBundles -xzf XnuCpuMetal.bundle.tgz && echo "bundle updated: $(du -sh /Library/GPUBundles/XnuCpuMetal.bundle | cut -f1)"
