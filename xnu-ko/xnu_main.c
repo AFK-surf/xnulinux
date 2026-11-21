@@ -74,6 +74,7 @@ static void *ci_file; static fki_u64 ci_off;
 struct xnu_cons_req { void *buf; u64_t len; long result; };
 /* hook returns must be 0 (nonzero ends the run): results come back through the request */
 struct xnu_hostdisk_req { u64_t write, off, len; void *buf; long result; };
+struct xnu_net_req { void *buf; u64_t len; long result; };
 struct xnu_world xnu_W;
 
 static void logs(const char *s) { fki_log(s, x_strlen(s)); }
@@ -247,6 +248,17 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 	if (pc < XNU_VA_LO || pc >= XNU_VA_HI)
 		return 1;
 	/* inside copyin/copyout: the routine's recovery path returns EFAULT to its caller, as XNU's own abort handler does */
+	/*
+	 * brk #0xff00: XNU's UBSan minimal soft trap (signed overflow). XNU's own exception handler notes it
+	 * (ubsan_handle_brk_trap) and resumes after the brk; do the same.
+	 */
+	if ((esr >> 26) == 0x3c && (esr & 0xffff) == 0xff00) {
+		static unsigned long ubsan_traps;
+		if (ubsan_traps++ < 8)
+			logkv("xnu: UBSan soft trap (signed overflow), resuming; pc", pc);
+		fki_regs_set_pc(regs, pc + 4);
+		return 0;
+	}
 	if (xnu_kfault_recover) {
 		unsigned long rpc = xnu_kfault_recover(pc, far, esr);
 		if (rpc) {
@@ -295,6 +307,16 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 			long n = fki_file_rw(ci_file, 0, q->buf, (unsigned long)q->len, ci_off);
 			if (n > 0) { ci_off += n; q->result = n; }
 		}
+		return 0;
+	}
+	if (stage == 815) {		/* frames Linux sent on xnu0 waiting for XNU, into *a1 */
+		if (a1) *(u64_t *)a1 = (u64_t)fki_net_pending();
+		return 0;
+	}
+	if (stage == 816 || stage == 817) {	/* XNU's Ethernet link: 816 sends q->buf (q->len bytes), 817 receives into it */
+		struct xnu_net_req *q = (struct xnu_net_req *)a1;
+		if (!q) return 0;
+		q->result = stage == 816 ? fki_net_send(q->buf, (unsigned long)q->len) : fki_net_recv(q->buf, (unsigned long)q->len);
 		return 0;
 	}
 	if (stage == 812) {		/* the host's wall clock for XNU's calendar: a1 -> u64[2] {seconds, nanoseconds} UTC */
