@@ -267,7 +267,7 @@ index ec19ee7..6baf626 100644
  	}
  }
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index 5362b32..6f378e2 100644
+index 5362b32..6d03460 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -585,7 +585,7 @@ bsd_init(void)
@@ -309,6 +309,32 @@ index 5362b32..6f378e2 100644
  		if (require_rootauth) {
  			/* enforce sealedness */
  			int autherr = VNOP_IOCTL(rootvnode, FSIOC_KERNEL_ROOTAUTH, NULL, 0, vfs_context_kernel());
+@@ -1177,6 +1193,25 @@ bsd_init(void)
+ 	}
+ #endif /* DEVFS */
+ 
++#if CONFIG_MOUNT_PREBOOTRECOVERY
++	{
++		/*
++		 * LINUX64 (xnulinux): a hosted APFS root from a Mac's own disk. On a Mac, dyld in launchd grafts the boot
++		 * cryptexes (the OS cryptex holds the dyld shared cache) from the ignition blob AppleImage4 builds out of iBoot's
++		 * boot object manifests; a hosted boot has no iBoot. The OS and App cryptexes' contents sit in the Preboot
++		 * volume's Cryptexes/OS and Cryptexes/App (scripts/mk-macvm-disk.sh), where dyld also looks: mount the Preboot
++		 * volume of the root's container at its usual place before launchd runs, as the Recovery volume is mounted.
++		 */
++		extern uintptr_t linux64_hook;
++		if (linux64_hook && rootvnode && strcmp(rootvnode->v_mount->mnt_vfsstat.f_fstypename, "apfs") == 0) {
++			char prebootpath[] = "/System/Volumes/Preboot"; /* !const because of internal casting */
++			int perr = kernel_mount("apfs", NULLVP, NULLVP, prebootpath, rootvnode->v_mount, 0, 0,
++			    KERNEL_MOUNT_PREBOOTVOL, vfs_context_kernel());
++			printf("LINUX64: Preboot volume at %s: %d\n", prebootpath, perr);
++		}
++	}
++#endif
++
+ #if CONFIG_BASESYSTEMROOT
+ #if CONFIG_IMAGEBOOT
+ 	if (bsdmgroot_bootable()) {
 diff --git a/bsd/kern/kern_csr.c b/bsd/kern/kern_csr.c
 index 604f16a..7cffe13 100644
 --- a/bsd/kern/kern_csr.c
@@ -1233,6 +1259,19 @@ index d8fd4af..815051f 100644
  	/* convert kern_return_t to errno */
  	switch (kr) {
  	case KERN_SUCCESS:
+diff --git a/config/MASTER.arm64.bcm2837 b/config/MASTER.arm64.bcm2837
+index 0c52cc6..87d19c7 100644
+--- a/config/MASTER.arm64.bcm2837
++++ b/config/MASTER.arm64.bcm2837
+@@ -33,7 +33,7 @@
+ #  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel config_imgsrc_access ]
+ #  BSD_DEV =        [ BSD_BASE config_netboot config_imgsrc_access pgo config_vnguard rosetta BSD_EXTRAS_DEV ]
+ #  BSD_DEBUG =      [ BSD_BASE config_netboot config_imgsrc_access pgo config_vnguard rosetta BSD_EXTRAS_DEBUG ]
+-#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_triggers config_fse routefs namedstreams config_dataless_files bindfs config_ext_resolver config_firmlinks config_searchfs config_file_leases ]
++#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_triggers config_fse routefs namedstreams config_dataless_files bindfs config_ext_resolver config_firmlinks config_searchfs config_file_leases config_mount_prebootrecovery ]
+ #  FILESYS_RELEASE= [ FILESYS_BASE ]
+ #  FILESYS_DEV =    [ FILESYS_BASE fdesc config_union_mounts ]
+ #  FILESYS_DEBUG =  [ FILESYS_BASE fdesc config_union_mounts ]
 diff --git a/iokit/Kernel/IONVRAMCHRPHandler.cpp b/iokit/Kernel/IONVRAMCHRPHandler.cpp
 index 0cc7f6e..c07d35c 100644
 --- a/iokit/Kernel/IONVRAMCHRPHandler.cpp
@@ -2474,7 +2513,7 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..7f195a2 100644
+index d10d7a1..3ba7323 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -100,6 +100,7 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
@@ -2519,7 +2558,7 @@ index d10d7a1..7f195a2 100644
 +			{
 +				extern unsigned long linux64_dbg[16];
 +				extern void linux64_dump_threads(void);
-+				if (++linux64_dbg[3] == 20000) {
++				if (++linux64_dbg[3] % 150000 == 0) {	/* about every two to three minutes of idle */
 +					linux64_dump_threads();	/* LINUX64 debug: who is blocked, and where */
 +				}
 +			}
@@ -3914,7 +3953,7 @@ index 2fc6931..dd59ae6 100644
  		struct console_printbuf_state info_data;
  
 diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
-index b2aae03..3b2058f 100644
+index b2aae03..e7bd92d 100644
 --- a/osfmk/kern/sched_prim.c
 +++ b/osfmk/kern/sched_prim.c
 @@ -3010,6 +3010,7 @@ thread_invoke(
@@ -3933,7 +3972,7 @@ index b2aae03..3b2058f 100644
  		/*
  		 * Ensure that updates to my processor and pset state,
  		 * made by the IPI source processor before sending the IPI,
-@@ -9984,3 +9986,34 @@ sysctl_clutch_thread_group_cpu_time_for_thread(__unused thread_t thread,
+@@ -9984,3 +9986,45 @@ sysctl_clutch_thread_group_cpu_time_for_thread(__unused thread_t thread,
  #endif /* !SCHED_TEST_HARNESS */
  
  #endif /* DEVELOPMENT || DEBUG */
@@ -3948,9 +3987,20 @@ index b2aae03..3b2058f 100644
 +{
 +	thread_t t;
 +	int n = 0;
++	extern int proc_pid(struct proc *);
 +	queue_iterate(&threads, t, thread_t, threads) {
-+		if (++n > 120) {
++		if (++n > 400) {
 +			break;
++		}
++		void *bp = get_bsdthreadtask_info(t);
++		if (bp == NULL || proc_pid((struct proc *)bp) == 0) {
++			/* the kernel's own threads: only those blocked with a saved stack (not parked on a continuation) */
++			if (t->continuation != NULL || t->kernel_stack == 0) {
++				continue;
++			}
++			kprintf("linux64 proc 0 kernel_task\n");
++		} else {
++			kprintf("linux64 proc %d %s\n", proc_pid((struct proc *)bp), proc_name_address((struct proc *)bp));
 +		}
 +		struct arm_kernel_saved_state *ss = (struct arm_kernel_saved_state *)(void *)t->machine.kstackptr;
 +		uint64_t lr = 0, fp = 0;
@@ -3960,7 +4010,7 @@ index b2aae03..3b2058f 100644
 +		}
 +		kprintf("linux64 thread %p tid %llu state 0x%x pri %d wait %p cont %p lr 0x%llx\n",
 +		    t, t->thread_id, t->state, t->sched_pri, (void *)t->wait_event, (void *)t->continuation, lr);
-+		for (int f = 0; f < 8 && fp != 0 && t->kernel_stack != 0 &&
++		for (int f = 0; f < 14 && fp != 0 && t->kernel_stack != 0 &&
 +		    fp >= t->kernel_stack && fp < t->kernel_stack + kernel_stack_size; f++) {
 +			uint64_t *frame = (uint64_t *)fp;
 +			kprintf("linux64     frame 0x%llx\n", frame[1] | 0xffffff8000000000ULL);

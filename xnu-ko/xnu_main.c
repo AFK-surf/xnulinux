@@ -105,6 +105,22 @@ static void *ks_file;
 static char *disk;
 module_param(disk, charp, 0444);
 static void *dk_file; static fki_u64 dk_size;
+/*
+ * What iBoot tells an APFS boot in /chosen: the system volume's UUID (boot-uuid; boot-arg rd=uuid finds the root by it) and
+ * the volume group's folder in Preboot (apfs-preboot-uuid: kern.apfsprebootuuid, from which dyld's libignition grafts the
+ * boot cryptexes, the OS cryptex with the dyld shared cache, before launchd runs).
+ */
+static char *boot_uuid, *preboot_uuid;
+module_param(boot_uuid, charp, 0444);
+module_param(preboot_uuid, charp, 0444);
+/*
+ * root_uuid: the root volume itself, by its APFS volume UUID, as /chosen root-matching (IOFindBSDRoot takes it before
+ * boot-uuid): BSD disk numbers follow probe order and change from boot to boot, and the boot-uuid route waits on APFS to
+ * publish boot-uuid-media from its volume group tree, which a disk that never booted on a Mac does not have yet.
+ */
+static char *root_uuid;
+module_param(root_uuid, charp, 0444);
+static char root_matching[256];
 static void *in_file; static fki_u64 in_off;
 /* hook returns must be 0 (nonzero ends the run): results come back through the request */
 struct xnu_hostdisk_req { u64_t write, off, len; void *buf; long result; };
@@ -563,7 +579,17 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_str(&a, "name", "device-tree");
 	adt_prop_str(&a, "compatible", "xnulinux,linux64");
 	adt_prop_str(&a, "model", "xnulinux");
-	adt_node(&a, 22, 3);				/* /chosen */
+	if (root_uuid && x_strlen(root_uuid) == 36) {
+		static const char pre[] = "<dict><key>IOProviderClass</key><string>IOMedia</string><key>IOPropertyMatch</key>"
+		    "<dict><key>UUID</key><string>", post[] = "</string></dict></dict>";
+		x_memcpy(root_matching, pre, sizeof(pre) - 1);
+		x_memcpy(root_matching + sizeof(pre) - 1, root_uuid, 36);
+		x_memcpy(root_matching + sizeof(pre) - 1 + 36, post, sizeof(post));
+	}
+	adt_node(&a, 22 + (boot_uuid ? 1 : 0) + (preboot_uuid ? 1 : 0) + (root_matching[0] ? 1 : 0), 3);	/* /chosen */
+	if (root_matching[0]) adt_prop_str(&a, "root-matching", root_matching);
+	if (boot_uuid) adt_prop_str(&a, "boot-uuid", boot_uuid);
+	if (preboot_uuid) adt_prop_str(&a, "apfs-preboot-uuid", preboot_uuid);
 	adt_prop_str(&a, "name", "chosen");
 	adt_prop_u64(&a, "dram-base", phys);
 	adt_prop_u64(&a, "dram-size", size);
