@@ -496,10 +496,33 @@ index 0cc7f6e..c07d35c 100644
  		DEBUG_INFO("region = %d\n", currentRegion->type);
  		cnt = 0;
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index 76555f6..b49cb93 100644
+index 76555f6..280d150 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
-@@ -1540,6 +1540,100 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
+@@ -1403,15 +1403,18 @@ PESetGMTTimeOfDay(long secs)
+ 	PESetUTCTimeOfDay(secs, 0);
+ }
+ 
++extern "C" void linux64_stage_arg(unsigned long, unsigned long);
++
+ void
+ PEGetUTCTimeOfDay(clock_sec_t * secs, clock_usec_t * usecs)
+ {
+ 	clock_nsec_t    nsecs = 0;
+ 
+-	*secs = 0;
+-	if (gIOPlatform) {
+-		gIOPlatform->getUTCTimeOfDay(secs, &nsecs);
+-	}
++	/* LINUX64: hosted, no RTC; the host's wall clock (UTC) through upcall 812 */
++	uint64_t host[2] = { 0, 0 };
++	linux64_stage_arg(812, (unsigned long)host);
++	*secs = (clock_sec_t)host[0];
++	nsecs = (clock_nsec_t)host[1];
+ 
+ 	assert(nsecs < NSEC_PER_SEC);
+ 	*usecs = nsecs / NSEC_PER_USEC;
+@@ -1540,6 +1543,100 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
  	publishResource("IONVRAM");
  }
  
@@ -600,7 +623,7 @@ index 76555f6..b49cb93 100644
  IOReturn
  IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
      bool waitForFunction,
-@@ -1564,7 +1658,48 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
+@@ -1564,7 +1661,48 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
  	}
  
  	if (waitForFunction) {
@@ -650,7 +673,7 @@ index 76555f6..b49cb93 100644
  	} else {
  		_resources = getResourceService();
  	}
-@@ -2341,6 +2476,8 @@ IOPlatformDevice::getResources( void )
+@@ -2341,6 +2479,8 @@ IOPlatformDevice::getResources( void )
  * the kernel with a suitable message.
  *********************************************************************/
  
@@ -659,7 +682,7 @@ index 76555f6..b49cb93 100644
  class IOPanicPlatform : IOPlatformExpert {
  	OSDeclareDefaultStructors(IOPanicPlatform);
  
-@@ -2361,6 +2498,19 @@ IOPanicPlatform::start(IOService * provider)
+@@ -2361,6 +2501,19 @@ IOPanicPlatform::start(IOService * provider)
  		platform_name = provider->getName();
  	}
  
@@ -679,6 +702,19 @@ index 76555f6..b49cb93 100644
  	panic("Unable to find driver for this platform: \"%s\".",
  	    platform_name);
  
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+index f09a1dd..a819063 100644
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -78,7 +78,7 @@ IOKitInitializeTime( void )
+ 	t.tv_nsec = 0;
+ 
+ // RTC is not present on this target
+-#ifndef BCM2837
++#if 0	/* LINUX64: hosted, the calendar comes from the host's wall clock (PEGetUTCTimeOfDay); no IORTC to wait 30 s for */
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IORTC"), &t );
+ #endif
 diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
 index ae82fc8..3fd837c 100644
 --- a/iokit/bsddev/IOKitBSDInit.cpp
@@ -2405,10 +2441,18 @@ index d211433..dc247da 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..8a617e2 100644
+index d8f1b19..cc88f40 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3646,3 +3646,223 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -78,6 +78,7 @@
+ #if CONFIG_TELEMETRY
+ #include <kern/telemetry.h>
+ #include <kern/trap_telemetry.h>
++#include <kern/recount.h>
+ #endif
+ 
+ #include <prng/entropy.h>
+@@ -3646,3 +3647,229 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2540,6 +2584,9 @@ index d8f1b19..8a617e2 100644
 +	 * IA/DA keys for it; hosted, user code runs with SCTLR_EL1.EnIA/EnDA cleared (linux64_el0_run puts them back on
 +	 * the next exception), or a blraaz on one of its unsigned function pointers fails (EXC_ARM_PAC_FAIL).
 +	 */
++#if PRECISE_USER_KERNEL_TIME
++	recount_enter_user();		/* user time vs system time, as locore's return to user space does */
++#endif
 +	linux64_el0_run(thread->machine.upcb, (thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) != 0);
 +}
 +
@@ -2562,6 +2609,9 @@ index d8f1b19..8a617e2 100644
 +	arm_saved_state_t *ss = thread->machine.upcb;
 +	extern unsigned long linux64_dbg[16];
 +
++#if PRECISE_USER_KERNEL_TIME
++	recount_leave_user();		/* interrupts are still off here, as on locore's exception entry */
++#endif
 +	linux64_dbg[10]++;			/* LINUX64 debug: EL0 exceptions, the last one's ESR, FAR, PC */
 +	linux64_dbg[11] = f->esr;
 +	linux64_dbg[12] = f->far;
@@ -2768,6 +2818,37 @@ index 4224c9d..4a1fe94 100644
  
  #define assertf(ex, fmt, args...)  ({ \
  	if (mach_assert_enabled_expr(ex) && __builtin_expect(!(ex), 0L)) {      \
+diff --git a/osfmk/kern/backtrace.c b/osfmk/kern/backtrace.c
+index 77044be..2c195af 100644
+--- a/osfmk/kern/backtrace.c
++++ b/osfmk/kern/backtrace.c
+@@ -48,7 +48,7 @@
+ #include <arm64/mte.h>
+ #endif // HAS_MTE
+ 
+-#if __x86_64__
++#if __x86_64__ || __arm64__	/* LINUX64: hosted, a kernel stack also has frames in Linux's text, beyond 32 bits of stext */
+ static void
+ _backtrace_packed_out_of_reach(void)
+ {
+@@ -58,7 +58,7 @@ _backtrace_packed_out_of_reach(void)
+ 	//
+ 	// This is an Intel only issue.
+ }
+-#endif // __x86_64__
++#endif // __x86_64__ || __arm64__
+ 
+ // Pack an address according to a particular packing format.
+ static size_t
+@@ -74,7 +74,7 @@ _backtrace_pack_addr(backtrace_pack_t packing, uint8_t *dst, size_t dst_size,
+ 	case BTP_KERN_OFFSET_32:;
+ 		uintptr_t addr_delta = addr - vm_kernel_stext;
+ 		int32_t addr_packed = (int32_t)addr_delta;
+-#if __x86_64__
++#if __x86_64__ || __arm64__
+ 		if ((uintptr_t)(int32_t)addr_delta != addr_delta) {
+ 			addr = (vm_offset_t)&_backtrace_packed_out_of_reach;
+ 			addr_delta = addr - vm_kernel_stext;
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 index 0eae1f6..3253146 100644
 --- a/osfmk/kern/debug.c
