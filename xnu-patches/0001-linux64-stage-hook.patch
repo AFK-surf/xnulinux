@@ -336,7 +336,7 @@ index fac307f..23e1d06 100644
  
  		break;
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 2bf34ab..e7bf32a 100644
+index 2bf34ab..6637b71 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -2888,6 +2888,7 @@ badtoolate:
@@ -370,7 +370,40 @@ index 2bf34ab..e7bf32a 100644
  	if (cache_error) panic("offline owner root check failed: %d", cache_error);
  #endif
  #if defined(XNU_BOOT_PROGRESS) && XNU_BOOT_PROGRESS
-@@ -9059,6 +9069,7 @@ done:
+@@ -8741,6 +8751,7 @@ proc_process_signature(proc_t p, os_reason_t *signature_failure_reason)
+ 
+ 	if (kr != KERN_SUCCESS) {
+ 		error = EINVAL;
++		kprintf("linux64: exec refused \"%s\": machine_task_process_signature: %s\n", p->p_name, error_msg ? error_msg : "(no message)");
+ 
+ 		if (error_msg != NULL) {
+ 			uint32_t error_msg_len = (uint32_t)strlen(error_msg) + 1;
+@@ -8850,6 +8861,7 @@ process_signature(proc_t p, struct image_params *imgp)
+ 		signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY);
+ 		error = imgp->ip_mac_return;
+ 		unexpected_failure = TRUE;
++		kprintf("linux64: exec refused \"%s\": MAC policy (ip_mac_return %d)\n", imgp->ip_vp ? imgp->ip_vp->v_name : "?", error);
+ 		goto done;
+ 	}
+ 
+@@ -8857,6 +8869,8 @@ process_signature(proc_t p, struct image_params *imgp)
+ 		signature_failure_reason = imgp->ip_cs_error;
+ 		imgp->ip_cs_error = OS_REASON_NULL;
+ 		error = EACCES;
++		kprintf("linux64: exec refused \"%s\": code signature error (ns %u code 0x%llx)\n", imgp->ip_vp ? imgp->ip_vp->v_name : "?",
++		    signature_failure_reason->osr_namespace, (unsigned long long)signature_failure_reason->osr_code);
+ 		goto done;
+ 	}
+ 
+@@ -8864,6 +8878,7 @@ process_signature(proc_t p, struct image_params *imgp)
+ 	os_reason_t launch_constraint_reason;
+ 	if ((error = mac_proc_check_launch_constraints(p, imgp, &launch_constraint_reason)) != 0) {
+ 		signature_failure_reason = launch_constraint_reason;
++		kprintf("linux64: exec refused \"%s\": launch constraints (error %d)\n", imgp->ip_vp ? imgp->ip_vp->v_name : "?", error);
+ 		goto done;
+ 	}
+ 
+@@ -9059,6 +9074,7 @@ done:
  			proc_csflags_set(p, CS_KILLED);
  		}
  		/* make very sure execution fails */
