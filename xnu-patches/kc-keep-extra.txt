@@ -4,3 +4,8 @@ com.apple.iokit.IOGraphicsFamily
 com.apple.filesystems.lifs
 com.apple.iokit.IOMobileGraphicsFamily
 com.apple.iokit.IOAVFamily
+# the keystore of Apple's virtual platform (VirtualMac): AppleKeyStore and AppleCredentialManager in software, no SEP
+# hardware; AppleVirtualPlatform is their library
+com.apple.driver.AppleVirtualPlatform
+com.apple.driver.AppleVPCredentialManager
+com.apple.driver.AppleVPKeyStore
