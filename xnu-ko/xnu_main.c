@@ -98,6 +98,13 @@ struct xnu_cons_req { void *buf; u64_t len; long result; };
  */
 static char *input_in;
 module_param(input_in, charp, 0444);
+static char *keystore;		/* the hosted keystore's file (XnuEAN's EAN blobs): read and written through upcall 819 */
+module_param(keystore, charp, 0444);
+static void *ks_file;
+/* The hosted system's block disk (kexts/XnuDisk: IOKit media, e.g. an APFS container), read-write: upcalls 821 (size), 820 (I/O) */
+static char *disk;
+module_param(disk, charp, 0444);
+static void *dk_file; static fki_u64 dk_size;
 static void *in_file; static fki_u64 in_off;
 /* hook returns must be 0 (nonzero ends the run): results come back through the request */
 struct xnu_hostdisk_req { u64_t write, off, len; void *buf; long result; };
@@ -360,6 +367,21 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		if (a1) fki_realtime(&((fki_u64 *)a1)[0], &((fki_u64 *)a1)[1]);
 		return 0;
 	}
+	if (stage == 821) {		/* the block disk's size in bytes into *a1, 0 when there is none */
+		if (a1) *(u64_t *)a1 = dk_file ? dk_size : 0;
+		return 0;
+	}
+	if (stage == 820) {		/* block disk I/O: q->result = bytes moved or -errno */
+		struct xnu_hostdisk_req *q = (struct xnu_hostdisk_req *)a1;
+		if (q) q->result = dk_file ? fki_file_rw(dk_file, (int)q->write, q->buf, (unsigned long)q->len, q->off) : -6;
+		return 0;
+	}
+	if (stage == 819) {		/* the keystore file: q->result = bytes moved or -errno */
+		struct xnu_hostdisk_req *q = (struct xnu_hostdisk_req *)a1;
+		if (!q) return 0;
+		q->result = ks_file ? fki_file_rw(ks_file, (int)q->write, q->buf, (unsigned long)q->len, q->off) : -6;
+		return 0;
+	}
 	if (stage == 995) {		/* host disk size in bytes into *a1, 0 when there is none */
 		if (a1) *(u64_t *)a1 = hd_file ? hd_size : 0;
 		return 0;
@@ -469,6 +491,16 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		logs("xnu: XNU panic:");
 		logs(m);
 		logkv("xnu: panic caller", a2);
+		{	/* the frame-pointer chain from here through XNU's frames (the hook runs on XNU's stack); return addresses
+			 * with their pointer-authentication bits replaced by the kernel's all-ones top */
+			unsigned long *fp = __builtin_frame_address(0);
+			for (i = 0; i < 24 && fp && !((unsigned long)fp & 15) && (unsigned long)fp >> 48 == 0xffff; i++) {
+				unsigned long lr = fp[1] | 0xffffff8000000000ul;
+				logkv("xnu:   frame", lr);
+				if ((unsigned long *)fp[0] <= fp) break;
+				fp = (unsigned long *)fp[0];
+			}
+		}
 		return 1;
 	}
 	static const struct { unsigned long s; const char *what; } names[] = {
@@ -905,11 +937,21 @@ static int __init xnu_init(void)
 		ci_off = sz;	/* only what is written after the load */
 		if (!ci_file) logs("xnu: cannot open console_in");
 	}
+	if (keystore) {
+		fki_u64 sz;
+		ks_file = fki_file_open(keystore, 1, &sz);
+		if (!ks_file) logs("xnu: cannot open the keystore file");
+	}
 	if (input_in) {
 		fki_u64 sz = 0;
 		in_file = fki_file_open(input_in, 0, &sz);
 		in_off = sz & ~7ULL;	/* only what is written after the load */
 		if (!in_file) logs("xnu: cannot open input_in");
+	}
+	if (disk) {
+		dk_file = fki_file_open(disk, 1, &dk_size);
+		if (!dk_file) { logs("xnu: cannot open the block disk"); return -2; }
+		logkv("xnu: block disk bytes", dk_size);
 	}
 	if (hostdisk) {
 		hd_file = fki_file_open(hostdisk, hostdisk_rw, &hd_size);
@@ -948,6 +990,8 @@ static void __exit xnu_exit(void)
 	if (rd_blob) fki_blob_put(rd_blob);
 	if (tc_blob) fki_blob_put(tc_blob);
 	if (hd_file) fki_file_close(hd_file);
+	if (ks_file) fki_file_close(ks_file);
+	if (dk_file) fki_file_close(dk_file);
 	if (ci_file) fki_file_close(ci_file);
 	if (in_file) fki_file_close(in_file);
 }

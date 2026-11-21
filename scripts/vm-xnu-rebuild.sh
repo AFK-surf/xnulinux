@@ -28,9 +28,10 @@ if [ -e out/kc/kc27.bin ]; then
   NETINC=~/w/poc/build/netinc; NETSRC=~/w/poc/build/IONetworkingFamily-188; mkdir -p $NETINC/IOKit
   [ -e $NETSRC/IOEthernetController.h ] || git clone -q --depth 1 --branch IONetworkingFamily-188 https://github.com/apple-oss-distributions/IONetworkingFamily.git $NETSRC
   ln -sfn $NETSRC $NETINC/IOKit/network
-  # IOHIDFamily's kernel headers (IOKit/hid/*.h) for XnuInput: the SDK's Kernel.framework has them
+  # IOHIDFamily's kernel headers (IOKit/hid/*.h) for XnuInput and IOStorageFamily's (IOKit/storage/*.h) for XnuDisk: the SDK's
+  # Kernel.framework has them
   for h in toolchains/sdks/*.sdk/System/Library/Frameworks/Kernel.framework/Headers/IOKit/hid; do
-    [ -e $h/IOHIDDevice.h ] && { ln -sfn $PWD/$h $NETINC/IOKit/hid; ln -sfn $PWD/$h/../hidsystem $NETINC/IOKit/hidsystem; ln -sfn $PWD/$h/../graphics $NETINC/IOKit/graphics
+    [ -e $h/IOHIDDevice.h ] && { ln -sfn $PWD/$h $NETINC/IOKit/hid; ln -sfn $PWD/$h/../hidsystem $NETINC/IOKit/hidsystem; ln -sfn $PWD/$h/../graphics $NETINC/IOKit/graphics; ln -sfn $PWD/$h/../storage $NETINC/IOKit/storage
       ln -sfn $PWD/${h%%/System/*}/usr/include/TargetConditionals.h $NETINC/TargetConditionals.h
       ln -sfn $PWD/$h/../../HIDDriverKit $NETINC/HIDDriverKit; break; }	# IOHIDDevice.h includes HIDDriverKit/IOHIDDevice.h
   done
