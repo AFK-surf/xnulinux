@@ -18,10 +18,11 @@ use metal2vulkan_runtime::{
     ArgumentEncoder, BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer,
     CommandBufferStatus, CommandQueue, ComputeCommandEncoder, ComputePipelineState, Deallocator,
     DepthStencilState, Device, DeviceOptions, Event, EventRef, Fence, Function,
-    FunctionDescriptor, HostMemory, Library, LoadAction, Origin, PipelineOptions, Region,
-    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, ResourceRef,
-    SamplerState, ScissorRect, ShaderCacheOptions, SharedEvent, SharedEventHandle,
-    SharedEventListener, Size, StoreAction, Texture, TextureDescriptor, Viewport,
+    FunctionDescriptor, HostMemory, IoSurfacePlane, IoSurfaceYCbCr, Library, LoadAction, Origin,
+    PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState,
+    ResourceOptions, ResourceRef, SamplerState, ScissorRect, ShaderCacheOptions, SharedEvent,
+    SharedEventHandle, SharedEventListener, Size, StoreAction, SurfaceYCbCrMatrix, Texture,
+    TextureDescriptor, Viewport,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
@@ -519,6 +520,59 @@ pub extern "C" fn xm2v_buffer_new_linear_texture(
             .map_err(|e| {
                 format!(
                     "buffer.new_linear_texture(off={offset}, bpr={bytes_per_row}, bpi={bytes_per_image}): {e:?}"
+                )
+            })?;
+        Ok(boxed(tex))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_pixel_format_is_ycbcr(pixel_format: u64) -> bool {
+    guard(false, || {
+        let pf: PixelFormat = raw_enum(pixel_format, "PixelFormat")?;
+        Ok(metal2vulkan::metal::format::ycbcr(pf))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_buffer_new_texture_with_iosurface_ycbcr(
+    buf: *mut Buffer,
+    desc: *const Xm2vTextureDesc,
+    luma_offset: u64,
+    luma_bytes_per_row: u64,
+    planar: bool,
+    surface_pixel_format: u32,
+    surface_plane: u64,
+    surface_width: u64,
+    surface_height: u64,
+    chroma_offset: u64,
+    chroma_bytes_per_row: u64,
+    ycbcr_matrix: *const c_char,
+) -> *mut Texture {
+    guard(std::ptr::null_mut(), || {
+        let buf = get(buf)?;
+        let td = build_texture_descriptor(get(desc)?)?;
+        let mut facts = IoSurfaceYCbCr::new(
+            surface_pixel_format,
+            surface_plane,
+            [surface_width, surface_height],
+            chroma_offset,
+            chroma_bytes_per_row,
+        );
+        if !ycbcr_matrix.is_null() {
+            if let Ok(s) = unsafe { CStr::from_ptr(ycbcr_matrix) }.to_str() {
+                if !s.is_empty() {
+                    facts = facts.with_matrix(SurfaceYCbCrMatrix::from_attachment(s));
+                }
+            }
+        }
+        let plane = IoSurfacePlane::new(luma_offset, luma_bytes_per_row, planar).with_ycbcr(facts);
+        let tex = buf
+            .new_texture_with_iosurface_plane(&td, plane)
+            .map_err(|e| {
+                format!(
+                    "buffer.new_texture_with_iosurface_plane(fmt={:?} ostype=0x{surface_pixel_format:08x} plane={surface_plane} luma=({luma_offset},{luma_bytes_per_row}) chroma=({chroma_offset},{chroma_bytes_per_row})): {e:?}",
+                    td.pixel_format
                 )
             })?;
         Ok(boxed(tex))
