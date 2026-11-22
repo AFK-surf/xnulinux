@@ -569,3 +569,25 @@ dist/XnuCpuMetal.bundle/
   4. 设恶意 `VK_ICD_FILENAMES=lvp` + `XNU_CPU_METAL_BACKEND=venus`（宿主机无 `XnuDrm`）→ 干净返回 `nil` (`VkResult(-3)`)，`libvulkan_lvp` `loaded=0`。
   5. 模拟 secure-mode 双 ICD bundle（`Resources/vulkan/icd.d/` 同时放 `lvp` + `MoltenVK` 且 `unset VK_ICD_FILENAMES VK_DRIVER_FILES`）→ 默认选中 `llvmpipe`（`libMoltenVK` `loaded=0`），强选 `venus` 返回 `nil`（`libvulkan_lvp` `loaded=0`）。
 - **全套回归全通过**：`lavapipe (arm64e)` 与 `MoltenVK (arm64)` 的 `test-bundle.sh`、`test-render-ci.sh`、`test_round10`、`test_carenderer`、`test_round13`、`test_round14_vfx` 全部 PASS。
+
+---
+
+## Round 18: 修复 `WindowServer` 在 Venus 下黑屏（无 `VK_EXT_external_memory_host` 时的 `newBufferWithBytesNoCopy` 回退同步）
+
+### 根因定位（托管 macOS `WindowServer` 实时排查）
+1. 在托管 macOS 中运行独立 `test_carenderer`（`Virtio-GPU Venus (Apple M5 Max)`），`color`/`image`/`two_layers`/`rounded_only`/`rounded_shadow` 5 项全部像素精确匹配原生 Apple M5 Max；12 种常见像素格式 × 3 种 usage 在 Venus 上全部创建成功。
+2. 在 `WindowServer` 中增加 `newTexture` / `newRenderPSO` / `newComputePSO` / `syncToIOSurface` 诊断日志，确认：
+   - 0 个 `newTexture` / `newRenderPSO` / `newComputePSO` 失败；
+   - `syncToIOSurface` 回写 `1280×800 &BGA` (`0x26424741`) 与 `1280×30 BGRA` 全部 `ok=1`，但内容全为 `BGRA(0,0,0,255)`（`nz=1,024,000/4,096,000` 与 `38,400/153,600`）；
+   - 唯一错误日志是 `newBufferWithBytesNoCopy` 在 Venus 上因缺少 `VK_EXT_external_memory_host` 触发拷贝回退（`Unsupported(HostMemory, needs: ExtExternalMemoryHost)`，涵盖 4 KB – 98 KB 的图元/文字/图层缓冲及 33 MB 壁纸缓冲）。
+3. **直接根因**：`xcmDev_newBufferNoCopy` 回退到 `xm2v_buffer_new` 拷贝路径时，此前只在有 `deallocator` 时记录 `_fallbackPtr`（仅用于 `dealloc` 释放），**从未在后续提交 GPU 前将调用方写入 `_fallbackPtr` 的新数据同步回 Vulkan 缓冲**，导致 `WindowServer` / `QuartzCore` 通过 `newBufferWithBytesNoCopy:` + 后续写入宿主指针或 `newLinearTextureWithDescriptor:` 提交的所有画面内容均为全零/旧数据。
+
+### 修复内容（`src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm`）
+- `XcmBuffer` 在 `newBufferWithBytesNoCopy:` 回退时始终保存 `_fallbackPtr` 与 `_fallbackLen`（无论是否传 `deallocator`），并跟踪 `_contentsAccessed` 避免覆盖通过 `.contents` 写入的数据。
+- 新增 `-[XcmBuffer syncFromFallbackHostMemory]`：当 `!_contentsAccessed` 时将 `_fallbackPtr` 同步到 `xm2v_buffer_contents(_handle)`（`MTLStorageModeManaged` 时同步调 `didModifyRange:`）。
+- 在 `-[XcmCommandBuffer commit]` 提交前遍历 `_retainedResources` 同步所有回退 `XcmBuffer`（含 `XcmTexture->_buffer`），并在 `newTextureWithDescriptor:offset:bytesPerRow:`、`newLinearTextureWithDescriptor:...` 与 `didModifyRange:` 中同步调用。
+- 保留 `newTexture` / `newTextureIOSurface` / `newRenderPSO` / `newComputePSO` / `syncToIOSurface` 的限流失败 `os_log_error`；将 `newBufferWithBytesNoCopy` 回退提示降级为每进程仅记一次 `os_log_info`。
+
+### 验证结果
+- **托管 macOS `WindowServer` on Venus**：替换新 bundle 并重启 `WindowServer` 后，`vmmap` 确认仅加载 `libvulkan_virtio.dylib`（无 `libvulkan_lvp.dylib`），帧缓冲 `/var/tmp/xnu-fb.raw` 点亮 **`1,023,982 / 1,024,000`** 像素，完整渲染出 macOS 27 登录界面（金门大桥日落壁纸、`Sun 22 Nov`、`xnu` 头像、`Enter Password` 输入框、右上角 Wi-Fi 图标）。
+- **宿主机全套回归**：`lavapipe (arm64e)` 与 `MoltenVK (arm64)` 的 `test_round17_direct_driver`、`test-bundle.sh`、`test-render-ci.sh`、`test_round10`、`test_carenderer`、`test_round13`、`test_round14_vfx` 全部 PASS。
