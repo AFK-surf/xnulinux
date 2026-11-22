@@ -289,6 +289,7 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
     NSUInteger _iosurfacePlane;
     uint32_t _iosurfaceSeed;
     BOOL _iosurfaceSyncedIn;
+    BOOL _iosurfaceIsYCbCrBacking;
     XcmBuffer *_buffer;
     NSUInteger _bufferOffset;
     NSUInteger _bufferBytesPerRow;
@@ -433,10 +434,18 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
         uint32_t seed = IOSurfaceGetSeed(_iosurface);
         if (_iosurfaceSyncedIn && seed == _iosurfaceSeed) return;
         if (IOSurfaceLock(_iosurface, kIOSurfaceLockReadOnly, nullptr) == kIOReturnSuccess) {
-            void *base = nullptr;
-            size_t bpr = 0;
-            if (xcmIOSurfacePlaneLayout(_iosurface, _iosurfacePlane, _width, _height, _pixelFormat, &base, &bpr)) {
-                xm2v_texture_replace_region(_handle, 0, 0, 0, _width, _height, 1, 0, 0, base, bpr, 0);
+            if (_iosurfaceIsYCbCrBacking && _buffer && _buffer->_handle) {
+                void *src = IOSurfaceGetBaseAddress(_iosurface);
+                size_t allocSz = IOSurfaceGetAllocSize(_iosurface);
+                void *dst = xm2v_buffer_contents(_buffer->_handle);
+                size_t copySz = allocSz < (size_t)_buffer->_length ? allocSz : (size_t)_buffer->_length;
+                if (src && dst && copySz > 0) memcpy(dst, src, copySz);
+            } else {
+                void *base = nullptr;
+                size_t bpr = 0;
+                if (xcmIOSurfacePlaneLayout(_iosurface, _iosurfacePlane, _width, _height, _pixelFormat, &base, &bpr)) {
+                    xm2v_texture_replace_region(_handle, 0, 0, 0, _width, _height, 1, 0, 0, base, bpr, 0);
+                }
             }
             IOSurfaceUnlock(_iosurface, kIOSurfaceLockReadOnly, nullptr);
             _iosurfaceSeed = seed;
@@ -1638,6 +1647,30 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     for (NSUInteger i = 0; i < range.length; i++)
         [self setFragmentSamplerState:samplers[i] atIndex:range.location + i];
 }
+- (void)setFragmentTexture:(id<MTLTexture>)texture atTextureIndex:(NSUInteger)texIdx
+              samplerState:(id<MTLSamplerState>)sampler atSamplerIndex:(NSUInteger)sampIdx {
+    [self setFragmentTexture:texture atIndex:texIdx];
+    [self setFragmentSamplerState:sampler atIndex:sampIdx];
+}
+- (void)setFragmentTexture:(id<MTLTexture>)texture atTextureIndex:(NSUInteger)texIdx
+              samplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMin lodMaxClamp:(float)lodMax
+            atSamplerIndex:(NSUInteger)sampIdx {
+    (void)lodMin; (void)lodMax;
+    [self setFragmentTexture:texture atIndex:texIdx];
+    [self setFragmentSamplerState:sampler atIndex:sampIdx];
+}
+- (void)setVertexTexture:(id<MTLTexture>)texture atTextureIndex:(NSUInteger)texIdx
+            samplerState:(id<MTLSamplerState>)sampler atSamplerIndex:(NSUInteger)sampIdx {
+    [self setVertexTexture:texture atIndex:texIdx];
+    [self setVertexSamplerState:sampler atIndex:sampIdx];
+}
+- (void)setVertexTexture:(id<MTLTexture>)texture atTextureIndex:(NSUInteger)texIdx
+            samplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMin lodMaxClamp:(float)lodMax
+          atSamplerIndex:(NSUInteger)sampIdx {
+    (void)lodMin; (void)lodMax;
+    [self setVertexTexture:texture atIndex:texIdx];
+    [self setVertexSamplerState:sampler atIndex:sampIdx];
+}
 - (void)setVertexBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index {
     id b = _vbufs[@(index)]; if (b) [self setVertexBuffer:b offset:offset atIndex:index];
 }
@@ -2251,9 +2284,9 @@ static NSUInteger xcmDev_maxTex3D(id, SEL) { return 2048; }
 static NSUInteger xcmDev_maxTexLayers(id, SEL) { return 2048; }
 static NSUInteger xcmDev_maxColorAtt(id, SEL) { return 8; }
 static NSUInteger xcmDev_maxTGMem(id, SEL) { return 32768; }
-static NSUInteger xcmDev_minLinearAlign(id, SEL, MTLPixelFormat) { return 64; }
-static NSUInteger xcmDev_minTileAlign(id, SEL, MTLPixelFormat) { return 64; }
-static NSUInteger xcmDev_align64(id, SEL) { return 64; }
+static NSUInteger xcmDev_minLinearAlign(id, SEL, MTLPixelFormat) { return 16; }
+static NSUInteger xcmDev_minTileAlign(id, SEL, MTLPixelFormat) { return 16; }
+static NSUInteger xcmDev_align16(id, SEL) { return 16; }
 static NSUInteger xcmDev_rwTexTier(id, SEL) { return MTLReadWriteTextureTier2; }
 static BOOL xcmDev_yes(id, SEL) { return YES; }
 static BOOL xcmDev_supportsSampleCount(id, SEL, NSUInteger c) { return c == 1; }
@@ -2393,6 +2426,79 @@ static id xcmDev_newTexture(id self, SEL, MTLTextureDescriptor *desc) {
 static id xcmDev_newTextureIOSurface(id self, SEL, MTLTextureDescriptor *desc, IOSurfaceRef surface, NSUInteger plane) {
     if (xcmTraceOn()) fprintf(stderr, "XCM enter newTextureIOSurface desc=%p surf=%p plane=%lu\n", (__bridge void *)desc, surface, (unsigned long)plane);
     if (!gXm2vDevice || !desc) return nil;
+    // Two-plane YCbCr IOSurface formats (YCBCR8_420_2P, YCBCR10_420_2P, etc.) are created over
+    // a shared backing buffer via metal2vulkan-runtime's IoSurfacePlane + IoSurfaceYCbCr path.
+    if (surface && xm2v_pixel_format_is_ycbcr((uint64_t)desc.pixelFormat)) {
+        if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, nullptr) == kIOReturnSuccess) {
+            void *rootBase = IOSurfaceGetBaseAddress(surface);
+            size_t allocSz = IOSurfaceGetAllocSize(surface);
+            size_t planeCount = IOSurfaceGetPlaneCount(surface);
+            uint32_t surfFmt = IOSurfaceGetPixelFormat(surface);
+            uint64_t surfW = IOSurfaceGetWidth(surface);
+            uint64_t surfH = IOSurfaceGetHeight(surface);
+            bool planar = (planeCount > 1);
+            void *lumaBase = (planeCount > 0 && plane < planeCount) ? IOSurfaceGetBaseAddressOfPlane(surface, plane) : rootBase;
+            uint64_t lumaBpr = (planeCount > 0 && plane < planeCount) ? IOSurfaceGetBytesPerRowOfPlane(surface, plane) : IOSurfaceGetBytesPerRow(surface);
+            uint64_t lumaOff = (rootBase && lumaBase && (uintptr_t)lumaBase >= (uintptr_t)rootBase)
+                ? (uint64_t)((uint8_t *)lumaBase - (uint8_t *)rootBase) : 0;
+            uint64_t chromaOff = 0, chromaBpr = 0;
+            if (planeCount > 1) {
+                void *chromaBase = IOSurfaceGetBaseAddressOfPlane(surface, 1);
+                chromaBpr = IOSurfaceGetBytesPerRowOfPlane(surface, 1);
+                if (rootBase && chromaBase && (uintptr_t)chromaBase >= (uintptr_t)rootBase) {
+                    chromaOff = (uint64_t)((uint8_t *)chromaBase - (uint8_t *)rootBase);
+                }
+            }
+            char matBuf[64] = {};
+            CFTypeRef matRef = IOSurfaceCopyValue(surface, CFSTR("IOSurfaceYCbCrMatrix"));
+            if (matRef) {
+                if (CFGetTypeID(matRef) == CFStringGetTypeID()) {
+                    CFStringGetCString((CFStringRef)matRef, matBuf, sizeof(matBuf), kCFStringEncodingUTF8);
+                }
+                CFRelease(matRef);
+            }
+            uint32_t seed = IOSurfaceGetSeed(surface);
+            Xm2vBuffer *bh = (rootBase && allocSz > 0)
+                ? xm2v_buffer_new(gXm2vDevice, allocSz, MTLResourceStorageModeShared, rootBase)
+                : nullptr;
+            IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
+            if (bh) {
+                XcmBuffer *backingBuf = [[XcmBuffer alloc] initWithHandle:bh device:self options:MTLResourceStorageModeShared];
+                MTLTextureDescriptor *copy = [desc copy];
+                copy.storageMode = MTLStorageModeShared;
+                Xm2vTextureDesc td;
+                xcmFillTextureDesc(copy, td);
+                Xm2vTexture *t = xm2v_buffer_new_texture_with_iosurface_ycbcr(
+                    bh, &td, lumaOff, lumaBpr, planar, surfFmt, plane, surfW, surfH,
+                    chromaOff, chromaBpr, matBuf[0] ? matBuf : nullptr);
+                if (t) {
+                    XcmTexture *tex = [[XcmTexture alloc] initWithHandle:t device:self descriptor:copy];
+                    if (tex) {
+                        CFRetain(surface);
+                        tex->_buffer = backingBuf;
+                        tex->_iosurface = surface;
+                        tex->_iosurfacePlane = plane;
+                        tex->_iosurfaceSeed = seed;
+                        tex->_iosurfaceSyncedIn = YES;
+                        tex->_iosurfaceIsYCbCrBacking = YES;
+                    }
+                    return tex;
+                } else {
+                    static int sYcbcrFailLogs = 0;
+                    if (sYcbcrFailLogs < 10) {
+                        sYcbcrFailLogs++;
+                        os_log_error(OS_LOG_DEFAULT,
+                                     "XnuCpuMetal: newTextureIOSurface YCbCr failed (sid=0x%x surfFmt=0x%x plane=%lu descFmt=%lu %lux%lu luma=(%llu,%llu) chroma=(%llu,%llu) mat=%{public}s): %{public}s",
+                                     IOSurfaceGetID(surface), surfFmt, (unsigned long)plane,
+                                     (unsigned long)desc.pixelFormat, (unsigned long)desc.width, (unsigned long)desc.height,
+                                     (unsigned long long)lumaOff, (unsigned long long)lumaBpr,
+                                     (unsigned long long)chromaOff, (unsigned long long)chromaBpr,
+                                     matBuf[0] ? matBuf : "(none)", xm2v_last_error() ?: "?");
+                    }
+                }
+            }
+        }
+    }
     // Force Shared storage internally so replaceRegion/getBytes sync with IOSurface directly.
     MTLTextureDescriptor *copy = [desc copy];
     copy.storageMode = MTLStorageModeShared;
@@ -3106,11 +3212,11 @@ static Class createBackendDeviceClass(void) {
             {"maxThreadgroupMemoryLength", (IMP)xcmDev_maxTGMem, "Q16@0:8"},
             {"minimumLinearTextureAlignmentForPixelFormat:", (IMP)xcmDev_minLinearAlign, "Q24@0:8Q16"},
             {"minimumTextureBufferAlignmentForPixelFormat:", (IMP)xcmDev_minTileAlign, "Q24@0:8Q16"},
-            {"linearTextureAlignmentBytes", (IMP)xcmDev_align64, "Q16@0:8"},
-            {"iosurfaceTextureAlignmentBytes", (IMP)xcmDev_align64, "Q16@0:8"},
-            {"iosurfaceReadOnlyTextureAlignmentBytes", (IMP)xcmDev_align64, "Q16@0:8"},
-            {"deviceLinearTextureAlignmentBytes", (IMP)xcmDev_align64, "Q16@0:8"},
-            {"deviceLinearReadOnlyTextureAlignmentBytes", (IMP)xcmDev_align64, "Q16@0:8"},
+            {"linearTextureAlignmentBytes", (IMP)xcmDev_align16, "Q16@0:8"},
+            {"iosurfaceTextureAlignmentBytes", (IMP)xcmDev_align16, "Q16@0:8"},
+            {"iosurfaceReadOnlyTextureAlignmentBytes", (IMP)xcmDev_align16, "Q16@0:8"},
+            {"deviceLinearTextureAlignmentBytes", (IMP)xcmDev_align16, "Q16@0:8"},
+            {"deviceLinearReadOnlyTextureAlignmentBytes", (IMP)xcmDev_align16, "Q16@0:8"},
             {"readWriteTextureSupport", (IMP)xcmDev_rwTexTier, "Q16@0:8"},
             {"argumentBuffersSupport", (IMP)xcmDev_argBufTier, "Q16@0:8"},
             {"supportsSharedStorageTextures", (IMP)xcmDev_yes, "B16@0:8"},

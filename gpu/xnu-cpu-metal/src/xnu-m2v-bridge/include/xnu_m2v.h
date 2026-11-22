@@ -172,6 +172,20 @@ uint64_t xm2v_buffer_gpu_address(const Xm2vBuffer *buf);
 void xm2v_buffer_did_modify_range(const Xm2vBuffer *buf, uint64_t location, uint64_t length);
 Xm2vTexture *xm2v_buffer_new_texture(Xm2vBuffer *buf, const Xm2vTextureDesc *desc, uint64_t offset, uint64_t bytes_per_row);
 Xm2vTexture *xm2v_buffer_new_linear_texture(Xm2vBuffer *buf, const Xm2vTextureDesc *desc, uint64_t offset, uint64_t bytes_per_row, uint64_t bytes_per_image);
+bool xm2v_pixel_format_is_ycbcr(uint64_t pixel_format);
+Xm2vTexture *xm2v_buffer_new_texture_with_iosurface_ycbcr(
+    Xm2vBuffer *buf,
+    const Xm2vTextureDesc *desc,
+    uint64_t luma_offset,
+    uint64_t luma_bytes_per_row,
+    bool planar,
+    uint32_t surface_pixel_format,
+    uint64_t surface_plane,
+    uint64_t surface_width,
+    uint64_t surface_height,
+    uint64_t chroma_offset,
+    uint64_t chroma_bytes_per_row,
+    const char *ycbcr_matrix);
 
 /* Textures */
 Xm2vTexture *xm2v_texture_new(Xm2vDevice *dev, const Xm2vTextureDesc *desc);
