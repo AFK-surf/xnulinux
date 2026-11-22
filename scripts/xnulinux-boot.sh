@@ -41,7 +41,7 @@ CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || ech
 if [ "$(cat /sys/module/fki/srcversion 2>/dev/null)" != "$(modinfo -F srcversion fki-ko/fki.ko)" ]; then
   sudo systemctl stop xnudrmd 2>/dev/null || true	# it holds fki's /dev/xnu-hostcall
   sudo rmmod fki 2>/dev/null || true
-  sudo insmod fki-ko/fki.ko $CARVE
+  sudo insmod fki-ko/fki.ko $CARVE ${FKI_ARGS:-}
 fi
 [ "$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null)" != 0 ] ||
   echo "fki has no carve-out (scripts/vm-install-fki-service.sh): the allocation from CMA may fail" >&2
@@ -53,6 +53,15 @@ rm -f "$KEYSTORE"; truncate -s 1M "$KEYSTORE"	# fresh each boot, as the disk was
 # XNU's DRAM is one physically contiguous block (GBs, from CMA): free the page cache and compact first. Right after the VM
 # boots the allocation can still fail with the area free (a page in the way not yet migratable): wait and try again,
 # for up to three minutes.
+# Linux's device interrupts off the CPUs XNU takes (0..CPUS-1): a CPU running XNU's kernel holds Linux's interrupts
+# until it next calls the host, so a disk completion routed there waits that long, and with several XNU CPUs one waiting
+# for another's I/O can wait for good (as a hypervisor keeps device interrupts off its vCPUs' cores).
+NCPU=$(nproc --all)
+if [ "$NCPU" -gt "$CPUS" ]; then
+  MASK=$(python3 -c "print(format(((1 << $NCPU) - 1) & ~((1 << $CPUS) - 1), 'x'))")
+  echo "$MASK" | sudo tee /proc/irq/default_smp_affinity >/dev/null 2>&1 || true
+  for f in /proc/irq/*/smp_affinity; do echo "$MASK" | sudo tee "$f" >/dev/null 2>&1 || true; done
+fi
 # mode=3: the kernel collection; the run lasts until the hosted system halts.
 # insmod returns when the run ends: it runs detached, its output in /var/tmp/xnu-insmod.log.
 for try in 1 2 3 4 5 6 7 8 9; do
