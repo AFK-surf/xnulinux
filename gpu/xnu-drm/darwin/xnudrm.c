@@ -50,9 +50,11 @@ static int debug(void) { static int d = -1; if (d < 0) d = getenv("XNUDRM_DEBUG"
 
 static int open_conn(io_connect_t *c)
 {
-	io_service_t sv = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("XnuDrm"));
+	/* the user client hangs off the Metal accelerator (an IOAccelerator: sandboxes let drawing processes open it) */
+	io_service_t sv = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("XnuCpuMetalAccelerator"));
+	if (!sv) sv = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("XnuDrm"));
 	if (!sv) { if (debug()) fprintf(stderr, "xnudrm: no XnuDrm service\n"); return -ENODEV; }
-	kern_return_t kr = IOServiceOpen(sv, mach_task_self(), 0, c);
+	kern_return_t kr = IOServiceOpen(sv, mach_task_self(), XNUDRM_CONNECT_TYPE, c);
 	IOObjectRelease(sv);
 	if (kr != KERN_SUCCESS) { if (debug()) fprintf(stderr, "xnudrm: IOServiceOpen %#x\n", kr); return -EIO; }
 	if (!buf) buf = malloc(sizeof(struct xnudrm_hdr) + XNUDRM_MAX_MSG);

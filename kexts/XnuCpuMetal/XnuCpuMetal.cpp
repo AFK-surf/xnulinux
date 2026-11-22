@@ -29,6 +29,9 @@ bool XnuCpuMetalAccelerator::start(IOService *provider)
 	// No "Removable" / "SafeEjectRequested": Metal (-[MTLIOAccelService initWithAcceleratorPort:deviceClass:]) skips
 	// a service on which either is present at all, whatever the value.
 	setProperty("model", "XnuCpuMetal (lavapipe)");
+	// The GPU bridge's user client (kexts/XnuDrm) hangs off this service: the sandbox's system-graphics rules let
+	// processes that draw open user clients of an IOAccelerator ((iokit-connection "IOAccelerator")), whatever their class.
+	setProperty("IOUserClientClass", "AGXDeviceUserClient");
 	registerService();
 	IOLog("xnucpumetal: Metal accelerator published on %s\n", provider->getName());
 	return true;
