@@ -693,7 +693,14 @@ EXPORT_SYMBOL(fki_yield);
  * otherwise interrupt that CPU (its user code runs with interrupts on; its kernel looks where it enables its own).
  * Callable with interrupts off.
  */
-static void fki_kick_fn(void *unused) { }
+/*
+ * One csd per target CPU, shared by every sender: smp_call_function_single_async's -EBUSY check is not atomic, so two
+ * CPUs kicking the same one at once would both queue the same csd, and the doubly linked llist entry loops the target
+ * forever in its IPI handler with interrupts off (three or more hosted CPUs: two can kick a third). A sender claims the
+ * target's csd first; the target's handler releases it (an async csd is unlocked before its function runs).
+ */
+static atomic_t fki_kick_claimed[NR_CPUS];
+static void fki_kick_fn(void *unused) { atomic_set_release(&fki_kick_claimed[smp_processor_id()], 0); }
 static DEFINE_PER_CPU(call_single_data_t, fki_kick_csd);
 
 void fki_kick_cpu(int cpu)
@@ -706,9 +713,11 @@ void fki_kick_cpu(int cpu)
 	t = READ_ONCE(fki_idle_task[cpu]);
 	if (t)
 		wake_up_process(t);
-	else if (cpu != smp_processor_id())
-		/* irq_work_queue_on is not exported; an IPI already on its way (-EBUSY) is just as good */
-		smp_call_function_single_async(cpu, per_cpu_ptr(&fki_kick_csd, cpu));
+	else if (cpu != smp_processor_id() && atomic_cmpxchg_acquire(&fki_kick_claimed[cpu], 0, 1) == 0) {
+		/* irq_work_queue_on is not exported; an IPI already on its way (claimed) is just as good */
+		if (smp_call_function_single_async(cpu, per_cpu_ptr(&fki_kick_csd, cpu)))
+			atomic_set_release(&fki_kick_claimed[cpu], 0);
+	}
 }
 EXPORT_SYMBOL(fki_kick_cpu);
 
