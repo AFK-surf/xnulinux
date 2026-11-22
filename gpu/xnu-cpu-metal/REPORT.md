@@ -591,3 +591,19 @@ dist/XnuCpuMetal.bundle/
 ### 验证结果
 - **托管 macOS `WindowServer` on Venus**：替换新 bundle 并重启 `WindowServer` 后，`vmmap` 确认仅加载 `libvulkan_virtio.dylib`（无 `libvulkan_lvp.dylib`），帧缓冲 `/var/tmp/xnu-fb.raw` 点亮 **`1,023,982 / 1,024,000`** 像素，完整渲染出 macOS 27 登录界面（金门大桥日落壁纸、`Sun 22 Nov`、`xnu` 头像、`Enter Password` 输入框、右上角 Wi-Fi 图标）。
 - **宿主机全套回归**：`lavapipe (arm64e)` 与 `MoltenVK (arm64)` 的 `test_round17_direct_driver`、`test-bundle.sh`、`test-render-ci.sh`、`test_round10`、`test_carenderer`、`test_round13`、`test_round14_vfx` 全部 PASS。
+
+---
+
+## Round 19 (clean): YCbCr 2-plane 壁纸、`setFragmentTexture:samplerState:` SPI 与 16 字节对齐修复
+
+### 修复内容
+1. **2-plane 10-bit YCbCr IOSurface 桌面壁纸（`MTLPixelFormatYCBCR10_420_2P = 505` / `RGB10_420_2P = 543` over `'x420'`）**：
+   - `xnu-m2v-bridge` 新增 `xm2v_pixel_format_is_ycbcr` 与 `xm2v_buffer_new_texture_with_iosurface_ycbcr`（封装 `metal2vulkan-runtime` 的 `Buffer::new_texture_with_iosurface_plane` + `IoSurfaceYCbCr` + `IOSurfaceYCbCrMatrix`）。
+   - `XcmTexture` 支持 YCbCr 2-plane IOSurface 拷贝进 Shared `Xm2vBuffer` 并按 `IOSurfaceGetSeed` 刷新。
+   - `XcmRenderEncoder` 补齐 `CoreAnimation` 采样 YCbCr 纹理所需的合并绑定 SPI：`setFragmentTexture:atTextureIndex:samplerState:atSamplerIndex:`（含 `lodMinClamp:lodMaxClamp:` 及 vertex 变体）。
+2. **线性 / IOSurface 纹理对齐修正（`64 -> 16`，匹配 Apple Silicon）**：
+   - `xcmDev_minLinearAlign`、`xcmDev_minTileAlign` 与 `xcmDev_align16`（用于 `iosurfaceTextureAlignmentBytes` / `linearTextureAlignmentBytes` / `deviceLinearTextureAlignmentBytes` 等）统一由 `64` 改为 **`16`**，解决 `CoreImage` 拒收 16 字节对齐中间 IOSurface 导致 `iconservicesagent` 在 `CIBlurProcessor` → `MPSImageGaussianBlur` 持续 `SIGABRT` 的问题（托管 macOS 实测崩溃数由累计 134 次降至 0 次新增；Dock 剩余 8 个 `NaturalStack` 空白格定位为 Venus 下 `VK_EXT_fragment_shader_interlock` `vkCreateGraphicsPipelines` 返回 `-3`，`newBufferWithBytesNoCopy:` 真零拷贝别名留待 Round 20）。
+
+### 验证结果
+- 新增 `test/test_round19.mm`（3/3 PASS）：16 字节对齐查询、`'x420'` `YCBCR10_420_2P (505)` 采样得 `(1.000, 1.000, 1.000, 1.000)`、`CIGaussianBlur` 18 组非 64 字节对齐宽度/半径组合全部 PASS。
+- 宿主机 `lavapipe (arm64e)` 与 `MoltenVK 1.4.2 (arm64)` 全套回归全部 PASS。
