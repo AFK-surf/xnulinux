@@ -179,6 +179,24 @@ index ac1713e..8486021 100644
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
+@@ -431,6 +465,17 @@ arm_init(
+ 		/* Native non-Apple 4K builds expose the hardware page size at any RAM size. */
+ #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+ 		PAGE_SHIFT_CONST = ARM_PGSHIFT;
++		/*
++		 * LINUX64 (xnulinux): hosted, the host's 4 KB translation granule is the hardware page; boot-arg linux64_vm16k=1
++		 * makes the kernel's VM page 16 KB over it (PAGE_RATIO 4, as Apple's 4 KB-granule SoCs run with more than 1 GB):
++		 * a quarter of the page faults, and the page size macOS binaries are built for.
++		 */
++		{
++			uint32_t vm16k = 0;
++			if (linux64_hook && PE_parse_boot_argn("linux64_vm16k", &vm16k, sizeof(vm16k)) && vm16k) {
++				PAGE_SHIFT_CONST = PAGE_MAX_SHIFT;
++			}
++		}
+ #else
+ 		/*
+ 		 * Select the advertised kernel page size.
 diff --git a/osfmk/arm/cpu_data.h b/osfmk/arm/cpu_data.h
 index 743117b..753d128 100644
 --- a/osfmk/arm/cpu_data.h
@@ -551,6 +569,31 @@ index a17a07d..bf9934d 100644
  
  #if XNU_NATIVE_DWC3_CONSOLE
  	extern void unixnu_dwc3_poll(void);
+@@ -366,6 +368,15 @@ rtclock_intr(__unused unsigned int is_user_context)
+ 		pc = 0;
+ 		user_mode = 0;
+ 	}
++	uint64_t sample_fp = regs ? get_saved_state_fp(regs) : 0;
++	if (regs == NULL && linux64_hook) {
++		/*
++		 * LINUX64: hosted, a kernel-mode timer is delivered by a call from where XNU re-enables interrupts (or from idle),
++		 * not by an exception with a saved state: profile the caller (pc-sample charges it to the code that masked).
++		 */
++		pc = (uintptr_t)__builtin_return_address(0);
++		sample_fp = *(uint64_t *)__builtin_frame_address(0);
++	}
+ 	if (abstime >= cdp->rtcPop) {
+ 		/* Log the interrupt service latency (-ve value expected by tool) */
+ 		KDBG_RELEASE(DECR_TRAP_LATENCY | DBG_FUNC_NONE,
+@@ -375,7 +386,7 @@ rtclock_intr(__unused unsigned int is_user_context)
+ 
+ 	/* bring-up profiling (boot-arg pc-sample, osfmk/kern/exception.c) */
+ 	extern void virt_pc_sample(uint64_t pc, uint64_t fp, unsigned int user_mode, uint32_t decrementer, bool due);
+-	virt_pc_sample(pc, regs ? get_saved_state_fp(regs) : 0, user_mode, cdp->cpu_decrementer, abstime >= cdp->rtcPop);
++	virt_pc_sample(pc, sample_fp, user_mode, cdp->cpu_decrementer, abstime >= cdp->rtcPop);
+ 
+ 	/* call the generic etimer */
+ 	timer_intr(user_mode, pc);
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index f7f387e..cd928a3 100644
 --- a/osfmk/arm64/arm_vm_init.c
@@ -1455,7 +1498,7 @@ index d8f1b19..3fac7b4 100644
  #endif
  
  #include <prng/entropy.h>
-@@ -3646,3 +3648,215 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3648,274 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1552,6 +1595,11 @@ index d8f1b19..3fac7b4 100644
 +static thread_t linux64_svc_thread;	/* linux64_trace: the thread whose system call is in flight, and its number */
 +static long long linux64_svc_num;
 +
++/* LINUX64: user-space exceptions by class for the host (linux64_abi.h, LINUX64_EL0_CLASSES) */
++uint64_t linux64_el0_stat[LINUX64_EL0_CPUS][2][LINUX64_EL0_CLASSES];
++static uint64_t linux64_el0_t0[LINUX64_EL0_CPUS];
++static uint8_t linux64_el0_cls[LINUX64_EL0_CPUS];
++
 +void
 +linux64_thread_bootstrap_return(void)
 +{
@@ -1578,6 +1626,13 @@ index d8f1b19..3fac7b4 100644
 +#if PRECISE_USER_KERNEL_TIME
 +	recount_enter_user();		/* user time vs system time, as locore's return to user space does */
 +#endif
++	{	/* the host's per-class accounting (linux64_abi.h): the exception this CPU took last is now done */
++		unsigned int slot = (unsigned int)cpu_number() & (LINUX64_EL0_CPUS - 1);
++		if (linux64_el0_t0[slot] != 0) {
++			linux64_el0_stat[slot][1][linux64_el0_cls[slot]] += __builtin_arm_rsr64("CNTVCT_EL0") - linux64_el0_t0[slot];
++			linux64_el0_t0[slot] = 0;
++		}
++	}
 +	linux64_el0_run(thread->machine.upcb, (thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) != 0);
 +}
 +
@@ -1603,21 +1658,68 @@ index d8f1b19..3fac7b4 100644
 +	recount_leave_user();		/* interrupts are still off here, as on locore's exception entry */
 +#endif
 +	linux64_count(LINUX64_CTR_EL0_EXC);	/* for the host's monitor: EL0 exceptions, the last one's ESR, FAR, PC */
++	{
++		unsigned int slot = (unsigned int)cpu_number() & (LINUX64_EL0_CPUS - 1), ec = (unsigned int)ESR_EC(f->esr);
++		unsigned int cls = f->esr == ~0ULL ? 3 : ec == ESR_EC_SVC_64 ? 0 : ec == ESR_EC_DABORT_EL0 ? 1 : ec == ESR_EC_IABORT_EL0 ? 2 : 4;
++		linux64_el0_stat[slot][0][cls]++;
++		linux64_el0_cls[slot] = (uint8_t)cls;
++		linux64_el0_t0[slot] = __builtin_arm_rsr64("CNTVCT_EL0");
++	}
 +	linux64_dbg[LINUX64_CTR_EL0_ESR] = f->esr;
 +	linux64_dbg[LINUX64_CTR_EL0_FAR] = f->far;
 +	linux64_dbg[LINUX64_CTR_EL0_PC] = f->pc;
 +	if (linux64_tracing()) kprintf("linux64: EL0 exception esr 0x%llx far 0x%llx pc 0x%llx x16 %lld ttbr0 0x%llx ttep 0x%llx\n", f->esr, f->far, f->pc, f->x[16],
 +	    __builtin_arm_rsr64("TTBR0_EL1"), (uint64_t)thread->map->pmap->ttep);
-+	for (unsigned i = 0; i < 29; i++) {
-+		set_saved_state_reg(ss, i, f->x[i]);
++	/*
++	 * The whole user state at once, signed once as locore's exception entry does (HAS_APPLE_PAC): the per-field setters
++	 * each check the old signature and sign again, five times per exception. EL0 runs with IRQ/FIQ masked while hosted
++	 * (no XNU interrupts at EL0 yet); XNU must see the user's own PSTATE, or its abort path takes the user fault for
++	 * one from a non-interruptible context.
++	 */
++	{
++		arm_saved_state64_t *s64 = saved_state64(ss);
++		uint32_t cpsr = (uint32_t)f->cpsr & ~(uint32_t)0x3c0;
++		for (unsigned i = 0; i < 29; i++) {
++			if (i != 16 && i != 17) {
++				s64->x[i] = f->x[i];
++			}
++		}
++		s64->fp = f->x[29];
++		s64->sp = f->sp;
++#if HAS_APPLE_PAC
++		uint64_t intr = ml_pac_safe_interrupts_disable();
++		asm volatile (
++			"mov	x9, lr"				"\n"
++			"mov	x0, %[ss]"			"\n"
++			"mrs	x10, SPSel"			"\n"
++			"msr	SPSel, #1"			"\n"
++			"mov	x1, %[pc]"			"\n"
++			"mov	w2, %w[cpsr]"			"\n"
++			"mov	x3, %[lr]"			"\n"
++			"mov	x4, %[x16]"			"\n"
++			"mov	x5, %[x17]"			"\n"
++			"str	x1, [x0, %[SS64_PC]]"		"\n"
++			"str	w2, [x0, %[SS64_CPSR]]"		"\n"
++			"str	x3, [x0, %[SS64_LR]]"		"\n"
++			"stp	x4, x5, [x0, %[SS64_X16]]"	"\n"
++			"bl	_ml_sign_thread_state"		"\n"
++			"msr	SPSel, x10"			"\n"
++			"mov	lr, x9"				"\n"
++			:
++			: [ss] "r"(ss), [pc] "r"(f->pc), [cpsr] "r"(cpsr), [lr] "r"(f->x[30]), [x16] "r"(f->x[16]), [x17] "r"(f->x[17]),
++			  [SS64_X16] "i"(ss64_offsetof(x[16])), [SS64_PC] "i"(ss64_offsetof(pc)),
++			  [SS64_CPSR] "i"(ss64_offsetof(cpsr)), [SS64_LR] "i"(ss64_offsetof(lr))
++			: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x16", "x17", "memory"
++		);
++		ml_pac_safe_interrupts_restore(intr);
++#else
++		s64->x[16] = f->x[16];
++		s64->x[17] = f->x[17];
++		s64->lr = f->x[30];
++		s64->pc = f->pc;
++		s64->cpsr = cpsr;
++#endif
 +	}
-+	set_saved_state_fp(ss, f->x[29]);
-+	set_saved_state_lr(ss, f->x[30]);
-+	set_saved_state_sp(ss, f->sp);
-+	set_saved_state_pc(ss, f->pc);
-+	/* EL0 runs with IRQ/FIQ masked while hosted (no XNU interrupts at EL0 yet); XNU must see the user's own PSTATE,
-+	 * or its abort path takes the user fault for one from a non-interruptible context */
-+	set_saved_state_cpsr(ss, (uint32_t)f->cpsr & ~(uint32_t)0x3c0);
 +	{
 +		arm_neon_saved_state_t *ns = thread->machine.uNeon;
 +		memcpy(&ns->ns_64.v.q[0], f->neon, sizeof(f->neon));
@@ -2074,20 +2176,21 @@ index 1111ccf..9bc5118 100644
  #include <mach/mach_types.h>
  #include <mach/processor_set.h>
  
-@@ -185,6 +186,23 @@ STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, stack_init);
+@@ -185,6 +186,24 @@ STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, stack_init);
   *	block.
   */
  
 +/*
 + * LINUX64 (xnulinux): an exception taken on an XNU kernel stack enters Linux's vectors, whose overflow check wants
 + * bit THREAD_SHIFT (14) of sp clear, as on Linux's 2*THREAD_SIZE-aligned stacks. Hosted, each stack starts on a
-+ * 32 KiB boundary: the allocation is 32 KiB aligned and the stack sits 32 KiB above its start (guard pages first,
-+ * then unused wired pages, then the stack, then the upper guard page).
++ * 32 KiB boundary. The allocation's mask aligns the address after its first guard page (kernel_memory_allocate with
++ * KMA_GUARD_FIRST: the start plus one page is 32 KiB aligned), so the stack sits one page plus 32 KiB above the start
++ * (the two guard pages, then unused wired pages, then the stack, then the upper guard page), for any page size.
 + */
 +static inline vm_offset_t
 +linux64_stack_lead(void)
 +{
-+	return linux64_hook ? 0x8000 : ptoa(2);
++	return linux64_hook ? ptoa(1) + 0x8000 : ptoa(2);
 +}
 +static inline vm_offset_t
 +linux64_stack_mask(void)
@@ -2098,7 +2201,7 @@ index 1111ccf..9bc5118 100644
  static vm_offset_t
  stack_alloc_internal(void)
  {
-@@ -218,7 +236,7 @@ stack_alloc_internal(void)
+@@ -218,7 +237,7 @@ stack_alloc_internal(void)
  		 */
  
  		kernel_memory_allocate(kernel_map, &stack,
@@ -2107,16 +2210,19 @@ index 1111ccf..9bc5118 100644
  		    flags, VM_KERN_MEMORY_STACK);
  
  		/*
-@@ -226,7 +244,7 @@ stack_alloc_internal(void)
+@@ -226,7 +245,10 @@ stack_alloc_internal(void)
  		 * guard pages.  Skip past them to get the actual stack base address.
  		 */
  
 -		stack += ptoa(2);
 +		stack += linux64_stack_lead();
++		if (linux64_hook && (stack & 0x7fff)) {	/* Linux would take an exception on it for a stack overflow */
++			panic("linux64: kernel stack %p is not on a 32 KiB boundary", (void *)stack);
++		}
  	}
  	return stack;
  }
-@@ -389,8 +407,8 @@ stack_collect(void)
+@@ -389,8 +411,8 @@ stack_collect(void)
  			stack = (vm_offset_t)vm_map_trunc_page(
  				stack,
  				VM_MAP_PAGE_MASK(kernel_map));
@@ -2261,3 +2367,45 @@ index fea9411..cdccb1f 100644
  	if (!disable_serial_output && !disable_kprintf_output) {
  		va_start(listp, fmt);
  		va_copy(listp2, listp);
+diff --git a/bsd/kern/mach_loader.c b/bsd/kern/mach_loader.c
+index 6ce6141..8fb290b 100644
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -801,7 +801,7 @@ load_machfile(
+ #if defined(__arm64__)
+ 	if (result->is_64bit_addr) {
+ #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+-		vm_map_pageshift = FOURK_PAGE_SHIFT;
++		vm_map_pageshift = PAGE_SHIFT;	/* LINUX64: the kernel's VM page (16 KB over a 4 KB granule with linux64_vm16k) */
+ #else
+ 		/* enforce 16KB alignment of VM map entries */
+ 		vm_map_pageshift = SIXTEENK_PAGE_SHIFT;
+diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+index a9b12f4..263775c 100644
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -788,7 +788,7 @@ vm_shared_region_create(
+ #endif /* CODE_SIGNING_MONITOR */
+ 			int vm_map_pageshift = PAGE_SHIFT;
+ #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+-			vm_map_pageshift = FOURK_PAGE_SHIFT;
++			vm_map_pageshift = PAGE_SHIFT;	/* LINUX64: as the task maps (mach_loader.c) */
+ #else
+ 			if (is_64bit ||
+ 			    page_shift_user32 == SIXTEENK_PAGE_SHIFT) {
+diff --git a/osfmk/arm/commpage/commpage.c b/osfmk/arm/commpage/commpage.c
+index 1f672e9..0413ad9 100644
+--- a/osfmk/arm/commpage/commpage.c
++++ b/osfmk/arm/commpage/commpage.c
+@@ -155,8 +155,9 @@ commpage_populate(void)
+ 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift_user32;
+ 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) page_shift_user32;
+ #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) FOURK_PAGE_SHIFT;
+-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) FOURK_PAGE_SHIFT;
++	/* LINUX64: user maps take the kernel's VM page (mach_loader.c) */
++	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) PAGE_SHIFT;
++	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) PAGE_SHIFT;
+ #else
+ 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
+ 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
