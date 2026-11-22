@@ -26,13 +26,13 @@ What the PoC did to get each step running, and what replaces it. Ordered by what
 | `mk-macvm-disk.sh` merges the OS cryptex into the sealed System volume (breaks the seal) | Graft the OS and App cryptexes at boot as macOS does (`graftdmg`), so the System volume stays sealed and an OS update replaces only the cryptex |
 | `kc-amfi-platform.py` patches AMFI's expected platform version in the kernel collection | Build the collection from the same macOS build as the disk (one version source), no byte patching |
 | `amfi_get_out_of_my_way=1`, `lp-sip0=0x802`, `kern.memorystatus_highwater_enabled=0` | Keep SIP/AMFI on; sign our plugin and kexts (ad-hoc trust cache of our own), only the unauthenticated-root bit stays |
-| `/chosen` UUIDs passed by hand (`root_uuid=`, `preboot_uuid=`) | Read from the disk's APFS container at load (xnu.ko or a host tool), no manual parameters |
+| `/chosen` UUIDs passed by hand (`root_uuid=`, `preboot_uuid=`) | Read from the disk's APFS container at load (xnu.ko or a host tool), no manual parameters (step one done: `mk-macvm-disk.sh` writes them to `mac.conf`, `xnulinux-boot.sh` reads it) |
 
 ## 4. Scripts and tests
 
 | Now | Replace with |
 |---|---|
-| ~30 scripts; the boot itself runs from `vm-m2-kbisect.sh` (`mode=3 stop=899 kmax=…`, a bisecting tool's knobs); several have session paths (`/Users/admin/...`), tty names, fixed `sleep`s | One driver (`xnulinux` CLI): `build`, `disk`, `boot`, `console`, `screenshot`, `test`; configuration in one file |
+| ~30 scripts; the boot itself ran from `vm-m2-kbisect.sh` (now `xnulinux-boot.sh`: builds, checks, retries, GPU bridge) (`mode=3 stop=899 kmax=…`, a bisecting tool's knobs); several have session paths (`/Users/admin/...`), tty names, fixed `sleep`s | One driver (`xnulinux` CLI): `build`, `disk`, `boot`, `console`, `screenshot`, `test`; configuration in one file |
 | HFS+ route scripts (`mk-fulldisk.sh`, `vm-sysdisk-*`, `vm-mk-sysdisk.sh`, `vm-m2-*`, `run-poc.sh`) | Removed (done: APFS route only) |
 | `tools/hosted/tests/t*.sh`, `af*.sh`: one-off probes (removed) | A test suite with expected results: boot to desktop, Safari/Chrome page load (screenshot compare), `xcodebuild` of a pinned project, Metal unit tests |
 | No CI | CI: fki.ko/xnu.ko build against a pinned kernel, XNU + collection build (x86_64 Linux works with the DroidVM toolchain), GPU plugin host tests on macOS |
