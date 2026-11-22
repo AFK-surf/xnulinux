@@ -4,6 +4,10 @@
 // fki) answered by xnudrmd, the Linux service that owns the DRM render node. Buffer mappings come back as the physical
 // pages Linux mapped, which this kext maps into the calling task: the process and the GPU share the memory, no copies.
 //
+// The user client's class is named AGXDeviceUserClient, the name Apple GPUs' device user client has: the sandbox profiles
+// of the processes that draw (apps, WebKit's GPU process, agents) let them open user clients of that class and of few
+// others, and refuse any other (MACF: "IOUC ... failed MACF"). No AGX kext is in the hosted collection, so the name is free.
+//
 // Methods (IOConnectCallScalarMethod):
 //   0 call(in_ptr, in_len, out_ptr, out_max) -> reply_len   a message for xnudrmd (xnudrm_proto.h), client id filled in
 //   1 map(gem_handle, size) -> (user address, map id)        XNUDRM_MAP, then the pages mapped into the task
@@ -37,8 +41,8 @@ public:
 	bool start(IOService *provider) override;
 };
 
-class XnuDrmClient : public IOUserClient {
-	OSDeclareDefaultStructors(XnuDrmClient)
+class AGXDeviceUserClient : public IOUserClient {
+	OSDeclareDefaultStructors(AGXDeviceUserClient)
 	task_t fTask = nullptr;
 	uint32_t fClient = 0;		// xnudrmd's client id (0: not open)
 	struct Slot { uint64_t id; IOMemoryMap *map; IOMemoryDescriptor *md; };
@@ -57,7 +61,7 @@ public:
 };
 
 OSDefineMetaClassAndStructors(XnuDrm, IOService)
-OSDefineMetaClassAndStructors(XnuDrmClient, IOUserClient)
+OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 
 bool XnuDrm::start(IOService *provider)
 {
@@ -68,13 +72,13 @@ bool XnuDrm::start(IOService *provider)
 		gOut = (uint8_t *)IOMallocData(sizeof(xnudrm_hdr) + XNUDRM_MAX_MSG);
 		if (!gCallLock || !gIn || !gOut) return false;
 	}
-	setProperty("IOUserClientClass", "XnuDrmClient");
+	setProperty("IOUserClientClass", "AGXDeviceUserClient");
 	registerService();
 	IOLog("XnuDrm: GPU bridge ready\n");
 	return true;
 }
 
-bool XnuDrmClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+bool AGXDeviceUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
 	if (!IOUserClient::initWithTask(owningTask, securityID, type)) return false;
 	fTask = owningTask;
@@ -89,7 +93,7 @@ bool XnuDrmClient::initWithTask(task_t owningTask, void *securityID, UInt32 type
 }
 
 // A message without payload; the reply's header into *reply.
-long XnuDrmClient::simple(uint32_t op, uint64_t a0, uint64_t a1, xnudrm_hdr *reply)
+long AGXDeviceUserClient::simple(uint32_t op, uint64_t a0, uint64_t a1, xnudrm_hdr *reply)
 {
 	IOLockLock(gCallLock);
 	xnudrm_hdr *h = (xnudrm_hdr *)gIn;
@@ -100,7 +104,7 @@ long XnuDrmClient::simple(uint32_t op, uint64_t a0, uint64_t a1, xnudrm_hdr *rep
 	return n;
 }
 
-IOReturn XnuDrmClient::doCall(IOExternalMethodArguments *a)
+IOReturn AGXDeviceUserClient::doCall(IOExternalMethodArguments *a)
 {
 	user_addr_t in = a->scalarInput[0], out = a->scalarInput[2];
 	uint64_t inlen = a->scalarInput[1], outmax = a->scalarInput[3];
@@ -124,7 +128,7 @@ out:
 	return ret;
 }
 
-IOReturn XnuDrmClient::doMap(IOExternalMethodArguments *a)
+IOReturn AGXDeviceUserClient::doMap(IOExternalMethodArguments *a)
 {
 	uint64_t handle = a->scalarInput[0], size = a->scalarInput[1];
 	IOLockLock(gCallLock);
@@ -174,7 +178,7 @@ IOReturn XnuDrmClient::doMap(IOExternalMethodArguments *a)
 	return kIOReturnSuccess;
 }
 
-IOReturn XnuDrmClient::doUnmap(IOExternalMethodArguments *a)
+IOReturn AGXDeviceUserClient::doUnmap(IOExternalMethodArguments *a)
 {
 	uint64_t id = a->scalarInput[0];
 	for (unsigned i = 0; i < fNSlots; i++) {
@@ -190,7 +194,7 @@ IOReturn XnuDrmClient::doUnmap(IOExternalMethodArguments *a)
 	return kIOReturnBadArgument;
 }
 
-IOReturn XnuDrmClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a, IOExternalMethodDispatch *,
+IOReturn AGXDeviceUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a, IOExternalMethodDispatch *,
     OSObject *, void *)
 {
 	switch (selector) {
@@ -201,7 +205,7 @@ IOReturn XnuDrmClient::externalMethod(uint32_t selector, IOExternalMethodArgumen
 	return kIOReturnUnsupported;
 }
 
-IOReturn XnuDrmClient::clientClose()
+IOReturn AGXDeviceUserClient::clientClose()
 {
 	for (unsigned i = 0; i < fNSlots; i++) {
 		if (fSlots[i].map) { fSlots[i].map->release(); fSlots[i].md->release(); fSlots[i] = (Slot){}; }
@@ -215,7 +219,7 @@ IOReturn XnuDrmClient::clientClose()
 	return kIOReturnSuccess;
 }
 
-void XnuDrmClient::free()
+void AGXDeviceUserClient::free()
 {
 	if (fSlots) IOFreeData(fSlots, fNSlots * sizeof(Slot));
 	IOUserClient::free();
