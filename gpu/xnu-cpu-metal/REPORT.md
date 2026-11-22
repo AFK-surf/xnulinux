@@ -491,3 +491,52 @@ dist/XnuCpuMetal.bundle/
   5. `VFXRenderer rendererWithDevice:dev options:nil` 与 `AVTView initWithFrame:options:` 正常初始化（0 `unrecognized selector`）
   6. 7 个框架（`VFX`/`AvatarKit`/`SceneKit`/`CoreRE`/`QuartzCore`/`RenderBox`/`CoreImage`）25,589 条 `__objc_selrefs` **0 缺失**
 - 全量回归：`test_carenderer_arm64e`、`test_round10_arm64e`、`test_round13_arm64e`、`test-bundle.sh arm64e` 全部 PASS。
+
+---
+
+## Round 16: 双后端 Bundle（Venus 真 GPU + lavapipe 回退）与 MoltenVK 预演
+
+### 改动内容
+1. **双 ICD 打包（`scripts/build-bundle-universal.sh`）**：
+   - 将宿主机编译好的 universal (`arm64 + arm64e`) `libvulkan_virtio.dylib`（默认 `/Users/admin/w/venus-darwin/out/lib/libvulkan_virtio.dylib`，可通过 `VENUS_DYLIB` 覆盖）打入 `XnuCpuMetal.bundle/Contents/Frameworks/libvulkan_virtio.dylib`，修正 `install_name` 为 `@rpath/libvulkan_virtio.dylib` 并 ad-hoc 重签。
+   - 同时生成 `Contents/Resources/virtio_icd.aarch64.json` 与 `Contents/Resources/vulkan/icd.d/virtio_icd.aarch64.json`（后者供 `WindowServer` 等 secure-mode 进程在忽略 `VK_ICD_FILENAMES` 时由 Vulkan-Loader 自动扫描；`metal2vulkan` 内部按 `Discrete < Integrated < Virtual < Cpu` 优先级自动优先选 Venus、无 Venus 设备时回退 lavapipe）。
+   - 确认 bundle 内全部 5 个 Mach-O 二进制（`XnuCpuMetal`、`libxnu_m2v.dylib`、`libvulkan.1.dylib`、`libvulkan_lvp.dylib`、`libvulkan_virtio.dylib`）均为 `arm64 + arm64e` universal fat。
+2. **启动自动探测与环境变量覆盖（`src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm`）**：
+   - 后端选择优先级：`XNU_CPU_METAL_ICD`（指定任意自定义 ICD JSON，便于宿主机用 MoltenVK 测试）> `XNU_CPU_METAL_BACKEND=venus|lavapipe` > 自动探测 `IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("XnuDrm"))`（存在则选 Venus，否则选 lavapipe）。
+   - 选择 Venus 或自定义 ICD 时**跳过**所有 lavapipe 专用设置（`MESA_SHADER_CACHE_DIR`、`MESA_SHADER_CACHE_MAX_SIZE`、`LP_NUM_THREADS`）；`metal2vulkan-runtime` 的 3600s CPU watchdog 补丁本就仅对 `DeviceKind::Cpu` 生效，Venus 自动保持标准 GPU watchdog（20.2s）。
+   - 自动探测选中 Venus 但打开失败时自动回退 lavapipe；若通过 `XNU_CPU_METAL_BACKEND=venus` 强制指定则不回退并返回 `nil`。
+3. **设备名与型号（`XnuCpuMetalPlugin.mm`）**：
+   - `name` 直接返回 Vulkan physical device 的 `deviceName`（如 Venus 下的 `"Virtio-GPU Venus (Apple M5 Max)"`、MoltenVK 下的 `"Apple M5 Max"`、lavapipe 下的 `"llvmpipe (LLVM 22.1.8, 128 bits)"`），不再包装 `"XnuCpuMetal (...)"` 前缀。
+   - 同步在 `XcmBackendDevice` 上注册 `model` 与 `productName`（均返回真实 Vulkan `deviceName`）。
+
+### 宿主机 MoltenVK（`1.4.2`, Apple M5 Max）全套测试与缺口审计
+通过 `XNU_CPU_METAL_ICD=/Users/admin/.local/krunkit/Cellar/molten-vk/1.4.2/etc/vulkan/icd.d/MoltenVK_icd.json`（注：krunkit 的 `libMoltenVK.dylib` 为 `arm64`-only，而我们打包的 `libvulkan_virtio.dylib` 为 `arm64 + arm64e`）对完整测试套件进行预演，同时对比 `lavapipe`（`arm64e`）：
+
+| 测试项 | lavapipe (`arm64e`) | MoltenVK (`arm64`, Apple M5 Max) | 说明 |
+|---|---|---|---|
+| `test-bundle.sh` (`vecadd N=1024`) | PASS (`bad=0`) | PASS (`bad=0`) | `name` / `model` 均正确反映真实后端 |
+| `test-render-ci.sh` (Render Pass) | PASS | PASS | 64×64 RGBA8 三角形完全匹配 |
+| `test-render-ci.sh` (`CIGaussianBlur`) | PASS (`maxErr=1, meanErr=0.0161`) | **PASS (`maxErr=0, meanErr=0.0000, nonZeroDiff=0`)** | 与原生 Apple M5 Max 逐字节完全一致 |
+| `test_round10` (Linear Tex + SharedEvent + Fence) | PASS (4/4) | PASS (4/4) | 4 种 WindowServer 线性纹理 + CPU 原地覆写全过 |
+| `test_carenderer` (5 项含 `VfxXg/Xgc`) | PASS (`rounded_only=1`, `rounded_shadow=3 / 0.092`) | **PASS (`rounded_only=0`, `rounded_shadow=3 / 0.018`)** | 全部 5 项通过 |
+| `test_round13` (0-len NoCopy + 2 heavy CBs) | PASS (`1.93s`, `dealloced=2/2`) | **PASS (`0.34s`, `dealloced=2/2`)** | 耗时快 5.7× |
+| `test_round14_vfx` (VFX/AvatarKit/25,589 selrefs) | PASS (6/6) | PASS (6/6) | 0 missing selectors |
+| `test_stress_mt` (4 阶段并发压测) | PASS (Phase 1–4 `failures=0`) | PASS (Phase 1–4 `failures=0`) | 8 线程并发 commit / CARenderer / NoCopy |
+| `XNU_CPU_METAL_BACKEND=lavapipe` / `venus` | `lavapipe` PASS；宿主机无 `XnuDrm` 强选 `venus` 干净返回 `nil` (`VkResult(-3)`) | — | 环境变量覆盖与无回退语义已验证 |
+
+**MoltenVK 非阻塞降级提示与 Venus 预期注意事项**（无功能性失败）：
+- `metal2vulkan-driver-pipeline-cache-kept`：驱动未暴露 `VK_KHR_pipeline_binary`（使用驱动自身管线缓存，功能等价）。
+- `metal2vulkan-degrade-shadowed-texture`：宿主指针导入（`VK_EXT_external_memory_host`）的线性纹理在行距不匹配或无 `VK_EXT_image_drm_format_modifier` 时采用 shadow-image 拷贝；若托管 Venus 不暴露 `VK_EXT_external_memory_host`，`metal2vulkan` 会自动退回到 host-visible staging/copy 路径（`test_round10` 已覆盖）。
+- `metal2vulkan-degrade-render-pass-split`：可编程混合（`[[color(0)]]` framebuffer fetch）在无原生 raster-order color attachment 时拆分为子 RenderPass（功能正常，仅多一次 tile flush）。
+- `metal2vulkan-degrade-dont-care-store`：`Depth32Float_Stencil8` 的 `DontCare` storeOp 降级为 `STORE`（功能正常）。
+
+### IOSurface 帧拷贝开销实测（`test/test_iosurface_bench.mm`）
+在 `XcmTexture` 当前基于 `IOSurfaceLock` + `replaceRegion`/`getBytes` 的双向同步路径下，测量不同分辨率（`BGRA8Unorm`，10 轮取平均）：
+
+| 分辨率 (单帧大小) | lavapipe (`arm64e`) RenderPass+`syncToIOSurface` | lavapipe `upload+download` | MoltenVK (`Apple M5 Max`) RenderPass+`syncToIOSurface` | MoltenVK `upload+download` |
+|---|---|---|---|---|
+| `512×512` (1.00 MB) | `0.29 ms` (3476 MB/s) | `0.23 ms` | `0.65 ms` (1542 MB/s) | `0.37 ms` |
+| `1920×1080` (7.91 MB) | `0.76 ms` (10436 MB/s) | `0.47 ms` | `1.59 ms` (4969 MB/s) | `2.37 ms` (est upload `0.78 ms`) |
+| `2560×1440` (14.06 MB) | `1.12 ms` (12530 MB/s) | `0.66 ms` | `2.77 ms` (5078 MB/s) | `4.26 ms` (est upload `1.49 ms`) |
+
+结论：在真 GPU（MoltenVK）上，1080p 单帧 `syncToIOSurface` 约 `1.59 ms`、双向约 `2.37 ms`；1440p 单帧回写约 `2.77 ms`、双向约 `4.26 ms`。托管 VM 中经 Venus（virtio-gpu 共享内存）预计在 `2–5 ms/帧` 量级，首版接入可直接复用现有 IOSurface 同步路径满足 60fps 交互基线，后续如出现高分辨率合成瓶颈再评估基于共享内存 / `VK_EXT_external_memory_host` 的零拷贝优化。

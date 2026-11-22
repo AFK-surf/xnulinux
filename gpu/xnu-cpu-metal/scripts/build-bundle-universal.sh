@@ -27,7 +27,16 @@ lipo -create \
   "$ROOT/dist/lavapipe-arm64e/lib/libvulkan_lvp.dylib" \
   -output "$BUNDLE/Contents/Frameworks/libvulkan_lvp.dylib"
 
-# 2. Relocatable ICD JSON (both top-level for host env-var runs and vulkan/icd.d/ for secure-mode SYSCONFDIR)
+VENUS_DYLIB="${VENUS_DYLIB:-/Users/admin/w/venus-darwin/out/lib/libvulkan_virtio.dylib}"
+HAS_VENUS=0
+if [ -f "$VENUS_DYLIB" ]; then
+  cp -f "$VENUS_DYLIB" "$BUNDLE/Contents/Frameworks/libvulkan_virtio.dylib"
+  chmod u+w "$BUNDLE/Contents/Frameworks/libvulkan_virtio.dylib"
+  install_name_tool -id "@rpath/libvulkan_virtio.dylib" "$BUNDLE/Contents/Frameworks/libvulkan_virtio.dylib"
+  HAS_VENUS=1
+fi
+
+# 2. Relocatable ICD JSONs (both top-level for env-var/backend selection and vulkan/icd.d/ for secure-mode SYSCONFDIR)
 cat > "$BUNDLE/Contents/Resources/lvp_icd.aarch64.json" <<'EOF'
 {
     "ICD": {
@@ -49,6 +58,28 @@ cat > "$BUNDLE/Contents/Resources/vulkan/icd.d/lvp_icd.aarch64.json" <<'EOF'
     "file_format_version": "1.0.1"
 }
 EOF
+if [ "$HAS_VENUS" = "1" ]; then
+  cat > "$BUNDLE/Contents/Resources/virtio_icd.aarch64.json" <<'EOF'
+{
+    "ICD": {
+        "api_version": "1.4.363",
+        "library_arch": "64",
+        "library_path": "../Frameworks/libvulkan_virtio.dylib"
+    },
+    "file_format_version": "1.0.1"
+}
+EOF
+  cat > "$BUNDLE/Contents/Resources/vulkan/icd.d/virtio_icd.aarch64.json" <<'EOF'
+{
+    "ICD": {
+        "api_version": "1.4.363",
+        "library_arch": "64",
+        "library_path": "../../../Frameworks/libvulkan_virtio.dylib"
+    },
+    "file_format_version": "1.0.1"
+}
+EOF
+fi
 
 # 3. Compile XnuCpuMetal MH_BUNDLE for both arm64 and arm64e, then lipo
 for ARCH in arm64 arm64e; do
@@ -75,6 +106,9 @@ lipo -create "$TMP/XnuCpuMetal.arm64" "$TMP/XnuCpuMetal.arm64e" \
 codesign -s - --force "$BUNDLE/Contents/Frameworks/libxnu_m2v.dylib"
 codesign -s - --force "$BUNDLE/Contents/Frameworks/libvulkan.1.dylib"
 codesign -s - --force "$BUNDLE/Contents/Frameworks/libvulkan_lvp.dylib"
+if [ "$HAS_VENUS" = "1" ]; then
+  codesign -s - --force "$BUNDLE/Contents/Frameworks/libvulkan_virtio.dylib"
+fi
 codesign -s - --force "$BUNDLE/Contents/MacOS/XnuCpuMetal"
 
 echo "=== Built universal (arm64 + arm64e) $BUNDLE ==="
@@ -85,4 +119,7 @@ for f in \
   "$BUNDLE/Contents/Frameworks/libvulkan_lvp.dylib"; do
   lipo -info "$f"
 done
+if [ "$HAS_VENUS" = "1" ]; then
+  lipo -info "$BUNDLE/Contents/Frameworks/libvulkan_virtio.dylib"
+fi
 ls -lh "$BUNDLE/Contents/MacOS/" "$BUNDLE/Contents/Frameworks/"

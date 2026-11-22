@@ -2190,8 +2190,8 @@ static id gSingletonDevice = nil;
 static NSString *xcmDev_name(id, SEL) {
     char buf[256] = {};
     if (gXm2vDevice && xm2v_device_name(gXm2vDevice, buf, sizeof(buf)) > 0)
-        return [NSString stringWithFormat:@"XnuCpuMetal (%s)", buf];
-    return @"XnuCpuMetal (lavapipe)";
+        return [NSString stringWithUTF8String:buf];
+    return @"XnuMetal";
 }
 static uint64_t xcmDev_registryID(id, SEL) { return gRegistryID; }
 static BOOL xcmDev_isLowPower(id, SEL) { return NO; }
@@ -2982,6 +2982,8 @@ static Class createBackendDeviceClass(void) {
         struct Entry { const char *sel; IMP imp; const char *types; };
         static const Entry entries[] = {
             {"name", (IMP)xcmDev_name, "@16@0:8"},
+            {"model", (IMP)xcmDev_name, "@16@0:8"},
+            {"productName", (IMP)xcmDev_name, "@16@0:8"},
             {"targetDeviceArchitecture", (IMP)xcmDev_targetDeviceArchitecture, "@16@0:8"},
             {"registryID", (IMP)xcmDev_registryID, "Q16@0:8"},
             {"isLowPower", (IMP)xcmDev_isLowPower, "B16@0:8"},
@@ -3241,14 +3243,36 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
     }
 
     std::string loader = contentsDir.empty() ? "libvulkan.1.dylib" : (contentsDir + "/Frameworks/libvulkan.1.dylib");
-    std::string icdJson = contentsDir.empty() ? "" : (contentsDir + "/Resources/lvp_icd.aarch64.json");
+    std::string lvpIcd = contentsDir.empty() ? "" : (contentsDir + "/Resources/lvp_icd.aarch64.json");
+    std::string venusIcd = contentsDir.empty() ? "" : (contentsDir + "/Resources/virtio_icd.aarch64.json");
 
     const char *envLoader = getenv("XNU_CPU_METAL_LOADER");
     if (envLoader && envLoader[0]) loader = envLoader;
     const char *envIcd = getenv("XNU_CPU_METAL_ICD");
-    if (envIcd && envIcd[0]) icdJson = envIcd;
+    const char *envBackend = getenv("XNU_CPU_METAL_BACKEND");
 
-    // IOSurfaces read/written by this CPU Metal device must be linear uncompressed rows (WindowServer/QuartzCore).
+    bool useVenus = false;
+    bool forcedBackend = false;
+    bool customIcd = (envIcd && envIcd[0]);
+    if (!customIcd) {
+        if (envBackend && strcasecmp(envBackend, "venus") == 0) {
+            useVenus = true;
+            forcedBackend = true;
+        } else if (envBackend && strcasecmp(envBackend, "lavapipe") == 0) {
+            useVenus = false;
+            forcedBackend = true;
+        } else {
+            io_service_t drmSvc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("XnuDrm"));
+            if (drmSvc) {
+                IOObjectRelease(drmSvc);
+                struct stat st = {};
+                if (!venusIcd.empty() && stat(venusIcd.c_str(), &st) == 0) useVenus = true;
+            }
+        }
+    }
+    std::string icdJson = customIcd ? std::string(envIcd) : (useVenus ? venusIcd : lvpIcd);
+
+    // IOSurfaces read/written by this Metal device must be linear uncompressed rows (WindowServer/QuartzCore).
     // Use in-memory NSRegistrationDomain (never persisted to any app's plist on disk).
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"CAEnableIOSurfaceCompression": @NO}];
 
@@ -3300,28 +3324,38 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
         }
     }
 
-    // Configure Mesa lavapipe LLVM JIT disk cache (bounded, overridable by caller).
-    if (cacheDir[0]) {
-        char mesaCache[544];
-        snprintf(mesaCache, sizeof(mesaCache), "%s/mesa", cacheDir);
-        mkdir(mesaCache, 0700);
-        setenv("MESA_SHADER_CACHE_DIR", mesaCache, 0);
-    }
-    setenv("MESA_SHADER_CACHE_MAX_SIZE", "256M", 0);
+    auto configureLavapipeEnv = [&]() {
+        // Configure Mesa lavapipe LLVM JIT disk cache (bounded, overridable by caller).
+        if (cacheDir[0]) {
+            char mesaCache[544];
+            snprintf(mesaCache, sizeof(mesaCache), "%s/mesa", cacheDir);
+            mkdir(mesaCache, 0700);
+            setenv("MESA_SHADER_CACHE_DIR", mesaCache, 0);
+        }
+        setenv("MESA_SHADER_CACHE_MAX_SIZE", "256M", 0);
 
-    // Multi-VM safe lavapipe thread default: 0 (inline, no worker threads) on 1-CPU hosts,
-    // capped at 2 on multi-core hosts; always overridable via LP_NUM_THREADS.
-    if (!getenv("LP_NUM_THREADS")) {
-        int ncpu = 1;
-        size_t sz = sizeof(ncpu);
-        if (sysctlbyname("hw.ncpu", &ncpu, &sz, nullptr, 0) != 0 || ncpu < 1) ncpu = 1;
-        int lpThreads = (ncpu <= 1) ? 0 : (ncpu > 2 ? 2 : ncpu);
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d", lpThreads);
-        setenv("LP_NUM_THREADS", buf, 0);
-    }
+        // Multi-VM safe lavapipe thread default: 0 (inline, no worker threads) on 1-CPU hosts,
+        // capped at 2 on multi-core hosts; always overridable via LP_NUM_THREADS.
+        if (!getenv("LP_NUM_THREADS")) {
+            int ncpu = 1;
+            size_t sz = sizeof(ncpu);
+            if (sysctlbyname("hw.ncpu", &ncpu, &sz, nullptr, 0) != 0 || ncpu < 1) ncpu = 1;
+            int lpThreads = (ncpu <= 1) ? 0 : (ncpu > 2 ? 2 : ncpu);
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d", lpThreads);
+            setenv("LP_NUM_THREADS", buf, 0);
+        }
+    };
 
-    return xnu_cpu_metal_open_device(loader.c_str(), icdJson.c_str(), cacheDir, port);
+    if (!customIcd && !useVenus) configureLavapipeEnv();
+
+    id dev = xnu_cpu_metal_open_device(loader.c_str(), icdJson.c_str(), cacheDir, port);
+    if (!dev && useVenus && !forcedBackend && !customIcd && !lvpIcd.empty()) {
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: Venus backend open failed, falling back to lavapipe");
+        configureLavapipeEnv();
+        dev = xnu_cpu_metal_open_device(loader.c_str(), lvpIcd.c_str(), cacheDir, port);
+    }
+    return dev;
 }
 
 @end
