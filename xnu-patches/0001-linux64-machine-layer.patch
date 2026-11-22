@@ -111,7 +111,7 @@ index d46815b..acea296 100644
  	g_crypto_funcs->random_kmem_init_fn(ctx);
  }
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..3f0cbde 100644
+index ac1713e..8486021 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -1,4 +1,5 @@
@@ -120,20 +120,21 @@ index ac1713e..3f0cbde 100644
  /*
   * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
   *
-@@ -228,6 +229,12 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
+@@ -228,6 +229,13 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
  extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
  extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
  
 +/* LINUX64 (xnulinux): the hosted machine layer's state (linux64/linux64.h), set by xnu.ko before arm_init */
 +uintptr_t linux64_hook;
 +uintptr_t linux64_slide;
-+unsigned int linux64_vint;
++unsigned int linux64_vint[LINUX64_CPU_SLOTS];
++unsigned int linux64_ipi_pending[LINUX64_CPU_SLOTS];
 +unsigned long linux64_dbg[LINUX64_NCOUNTERS];
 +
  static void
  arm_slide_rebase_and_sign_image(void)
  {
-@@ -285,10 +292,14 @@ arm_slide_rebase_and_sign_image(void)
+@@ -285,10 +293,14 @@ arm_slide_rebase_and_sign_image(void)
  		 * using hardcoded kernel link address
  		 */
  		slide = (uintptr_t)k_mh - VM_KERNEL_LINK_ADDRESS;
@@ -149,10 +150,24 @@ index ac1713e..3f0cbde 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +352,14 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +353,28 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
++/*
++ * LINUX64 (xnulinux): where a secondary CPU starts (LINUX64_CALL_CPU_START), on the host's thread for that CPU, in
++ * its own world (the host's page tables, which hold XNU's kernel mappings; XNU's keys). start_cpu's work on hardware
++ * (MMU, vectors, stacks) is the host's; arm_init_cpu sets the thread pointer and goes on into the scheduler.
++ */
++void arm_init_cpu(cpu_data_t *cpu_data_ptr, uint64_t hib_header_phys);
++void linux64_cpu_entry(cpu_data_t *cpu_data_ptr) __attribute__((noreturn));
++void
++linux64_cpu_entry(cpu_data_t *cpu_data_ptr)
++{
++	arm_init_cpu(cpu_data_ptr, 0);
++	__builtin_unreachable();
++}
++
 +/* LINUX64: a failed assert() while hosted (see kern/assert.h); the host may end the run. */
 +void
 +linux64_assert_report(const char *file, int line, const char *expr)
@@ -206,6 +221,26 @@ index 743117b..753d128 100644
  	__asm__ volatile (
                   "msr		SPSel, #1  \n"
                   "mov		%0, sp     \n"
+diff --git a/osfmk/arm/locks.h b/osfmk/arm/locks.h
+index e5c898f..da72512 100644
+--- a/osfmk/arm/locks.h
++++ b/osfmk/arm/locks.h
+@@ -112,7 +112,14 @@ extern bool                has_lock_pv;
+ #define LOCK_SNOOP_SPINS_MCS    10
+ #define LOCK_PRETEST            0
+ 
+-#define wait_for_event()        __builtin_arm_wfe()
++/*
++ * LINUX64 (xnulinux): a CPU waiting here may wait for another that the host holds (it runs Linux for a while); every
++ * ~1 ms of waiting lets the host take this CPU's interrupts, so the two cannot wait on each other forever
++ * (linux64_spin_relax, osfmk/arm/machine_routines_common.c).
++ */
++extern unsigned long linux64_hook;
++extern void linux64_spin_relax(void);
++#define wait_for_event()        ({ __builtin_arm_wfe(); if (__improbable(linux64_hook)) linux64_spin_relax(); })
+ 
+ #ifndef __BUILDING_XNU_LIB_UNITTEST__
+ #if SCHED_HYGIENE_DEBUG
 diff --git a/osfmk/arm/machdep_call.c b/osfmk/arm/machdep_call.c
 index 7dc0e57..349d015 100644
 --- a/osfmk/arm/machdep_call.c
@@ -240,7 +275,7 @@ index 7dc0e57..349d015 100644
  }
  
 diff --git a/osfmk/arm/machine_routines_common.c b/osfmk/arm/machine_routines_common.c
-index b65f76c..b1ab2a2 100644
+index b65f76c..eac911b 100644
 --- a/osfmk/arm/machine_routines_common.c
 +++ b/osfmk/arm/machine_routines_common.c
 @@ -27,6 +27,7 @@
@@ -251,7 +286,7 @@ index b65f76c..b1ab2a2 100644
  #include <arm/cpu_internal.h>
  #include <arm/cpuid.h>
  #include <arm/cpuid_internal.h>
-@@ -1094,6 +1095,46 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
+@@ -1094,6 +1095,52 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
  
  	thread = current_thread();
  
@@ -259,37 +294,43 @@ index b65f76c..b1ab2a2 100644
 +		/*
 +		 * LINUX64 (xnulinux): XNU runs on its own kernel stacks, where Linux cannot take an interrupt
 +		 * (its entry code treats a foreign stack as overflow). Keep IRQs masked in hardware and track
-+		 * XNU's view in linux64_vint; timer "interrupts" are delivered from cpu_idle.
++		 * XNU's view in linux64_vint (per CPU); timer "interrupts" are delivered from cpu_idle.
 +		 */
 +		if (linux64_hook) {
-+			boolean_t was = linux64_vint ? TRUE : FALSE;
++			unsigned int slot = linux64_cpu_slot();
++			boolean_t was = linux64_vint[slot] ? TRUE : FALSE;
 +			if (enable && !was) {
 +				/*
 +				 * Kernel code that runs long without going to user space or idle never sees a host interrupt
 +				 * (hardware IRQs stay masked in XNU's kernel), which stalls Linux (RCU) and stops XNU's own
 +				 * clock. Where XNU would take a pending interrupt, re-enabling interrupts, let Linux run its
-+				 * interrupts every 2 ms and deliver XNU's timer if it is due, as the IRQ path does.
++				 * interrupts every 2 ms and deliver XNU's timer if it is due, as the IRQ path does; and take an
++				 * IPI another CPU sent.
 +				 */
-+				static uint64_t linux64_last_kyield;
++				static uint64_t linux64_last_kyield[LINUX64_CPU_SLOTS];
 +				uint64_t now = mach_absolute_time();
-+				if (now - linux64_last_kyield > 48000 && thread->machine.CpuDatap->cpu_int_state == NULL) {
-+					extern void rtclock_intr(unsigned int);
-+					cpu_data_t *cdp = thread->machine.CpuDatap;
-+					linux64_last_kyield = now;
-+					linux64_call2(LINUX64_CALL_PREEMPTED, 1, 0);
-+					if (cdp->rtcPop != 0 && cdp->rtcPop != 0xFFFFFFFFFFFFFFFFULL && mach_absolute_time() >= cdp->rtcPop) {
-+						cdp->cpu_decrementer = -1;
-+						rtclock_intr(FALSE);
++				cpu_data_t *cdp = thread->machine.CpuDatap;
++				if (cdp->cpu_int_state == NULL) {
++					if (now - linux64_last_kyield[slot] > 48000) {
++						extern void rtclock_intr(unsigned int);
++						linux64_last_kyield[slot] = now;
++						linux64_call2(LINUX64_CALL_PREEMPTED, 1, 0);
++						if (cdp->rtcPop != 0 && cdp->rtcPop != 0xFFFFFFFFFFFFFFFFULL && mach_absolute_time() >= cdp->rtcPop) {
++							cdp->cpu_decrementer = -1;
++							rtclock_intr(FALSE);
++						}
 +					}
++					linux64_ipi_take();
 +				}
 +				if (get_preemption_level() == 0) {
 +					while (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
 +						ast_taken_kernel();
 +					}
 +				}
-+				linux64_vint = 1;
++				/* ast_taken_kernel may have switched this thread out: it can be back on another CPU */
++				linux64_vint[linux64_cpu_slot()] = 1;
 +			} else if (!enable) {
-+				linux64_vint = 0;
++				linux64_vint[slot] = 0;
 +			}
 +			return was;
 +		}
@@ -298,7 +339,66 @@ index b65f76c..b1ab2a2 100644
  	state = __builtin_arm_rsr("DAIF");
  
  	if (__improbable(!(state & DAIF_DEBUGF))) {
-@@ -1384,6 +1425,12 @@ ml_wait_max_cpus(void)
+@@ -1366,6 +1413,58 @@ ml_early_cpu_max_number(void)
+ 	return ml_get_max_cpu_number();
+ }
+ 
++/*
++ * LINUX64 (xnulinux): inter-processor interrupts while hosted. The sender sets the target's pending slot and asks the
++ * host to make the target look (wake it from its idle call, or interrupt its user code); the target takes it where its
++ * interrupts are enabled again (ml_set_interrupts_enabled), when the host interrupted its user code, and after idle,
++ * as the IPI's FIQ would be taken on hardware: cpu_signal_handler, with interrupts off.
++ */
++/*
++ * LINUX64 (xnulinux): called from spin-waits (wait_for_event, the cross-call wait). The CPU being waited for may be
++ * held by the host: in a call into it (file I/O, idle) or running Linux there. On hardware this CPU would take
++ * interrupts meanwhile; hosted, with interrupts masked here, the host would never get this CPU back, and if the other
++ * CPU's host side waits for this one (an IPI, a lock), neither moves. So every ~1 ms of spinning the host takes this
++ * CPU's interrupts (LINUX64_CALL_PREEMPTED). Nothing of XNU's runs here (no IPI, no AST): the spinning code may hold
++ * per-CPU lock state that a context switch would break.
++ */
++static uint64_t linux64_last_relax[LINUX64_CPU_SLOTS];
++void
++linux64_spin_relax(void)
++{
++	unsigned int slot = linux64_cpu_slot();
++	uint64_t now = mach_absolute_time();
++
++	if (now - linux64_last_relax[slot] < 24000) {     /* ~1 ms of the 24 MHz timebase */
++		return;
++	}
++	linux64_last_relax[slot] = now;
++	linux64_call2(LINUX64_CALL_PREEMPTED, 1, 0);
++}
++
++void
++linux64_ipi_take(void)
++{
++	unsigned int slot = linux64_cpu_slot();
++
++	if (os_atomic_load(&linux64_ipi_pending[slot], relaxed) && os_atomic_xchg(&linux64_ipi_pending[slot], 0, acquire)) {
++		cpu_signal_handler();
++	}
++}
++
++void
++linux64_cpu_signal(unsigned int cpu)
++{
++	cpu_data_t *target = CpuDataEntries[cpu].cpu_data_vaddr;
++	uint64_t mpidr;
++
++	if (target == NULL) {
++		return;
++	}
++	mpidr = target->cpu_phys_id;
++	os_atomic_store(&linux64_ipi_pending[LINUX64_CPU_SLOT(mpidr)], 1, release);
++	linux64_call2(LINUX64_CALL_IPI, mpidr, 0);
++}
++
+ void
+ ml_set_max_cpus(unsigned int max_cpus __unused)
+ {
+@@ -1384,6 +1483,12 @@ ml_wait_max_cpus(void)
  {
  	assert(lockdown_done);
  	lck_mtx_lock(&max_cpus_lock);
@@ -536,7 +636,7 @@ index 84deb3f..2579711 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..5124822 100644
+index d10d7a1..0c3e1ed 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -32,6 +32,7 @@
@@ -567,7 +667,7 @@ index d10d7a1..5124822 100644
  	if (unmask) {
  		/* Latch SW IRQ+FIQ counter prior to unmasking
  		 * interrupts.
-@@ -494,6 +501,39 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
+@@ -494,6 +501,37 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
  	return ipending || (nirqc != irqc);
  }
  
@@ -590,16 +690,14 @@ index d10d7a1..5124822 100644
 +		/* relative: XNU's timebase (mach_absolute_time) is offset from the host's counter */
 +		absolutetime_to_nanoseconds(deadline - now, &ns);
 +	}
-+#if LINUX64_DEBUG
-+	if (++linux64_dbg[LINUX64_CTR_HOST_IDLE] % 150000 == 0) {	/* every two to three minutes of idle */
-+		linux64_dump_threads();	/* who is blocked, and where */
++	if (linux64_dbg[LINUX64_CTR_DUMP_REQ] && os_atomic_xchg(&linux64_dbg[LINUX64_CTR_DUMP_REQ], 0, relaxed)) {
++		linux64_dump_threads();	/* the host asked: who is blocked, and where */
 +	}
-+#else
 +	linux64_count(LINUX64_CTR_HOST_IDLE);
-+#endif
-+	linux64_call2(LINUX64_CALL_IDLE, ns, 0);
++	linux64_call2(LINUX64_CALL_IDLE, ns, (unsigned long)&linux64_ipi_pending[linux64_cpu_slot()]);
 +	cpu_data_ptr->cpu_decrementer = -1;
 +	rtclock_intr(FALSE);
++	linux64_ipi_take();		/* what woke the host's idle call early, if it was another CPU */
 +	ClearIdlePop(TRUE);
 +	cpu_idle_exit(FALSE);
 +}
@@ -607,7 +705,7 @@ index d10d7a1..5124822 100644
  /*
   *	Routine:	cpu_idle
   *	Function:
-@@ -506,6 +546,9 @@ cpu_idle(void)
+@@ -506,6 +544,9 @@ cpu_idle(void)
  	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
  	bool idle_disallowed = false;
  
@@ -617,6 +715,20 @@ index d10d7a1..5124822 100644
  	if (__improbable((!idle_enable))) {
  		idle_disallowed = true;
  		os_atomic_inc(&virt_idle_disallowed[0], relaxed);
+@@ -1004,7 +1045,12 @@ cpu_start(int cpu)
+ #endif
+ #endif /* CONFIG_SPTM */
+ 
+-		PE_cpu_start_internal(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
++		if (linux64_hook) {
++			/* LINUX64 (xnulinux): the host starts the CPU, on a Linux CPU of that MPIDR, at linux64_cpu_entry */
++			linux64_call2(LINUX64_CALL_CPU_START, cpu_data_ptr->cpu_phys_id, (unsigned long)cpu_data_ptr);
++		} else {
++			PE_cpu_start_internal(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
++		}
+ 
+ 	}
+ }
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
 index a191eb3..035b1a8 100644
 --- a/osfmk/arm64/cswitch.s
@@ -1209,7 +1321,7 @@ index 13d2819..1837c6a 100644
  
  	mrs		x1, MPIDR_EL1
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index f456377..8d66fb7 100644
+index f456377..b66afca 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
 @@ -27,6 +27,7 @@
@@ -1235,7 +1347,7 @@ index f456377..8d66fb7 100644
 +	{
 +		/* LINUX64 (xnulinux): hosted, hardware IRQs stay masked; only the virtual flag changes. */
 +		if (linux64_hook) {
-+			linux64_vint = 1;
++			LINUX64_VINT = 1;
 +			return;
 +		}
 +	}
@@ -1249,7 +1361,7 @@ index f456377..8d66fb7 100644
 +	{
 +		/* LINUX64: interrupts are virtual while hosted (see ml_set_interrupts_enabled_with_debug). */
 +		if (linux64_hook) {
-+			return linux64_vint ? TRUE : FALSE;
++			return LINUX64_VINT ? TRUE : FALSE;
 +		}
 +	}
  	MRS(value, "DAIF");
@@ -1326,7 +1438,7 @@ index d211433..cb48971 100644
  
  	// No need for atomic - These are per CPU and interrupts are disabled
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..9e0422b 100644
+index d8f1b19..3fac7b4 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
 @@ -1,4 +1,5 @@
@@ -1343,7 +1455,7 @@ index d8f1b19..9e0422b 100644
  #endif
  
  #include <prng/entropy.h>
-@@ -3646,3 +3648,210 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3648,215 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1526,6 +1638,11 @@ index d8f1b19..9e0422b 100644
 +			cdp->cpu_stat.irq_ex_cnt++;
 +			cdp->cpu_decrementer = -1;
 +			rtclock_intr(TRUE);
++			cdp->cpu_int_state = NULL;
++		}
++		if (os_atomic_load(&linux64_ipi_pending[linux64_cpu_slot()], relaxed)) {	/* another CPU's IPI, as sleh_fiq takes it */
++			cdp->cpu_int_state = ss;
++			linux64_ipi_take();
 +			cdp->cpu_int_state = NULL;
 +		}
 +		thread_exception_return();
@@ -1872,7 +1989,7 @@ index 2fc6931..d581670 100644
  		struct console_printbuf_state info_data;
  
 diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
-index b2aae03..3e83e72 100644
+index b2aae03..af01ff3 100644
 --- a/osfmk/kern/sched_prim.c
 +++ b/osfmk/kern/sched_prim.c
 @@ -65,6 +65,7 @@
@@ -1899,15 +2016,15 @@ index b2aae03..3e83e72 100644
  		/*
  		 * Ensure that updates to my processor and pset state,
  		 * made by the IPI source processor before sending the IPI,
-@@ -9984,3 +9987,46 @@ sysctl_clutch_thread_group_cpu_time_for_thread(__unused thread_t thread,
+@@ -9984,3 +9987,45 @@ sysctl_clutch_thread_group_cpu_time_for_thread(__unused thread_t thread,
  #endif /* !SCHED_TEST_HARNESS */
  
  #endif /* DEVELOPMENT || DEBUG */
 +
-+#if LINUX64_DEBUG
 +/*
-+ * LINUX64 (xnulinux) debug: print every thread's state, wait event, continuation and a few saved frames.
-+ * Called from the hosted idle path (single CPU, interrupts off), so the list is walked without its lock.
++ * LINUX64 (xnulinux) diagnostics: print every thread's state, wait event, continuation and a few saved frames, when the
++ * host asks (LINUX64_CTR_DUMP_REQ). Called from the hosted idle path with interrupts off; the list is walked without its
++ * lock (another CPU may change it meanwhile: a diagnostic, not a consistent snapshot).
 + */
 +void
 +linux64_dump_threads(void)
@@ -1945,7 +2062,6 @@ index b2aae03..3e83e72 100644
 +		}
 +	}
 +}
-+#endif /* LINUX64_DEBUG */
 diff --git a/osfmk/kern/stack.c b/osfmk/kern/stack.c
 index 1111ccf..9bc5118 100644
 --- a/osfmk/kern/stack.c

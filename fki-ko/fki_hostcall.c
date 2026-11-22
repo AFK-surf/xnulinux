@@ -41,6 +41,7 @@ static int hc_state;			/* 0 idle, 1 request waiting, 2 read by the service, 3 re
 static long hc_result;
 
 struct hc_call { const void *req; unsigned long len; void *reply; unsigned long max; long result; };
+static DEFINE_MUTEX(hc_mutex);		/* one call at a time through the single slot (several CPUs may call) */
 
 static void hc_call_body(void *p)
 {
@@ -50,6 +51,7 @@ static void hc_call_body(void *p)
 
 	local_irq_enable();
 	preempt_enable();
+	mutex_lock(&hc_mutex);
 	if (!hc_buf)
 		hc_buf = kvmalloc(HC_MAX, GFP_KERNEL);
 	if (!hc_buf || c->len > HC_MAX) {
@@ -84,6 +86,7 @@ static void hc_call_body(void *p)
 	hc_state = 0; hc_seq = 0;
 	spin_unlock(&hc_lock);
 out:
+	mutex_unlock(&hc_mutex);
 	preempt_disable();
 	local_irq_disable();
 	c->result = r;

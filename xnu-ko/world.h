@@ -12,12 +12,15 @@ struct xnu_world {
 	unsigned long long linux_ttbr0, linux_tcr;	/* 416, 424: Linux's user address space while XNU runs */
 	unsigned long long xnu_ttbr0, xnu_tcr;		/* 432, 440: XNU's (its user pmaps, its T0SZ) */
 	unsigned long long xnu_tpidr, xnu_tpidrro;	/* 448, 456: XNU's user TLS registers across an upcall */
+	unsigned long long linux_scs;		/* 464: x18, the shadow call stack of the Linux task that entered */
 };
+_Static_assert(__builtin_offsetof(struct xnu_world, linux_scs) == 464, "xnu_world layout");
 _Static_assert(__builtin_offsetof(struct xnu_world, xnu_tpidrro) == 456, "xnu_world layout");
 _Static_assert(__builtin_offsetof(struct xnu_world, linux_ttbr0) == 416, "xnu_world layout");
 _Static_assert(sizeof(struct fki_pac_keys) == 88, "fki_pac_keys layout");
 _Static_assert(__builtin_offsetof(struct xnu_world, xnu_keys) == 328, "xnu_world layout");
-extern struct xnu_world xnu_W;
+extern struct xnu_world xnu_W;		/* the boot CPU's */
+extern struct xnu_world *xnu_worlds[];	/* each CPU's, by slot (LINUX64_CPU_SLOT) */
 /* Run fn(arg) in the XNU world. 0: fn returned; 1: the hook ended the run. */
 long xnu_world_call(unsigned long fn, unsigned long arg);
 /* The address XNU calls (linux64_hook); it calls xnu_hook(stage) in the Linux world. */

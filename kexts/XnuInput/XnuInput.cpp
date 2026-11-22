@@ -4,7 +4,7 @@
 // (overlay/kext/DroidVMInput/DroidVMInput.cpp, BSD-2-Clause-Patent): the same report descriptors (QEMU's USB keyboard and tablet),
 // the same evdev-to-report translation. Its events come from the host instead of virtio-input: Linux evdev records
 // {u16 type, u16 code, s32 value} that tools/hosted/xnu-input.py appends to xnu.ko's input_in file, read through the hosted
-// kernel's upcall (linux64_input_read, bsd/net/if_linux64.c). Keys (EV_KEY codes below 0x100) go to the keyboard; buttons,
+// kernel's upcall (linux64_input_read, bsd/kern/linux64_host.c). Keys (EV_KEY codes below 0x100) go to the keyboard; buttons,
 // absolute X/Y (0..32767 across the screen) and the wheel to the tablet; SYN_REPORT ends a frame.
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>

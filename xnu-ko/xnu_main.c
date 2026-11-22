@@ -42,6 +42,18 @@ static int quiet_line(const char *l, unsigned n)
 		if (!x_strncmp(l + k, "triggered unnest", 16)) return 1;
 	return 0;
 }
+/* XNU's CPUs: Linux CPUs 0 .. cpus-1 (XNU's CPU 0 is Linux CPU 0, where xnu.ko's loading task runs) */
+#define XNU_MAX_CPUS 16
+static int cpus = 1;
+module_param(cpus, int, 0444);
+static struct xnu_world worlds[XNU_MAX_CPUS];		/* worlds[0] is xnu_W's twin: see xnu_worlds */
+struct xnu_world *xnu_worlds[LINUX64_CPU_SLOTS];	/* by CPU slot (world.S finds its CPU's save area here) */
+static signed char linux_cpu_of_slot[LINUX64_CPU_SLOTS];
+static unsigned long long cpu_mpidr[XNU_MAX_CPUS];
+static void *cpu_thread[XNU_MAX_CPUS];
+static volatile int cpu_running[XNU_MAX_CPUS];
+static u64_t a_cpu_entry;			/* XNU's linux64_cpu_entry */
+static inline unsigned this_slot(void) { unsigned long m; __asm__ volatile("mrs %0, mpidr_el1" : "=r"(m)); return LINUX64_CPU_SLOT(m); }
 /* Writing 1 ends the run at XNU's next call into the host; insmod returns and the module can be removed */
 static int stop_run;
 module_param(stop_run, int, 0644);
@@ -211,10 +223,12 @@ static void walk_log(const char *what, u64_t va, const unsigned long long *l1)
  * Kernel page faults on XNU addresses, taken in Linux's vectors while XNU runs (XNU's keys and stack live), go to
  * XNU's own linux64_kernel_fault (vm_fault on the kernel map). in_xnu is 0 while host code runs (upcalls, monitor).
  */
-static volatile int in_xnu;
+static volatile int in_xnu_slot[LINUX64_CPU_SLOTS];
+#define in_xnu in_xnu_slot[this_slot()]
 static unsigned long (*xnu_kfault)(unsigned long far, unsigned long esr);
 static unsigned long (*xnu_kfault_recover)(unsigned long pc, unsigned long far, unsigned long esr);
 static unsigned long kfaults;
+static unsigned long kfault_moved;	/* kernel faults whose vm_fault came back on another CPU (the monitor's moved=) */
 
 #define XNU_VA_LO 0xffffffe000000000ULL
 #define XNU_VA_HI 0xfffffffc00000000ULL
@@ -225,11 +239,18 @@ static unsigned long kfaults;
  * xnu_fault_tramp (world.S) with every register as it was; the trampoline calls xnu_fault_deferred in XNU's own
  * context, then returns (eret) to the faulting instruction, to the copyio recovery path, or to the abort.
  */
-static struct { unsigned long far, esr, pc, pstate; } xnu_deferred;
+/* each CPU's: the fault handler and the trampoline it returns into run on the same CPU, with nothing between them */
+static struct { unsigned long far, esr, pc, pstate; } xnu_deferred_slot[LINUX64_CPU_SLOTS];
+#define xnu_deferred xnu_deferred_slot[this_slot()]
 extern void xnu_fault_tramp(void);
 extern void xnu_world_fault_abort(void);
 
-unsigned long xnu_fault_deferred(unsigned long *frame);
+/*
+ * No shadow call stack here: vm_fault may block, and the thread may come back on another CPU, whose Linux task's shadow
+ * stack x18 then points into (the return address pushed on the first CPU's would be popped from the second's). XNU never
+ * saves x18 per thread, so the register follows the CPU: what this calls pushes and pops on the current CPU's.
+ */
+unsigned long xnu_fault_deferred(unsigned long *frame) __attribute__((no_sanitize("shadow-call-stack")));
 unsigned long xnu_fault_deferred(unsigned long *frame)
 {
 	unsigned long far = xnu_deferred.far, esr = xnu_deferred.esr, pc = xnu_deferred.pc;
@@ -242,7 +263,21 @@ unsigned long xnu_fault_deferred(unsigned long *frame)
 	 * The same address faulting again is normal (libmalloc's MADV_FREE_REUSABLE clears a page's referenced and
 	 * modified state, so each reuse takes one fault). Only report it, rarely, when it looks endless.
 	 */
-	if (xnu_kfault(far, esr) == 0) {
+	unsigned s0 = this_slot();
+	long kr = xnu_kfault(far, esr);
+	if (this_slot() != s0) {
+		/*
+		 * vm_fault blocked and the thread came back on another CPU. xnu_fault_tramp's eret restores every register
+		 * of the faulting context from frame, x18 included: that would be the first CPU's shadow stack pointer, and
+		 * from then on this CPU's upcalls push and pop on the first CPU's Linux task's shadow stack while that CPU
+		 * uses it too (corrupted shadow stacks, FPAC in whatever Linux code runs next). x18 follows the CPU.
+		 */
+		unsigned long x18;
+		__asm__ volatile("mov %0, x18" : "=r"(x18));
+		frame[18] = x18;
+		kfault_moved++;
+	}
+	if (kr == 0) {
 		if (repeats && (repeats & (repeats - 1)) == 0 && repeats >= 1024) {
 			logkv("xnu: one address keeps taking resolved kernel faults, repeats", repeats);
 			logkv("xnu:   far", far);
@@ -321,7 +356,49 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 	logkv("xnu:   lr ", fki_regs_lr(regs));
 	logkv("xnu:   far", far);
 	logkv("xnu:   esr", esr);
+	logkv("xnu:   CPU slot", this_slot());
+	logkv("xnu:   x0 ", fki_regs_reg(regs, 0));
+	logkv("xnu:   x1 ", fki_regs_reg(regs, 1));
+	{	/* XNU's frame-pointer chain (return addresses with the kernel's all-ones top in place of their PAC bits) */
+		unsigned long *fp = (unsigned long *)fki_regs_reg(regs, 29);
+		for (int i = 0; i < 12 && fp && !((unsigned long)fp & 15) && (unsigned long)fp >= XNU_VA_LO &&
+		    (unsigned long)fp < XNU_VA_HI; i++) {
+			logkv("xnu:   frame", fp[1] | 0xffffff8000000000ul);
+			if ((unsigned long *)fp[0] <= fp) break;
+			fp = (unsigned long *)fp[0];
+		}
+	}
 	fki_regs_set_pc(regs, (unsigned long)xnu_world_fault_abort);
+	return 0;
+}
+
+/* A secondary CPU's host thread: its own world, entered at linux64_cpu_entry(cpu_data); returns when the run ends */
+static unsigned long cpu_start_arg[XNU_MAX_CPUS];
+static int park_secondaries;	/* diagnostics: 1 keeps secondary CPUs out of XNU */
+module_param(park_secondaries, int, 0444);
+static int cpu_fn(void *arg)
+{
+	int c = (int)(unsigned long)arg;
+
+	fki_thread_wait(&cpu_start_arg[c]);	/* until XNU starts this CPU (LINUX64_CALL_CPU_START) */
+	if (!cpu_start_arg[c])
+		return 0;			/* the run ended first: told to stop */
+	logkv("xnu: XNU CPU starts on Linux CPU", (u64_t)c);
+	if (park_secondaries) {	/* diagnostics: the CPU is asked for but never enters XNU */
+		logkv("xnu: secondary CPU parked (park_secondaries)", (u64_t)c);
+		cpu_running[c] = 0;
+		while (!fki_thread_should_stop())
+			fki_msleep(10);
+		return 0;
+	}
+	in_xnu = 1;
+	long r = xnu_world_call(a_cpu_entry, cpu_start_arg[c]);
+	in_xnu = 0;
+	if (!r) logkv("xnu: linux64_cpu_entry returned (unexpected) on CPU", (u64_t)c);
+	stop_run = 1;			/* one CPU's run ending (a fatal fault, a stop) ends all of them */
+	cpu_running[c] = 0;
+	while (!fki_thread_should_stop())	/* kthread_stop() from the module's exit wants the thread alive */
+		fki_msleep(10);
 	return 0;
 }
 
@@ -494,7 +571,8 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 			fki_yield();
 		else {			/* sleep until XNU's next timer, at most 20 ms (XNU's devices are polled from its timers) */
 			u64_t ns = a1 < 20000000ULL ? a1 : 20000000ULL;
-			fki_idle_until(fki_counter() + ns * fki_counter_frequency() / 1000000000ULL, ns);
+			fki_idle_until(fki_counter() + ns * fki_counter_frequency() / 1000000000ULL, ns,
+			    (const volatile unsigned int *)a2);
 		}
 		return idle_max && idles >= (unsigned long)idle_max;
 	}
@@ -533,6 +611,24 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		}
 		return 1;
 	}
+	if (call == LINUX64_CALL_CPU_START) {	/* start XNU's CPU of MPIDR a1 at linux64_cpu_entry(a2), asynchronously */
+		int c = linux_cpu_of_slot[LINUX64_CPU_SLOT(a1)];
+		/* its thread was made before XNU ran (an upcall runs with preemption off: no thread creation here) */
+		if (c <= 0 || c >= cpus || !cpu_thread[c] || !a2 || cpu_start_arg[c]) {
+			logkv("xnu: XNU asked to start a CPU it was not given, MPIDR", a1);
+			return 0;
+		}
+		cpu_running[c] = 1;
+		WRITE_ONCE(cpu_start_arg[c], a2);
+		fki_thread_wake(cpu_thread[c]);
+		return 0;
+	}
+	if (call == LINUX64_CALL_IPI) {		/* XNU's CPU of MPIDR a1 has an IPI pending: make it look */
+		int c = linux_cpu_of_slot[LINUX64_CPU_SLOT(a1)];
+		if (c >= 0)
+			fki_kick_cpu(c);
+		return 0;
+	}
 	if (call == LINUX64_CALL_KERNEL_TABLES)
 		return 0;
 	{	/* a call this module does not know (an XNU built against a newer linux64_abi.h): say so once, go on */
@@ -555,12 +651,30 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	static unsigned char seed[256];
 
 	fki_random(seed, sizeof(seed));
-	/* XNU identifies its CPU by MPIDR: run on CPU 0 and describe exactly that CPU. */
+	/*
+	 * XNU identifies its CPUs by MPIDR: its CPU 0 runs here, bound to Linux CPU 0; CPUs 1 .. cpus-1 are Linux's of the
+	 * same numbers, started when XNU asks (LINUX64_CALL_CPU_START). Their slots in the per-CPU arrays must differ.
+	 */
 	int berr = fki_bind_cpu(0);
 	if (berr) { logkv("xnu: cannot bind to cpu0, err", (u64_t)berr); return 0; }
-	u64_t mpidr; __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-	mpidr &= 0xffff;	/* XNU compares Aff1:Aff0 */
+	if (cpus < 1) cpus = 1;
+	if (cpus > XNU_MAX_CPUS) cpus = XNU_MAX_CPUS;
+	if (cpus > fki_num_cpus()) cpus = fki_num_cpus();
+	for (int i = 0; i < LINUX64_CPU_SLOTS; i++) linux_cpu_of_slot[i] = -1;
+	for (int c = 0; c < cpus; c++) {
+		fki_u64 m = 0;
+		if (fki_cpu_mpidr(c, &m) || linux_cpu_of_slot[LINUX64_CPU_SLOT(m)] >= 0) {
+			logkv("xnu: no distinct MPIDR slot for Linux CPU, using CPUs below it:", (u64_t)c);
+			cpus = c;
+			break;
+		}
+		cpu_mpidr[c] = m & 0xffff;	/* XNU compares Aff1:Aff0 */
+		linux_cpu_of_slot[LINUX64_CPU_SLOT(m)] = (signed char)c;
+		xnu_worlds[LINUX64_CPU_SLOT(m)] = c ? &worlds[c] : &xnu_W;
+	}
+	u64_t mpidr = cpu_mpidr[0];
 	logkv("xnu: running on MPIDR Aff1:Aff0", mpidr);
+	logkv("xnu: XNU CPUs", (u64_t)cpus);
 
 	adt_init(&a, base_va + off_dt, 0x40000);
 	adt_node(&a, 3, 6);				/* / */
@@ -631,18 +745,24 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_prop_str(&a, "name", "asmb");
 	adt_prop_u64(&a, "lp-sip0", 0x2);		/* CSR_ALLOW_UNTRUSTED_KEXTS, as DroidVM boots */
 	adt_prop_u32(&a, "lp-sip1", 1);			/* CSR_ALLOW_UNAUTHENTICATED_ROOT */
-	adt_node(&a, 1, 1);				/* /cpus */
+	adt_node(&a, 1, cpus);				/* /cpus */
 	adt_prop_str(&a, "name", "cpus");
 	/*
 	 * /cpus/cpu0, without device_type "cpu": that would match Apple's CPU driver (AppleARMCPU, IONameMatch "cpu"),
 	 * which drives the AIC interrupts and IPIs of real hardware. While hosted, the CPU is Linux's.
 	 */
-	adt_node(&a, 5, 0);
-	adt_prop_str(&a, "name", "cpu0");
-	adt_prop_str(&a, "state", "running");
-	adt_prop_u32(&a, "reg", (unsigned)mpidr);
-	adt_prop_u64(&a, "timebase-frequency", fki_counter_frequency());
-	adt_prop_u32(&a, "cluster-type", 'P');	/* the AMP scheduler wants E/M/P, not SMP */
+	for (int c = 0; c < cpus; c++) {	/* compatible: kexts/XnuCPU registers each with XNU and starts it */
+		static char cname[XNU_MAX_CPUS][8];
+		cname[c][0] = 'c'; cname[c][1] = 'p'; cname[c][2] = 'u';
+		if (c < 10) { cname[c][3] = '0' + c; cname[c][4] = 0; } else { cname[c][3] = '1'; cname[c][4] = '0' + c - 10; cname[c][5] = 0; }
+		adt_node(&a, 6, 0);
+		adt_prop_str(&a, "name", cname[c]);
+		adt_prop_str(&a, "compatible", "xnulinux,cpu");
+		adt_prop_str(&a, "state", c ? "waiting" : "running");
+		adt_prop_u32(&a, "reg", (unsigned)cpu_mpidr[c]);
+		adt_prop_u64(&a, "timebase-frequency", fki_counter_frequency());
+		adt_prop_u32(&a, "cluster-type", 'P');	/* the AMP scheduler wants E/M/P, not SMP */
+	}
 	adt_node(&a, 1, 0);				/* /defaults: XNU looks these up without checking */
 	adt_prop_str(&a, "name", "defaults");
 	adt_node(&a, 1, 0);				/* /product */
@@ -724,7 +844,7 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
  */
 static volatile const unsigned long *xnu_dbg;
 static void *monitor;
-static int monitor_cpu = 1;
+static int monitor_cpu = -2;	/* -2: the first Linux CPU XNU does not run on; -1: no monitor */
 module_param(monitor_cpu, int, 0444);
 
 static char *put_dec(char *p, unsigned long v)
@@ -739,6 +859,10 @@ static void put_str(char **p, const char *s) { while (*s) *(*p)++ = *s++; }
 static void put_hex(char **p, unsigned long v) { for (int i = 44; i >= 0; i -= 4) *(*p)++ = "0123456789abcdef"[(v >> i) & 15]; }
 
 /* XNU's counters (enum linux64_counter) every 2 s for the first 3 minutes, then every 20 s */
+/* writing 1 asks XNU for a dump of its threads at its next idle (/sys/module/xnu/parameters/dump_threads) */
+static int dump_threads;
+module_param(dump_threads, int, 0644);
+
 static int monitor_fn(void *arg)
 {
 	static const struct { int i; const char *name; } dec[] = {
@@ -754,12 +878,17 @@ static int monitor_fn(void *arg)
 	(void)arg;
 	while (!fki_thread_should_stop()) {
 		fki_msleep(2000);
+		if (xnu_dbg && *(volatile int *)&dump_threads) {
+			((volatile unsigned long *)xnu_dbg)[LINUX64_CTR_DUMP_REQ] = 1;
+			dump_threads = 0;
+		}
 		if (!xnu_dbg || (lines >= 90 && (++ticks % 10) != 0))
 			continue;
 		char buf[420]; char *p = buf;
 		put_str(&p, "xnu: monitor");
 		for (unsigned i = 0; i < sizeof(dec) / sizeof(dec[0]); i++) { put_str(&p, dec[i].name); p = put_dec(p, xnu_dbg[dec[i].i]); }
 		put_str(&p, " kfaults="); p = put_dec(p, kfaults);
+		put_str(&p, " moved="); p = put_dec(p, kfault_moved);
 		for (unsigned i = 0; i < sizeof(hex) / sizeof(hex[0]); i++) { put_str(&p, hex[i].name); put_hex(&p, xnu_dbg[hex[i].i]); }
 		*p = 0;
 		logs(buf);
@@ -811,10 +940,15 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	diag_va[4] = macho_sym(&img, "_port_crumb");
 	diag_va[5] = macho_sym(&img, "_strlen");
 	xnu_dbg = (const unsigned long *)macho_sym(&img, "_linux64_dbg");
-	if (xnu_dbg && monitor_cpu >= 0)
-		monitor = fki_thread_start(monitor_fn, 0, monitor_cpu, "xnu-monitor");
-	if (fb_off && fb_dump && fb_dump_ms > 0 && img.region.va)
-		fb_thread = fki_thread_start(fb_fn, 0, monitor_cpu >= 0 ? monitor_cpu : 1, "xnu-fb");
+	{	/* the helpers run where XNU does not: a CPU running XNU lets Linux in only at XNU's calls into the host */
+		int host_cpu = cpus < fki_num_cpus() ? cpus : fki_num_cpus() - 1;
+		if (monitor_cpu == -2)
+			monitor_cpu = host_cpu;
+		if (xnu_dbg && monitor_cpu >= 0)
+			monitor = fki_thread_start(monitor_fn, 0, monitor_cpu, "xnu-monitor");
+		if (fb_off && fb_dump && fb_dump_ms > 0 && img.region.va)
+			fb_thread = fki_thread_start(fb_fn, 0, monitor_cpu >= 0 ? monitor_cpu : host_cpu, "xnu-fb");
+	}
 	xnu_kfault = (void *)macho_sym(&img, "_linux64_kernel_fault");
 	xnu_kfault_recover = (void *)macho_sym(&img, "_linux64_kernel_fault_recover");
 	if (xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
@@ -836,10 +970,29 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		xnu_W.xnu_tcr = tcr & ~(1ULL << 22);
 		xnu_W.xnu_ttbr0 = ttbr0;
 	}
+	a_cpu_entry = macho_sym(&img, "_linux64_cpu_entry");
+	for (int c = 1; c < cpus; c++) {	/* the secondary CPUs' save areas start as the boot CPU's: XNU's keys, user TTBR0/TCR */
+		worlds[c].xnu_keys = xnu_W.xnu_keys;
+		worlds[c].xnu_tcr = xnu_W.xnu_tcr;
+		worlds[c].xnu_ttbr0 = xnu_W.xnu_ttbr0;
+	}
+	if (cpus > 1 && !a_cpu_entry) { logs("xnu: kernel without linux64_cpu_entry: one CPU"); cpus = 1; }
+	for (int c = 1; c < cpus; c++) {	/* each secondary CPU's host thread, waiting for XNU to start that CPU */
+		cpu_start_arg[c] = 0;
+		cpu_thread[c] = fki_thread_start(cpu_fn, (void *)(unsigned long)c, c, "xnu-cpu");
+		if (!cpu_thread[c]) { logkv("xnu: cannot make a thread for CPU, running with CPUs below it:", (u64_t)c); cpus = c; }
+	}
 	logs("xnu: entering arm_init");
 	in_xnu = 1;
 	long r = xnu_world_call(a_init, (unsigned long)ba);
 	in_xnu = 0;
+	stop_run = 1;		/* the other CPUs end at their next call into the host (kicked out of idle) */
+	for (int c = 1; c < cpus; c++) {
+		for (int t = 0; cpu_running[c] && t < 500; t++) { fki_kick_cpu(c); fki_msleep(10); }
+		if (cpu_running[c]) logkv("xnu: CPU did not leave XNU in 5 s:", (u64_t)c);
+		fki_thread_stop(cpu_thread[c]);
+		cpu_thread[c] = 0;
+	}
 	fki_fault_unregister();
 	logkv("xnu: kernel faults forwarded to XNU", kfaults);
 	fki_thread_stop(monitor);
