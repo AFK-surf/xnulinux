@@ -639,3 +639,34 @@ dist/XnuCpuMetal.bundle/
     - `[6/7]` `-[XcmBuffer contents]` 在 commit 前及 `completedHandler` 内调用均不阻塞、不死锁 PASS
     - `[7/7]` 33 MB 壁纸缓冲成功别名（1 次），10 次 commit 累计 `commitSyncCopies=0, commitSyncBytes=0` PASS
   - `Safari` 加载 `https://example.com` 实机渲染清晰完整（6 语种正文、工具栏、4K 金门大桥壁纸、右上角时钟、Liquid Glass Dock 均正常）。
+
+---
+
+## Round 21：Venus+MoltenVK 底层驱动识别（`underlying_driver_id`）、全量 Dock `.icon` 渲染修复与 virglrenderer/Venus 异步管线加固
+
+### 问题根因
+1. **Dock `.icon` 全部变灰占位符（`vkCreateGraphicsPipelines` 返回 `-3`）**：
+   - 在托管 macOS Venus（`virglrenderer 0.10.4e` → 宿主 `MoltenVK 1.4.2`）下，物理设备上报 `driverID = VK_DRIVER_ID_MESA_VENUS (22)`、`vendorID = 0x106b`、`VK_EXT_fragment_shader_interlock = v1`。
+   - `metal2vulkan` 与 `metal2vulkan-runtime` 仅在 `driver_id == DriverId::MOLTENVK` 时启用 MoltenVK 编译器/运行时规避；Venus 下这些规避全部旁路，导致含 `VK_EXT_fragment_shader_interlock` 的片段着色器走 `VK_KHR_push_descriptor` 推送 set 0，触发 MoltenVK 1.4.2 SPIRV-Cross 生成 `[[texture(2), raster_order_group(0)]]`，macOS 27 `MTLCompilerService` 直接 XPC 断开并返回 `VK_ERROR_INITIALIZATION_FAILED (-3)`。
+2. **启用 `PushedBufferSizesUnset` 后触发 Venus ring FATAL 与 `krunkit` 段错误**：
+   - 开启 `PushedBufferSizesUnset` 后 set 0 改走普通 descriptor set，首次触发 `takes_multi_variable_dynamic()`（`pipeline/objects.rs`）自检探针 `multi_variable_dynamic_creates()`，其故意编译一个 MoltenVK 1.4.2 已知会拒掉（`-3`）的多变量 `STORAGE_BUFFER_DYNAMIC` compute pipeline。
+   - Mesa Venus 默认在 primary ring 走异步管线创建（`vn_async_vkCreateComputePipelines`），客体直接收到假 `VK_SUCCESS` 与未注册的 handle；宿主 `virglrenderer` 因 MoltenVK 返回 `-3` 未写入 `ctx->object_table`，客体紧接着 `vkDestroyPipeline` 即触发 `[vkr] failed to look up object` → `vkDestroyPipeline resulted in CS error` → ring `VK_RING_STATUS_FATAL_BIT_MESA` → 强拆活跃 context 导致 guest `vn_relax -> abort()` 与宿主 `krunkit` 段错误。
+
+### 设计与修改
+1. **`metal2vulkan` 补丁 `patches/metal2vulkan/0004-venus-moltenvk-driver-identity.patch`**：
+   - 新增 `DeviceDescription::underlying_driver_id(&self) -> Option<vk::DriverId>`：保持 `driver_id` 仍为 `MESA_VENUS`（不污染日志、缓存与 Venus 专属逻辑），当 `driver_id == MESA_VENUS && vendor_id == 0x106b && extensions.contains(ExtFragmentShaderInterlock)` 时返回 `Some(DriverId::MOLTENVK)`；9 处 MoltenVK 编译器/运行时规避改查 `underlying_driver_id()`，并附 3 场景单元测试 `venus_underlying_driver_distinguishes_moltenvk_honeykrisp_and_native`（Venus+MoltenVK / Venus+Honeykrisp / 原生 MoltenVK）。
+   - 在 `takes_multi_variable_dynamic()` 中对 `driver_id == Some(DriverId::MESA_VENUS)` 直接返回 `false`，避免在 Venus 上运行故意失败的自检管线。
+2. **宿主 `virglrenderer` 与客体 Mesa Venus 双层加固（`gpu/venus/`）**：
+   - `gpu/venus/virglrenderer-patches/0001-vkr-tombstone-failed-pipelines.patch`：`vkCreate{Graphics,Compute}Pipelines` 失败（整批或单项）时为失败的 client object ID 注册 `VK_NULL_HANDLE` tombstone；后续 `vkDestroyPipeline` / `vkCmdBindPipeline` 命中 tombstone 时记日志忽略，`vkr_device_object_destroy` 跳过空 handle，彻底阻断 `failed to look up object` → ring FATAL → `krunkit` 崩溃链。（已知遗留：若异步客户端忽略创建失败后仍对 tombstone 发起 `vkCmdBindPipeline` + draw，draw 会在无绑定管线状态下到达 MoltenVK；配合下方 `0003` 同步创建可使客户端拿到真实 `-3` 而不发起无效 draw。）
+   - `gpu/venus/patches/0003-venus-sync-pipeline-create.patch`：在 `#ifdef __APPLE__`（该 Darwin 构建的 Venus 只服务托管 macOS，宿主渲染端为 MoltenVK）下将 `vn_Create{Graphics,Compute}Pipelines` 设为同步（`want_sync = true`），确保调用方拿到宿主 MoltenVK 返回的真实 `VkResult`。
+
+### 验证结果
+- **单测**：`cargo test -p metal2vulkan venus_underlying_driver` PASS。
+- **宿主本地 `virgl_test_server`（`virglrenderer 0.10.4e` + `MoltenVK 1.4.2`）对抗验证**：
+  - 不带 r21 跳过补丁 + 仅宿主 virglrenderer 加固 + 旧异步客户端：`CLI_RC=0`，日志记录 tombstone 与忽略 destroy，ring 未 FATAL、进程不崩。
+  - 不带 r21 跳过补丁 + 宿主 virglrenderer 加固 + `0003` 同步 Venus 客户端：`CLI_RC=0`，探针拿到 `-3` 走回退路径，`Maps.app` 正常渲染 `CGImage 256x256 nz=164566/262144 center=(0,132,248,255)`。
+  - 带完整 r21 补丁：`repro_maps_r21_arm64e` PASS、`test_all_dock_icons` 16/16 与原生 M5 Max Metal 逐项一致、`test_round20_arm64e` 7/7 PASS。
+- **托管 macOS 实机 Venus（单核 + 加固版 `libvirglrenderer`）**：
+  - Step 1（`/tmp` + `DYLD_INSERT_LIBRARIES`，未改 `/Library/GPUBundles`）：`repro_maps_r21_arm64e` `EXIT=0`（`center=(0,132,248,255)`）、`test_round20_arm64e` **7/7 PASS**、`test_all_dock_icons` **16/16 PASS**。
+  - Step 2（清图标缓存 + 重启 `iconservices*`/`Dock` 抓取同尺寸 1280×800 前后对照图，测完立即恢复 `/Library/GPUBundles` 为 clean r20 `952f34e9...`）：**改前 r20 Dock 19/19 应用图标全灰占位符 → 改后 r21 Dock 19/19 应用图标全部清晰完整渲染**（Finder、Apps、Safari、Messages、Mail、Maps、Photos、FaceTime、Phone、Calendar、Contacts、Reminders、Notes、Apple TV、Music、Games、App Store、iPhone Mirroring、System Settings + Liquid Glass 栏）。
+  - 整个实机测试期间宿主 `krunkit.log` **0 条新增行**（0 tombstone、0 `vkr` CS 错误、0 崩溃）。
