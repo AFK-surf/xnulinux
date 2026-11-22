@@ -272,8 +272,12 @@ static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
     if (_fallbackAliased && _fallbackPtr && _fallbackLen) {
         // Detach caller's VA from the GPU blob's physical pages BEFORE releasing _handle
         // (XnuDrm::doUnmap releases the Linux physical pages immediately on XNUDRM_UNMAP).
-        // Guard with mach_vm_read_overwrite / xcmRangeIsFullyWritable in case the caller
-        // already munmap'd _fallbackPtr before the autorelease pool drained this buffer.
+        // Precondition (Metal NoCopy contract): the caller must keep `_fallbackPtr`
+        // mapped and owned until this MTLBuffer is deallocated (or deallocator runs).
+        // If a caller violates that contract by `munmap`-ing early and the VA is reused
+        // by an unrelated mapping before `dealloc`, `VM_FLAGS_OVERWRITE` would overwrite
+        // that reused mapping. Guarding with `mach_vm_read_overwrite` /
+        // `xcmRangeIsFullyWritable` only avoids faulting when the VA remains unmapped.
         mach_vm_address_t addr = (mach_vm_address_t)_fallbackPtr;
         if (_fallbackDeallocator) {
             if (xcmRangeIsFullyWritable(_fallbackPtr, _fallbackLen)) {

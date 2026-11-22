@@ -619,6 +619,7 @@ dist/XnuCpuMetal.bundle/
    - 彻底移除 Round 19 中引起争议的临时补丁：`-[XcmBuffer contents]` 绝不阻塞等待 `waitUntilCompleted`（别名缓冲直接返回 `_fallbackPtr`），无 compute 4 MB 快照/逐字节比对回写循环，无每缓冲 `vm_region_64` 绕过逻辑；`syncFromFallbackHostMemory` 对 `_fallbackAliased` 为 0 拷贝空操作。
    - **安全解绑（兼容 `XnuDrm::doUnmap` 立即释页）**：`-[XcmBuffer dealloc]` 在调用 `xm2v_buffer_release(_handle)` 之前先将 `_fallbackPtr` 从 Venus/GPU 页解绑——有 `_fallbackDeallocator` 时若仍可写则以 `mach_vm_allocate(VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)` 替换为零开销惰性匿名页后再释放 GPU 缓冲并调 deallocator；无 deallocator 时用 `mach_vm_read_overwrite` 拷入临时匿名页再 `mach_vm_remap(VM_FLAGS_OVERWRITE)` 覆盖回原地址，既为调用方保留最终 GPU 写入字节，又能在调用方早于 autorelease 池释放前已 `munmap` 时安全退出不崩溃。
    - 对非页对齐指针/长度或 `PROT_READ` 只读映射，干净退回原有单向初始拷贝/只读路径并记录限流 `os_log_info` 与原子统计（`-[XcmBackendDevice xcmNoCopyStats]`）。
+  - **已知限制**：非页对齐回退路径沿用旧 `_contentsAccessed` 语义——一旦调用方读取过 `contents`，后续不再从 `_fallbackPtr` 同步回 GPU（该路径上之后写进原始指针的数据会丢），后续可通过 `fallbackUnaligned` 计数观察实际命中频率。
 2. **`lodMinClamp:lodMaxClamp:` SPI 完整接入 `metal2vulkan`**：
    - `xnu-m2v-bridge` 新增 `xm2v_render_encoder_set_vertex_sampler_lod` 与 `xm2v_render_encoder_set_fragment_sampler_lod`，调用 `metal2vulkan` 的 `set_{vertex,fragment}_sampler_states(&[s], Some((&[lod_min], &[lod_max])), index)`，不再静默丢弃 LOD 夹取范围。
 3. **IOSurface 零拷贝边界说明（同进程 vs 跨进程）**：
