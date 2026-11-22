@@ -22,11 +22,11 @@
 #ifndef _LINUX64_ABI_H_
 #define _LINUX64_ABI_H_
 
-#define LINUX64_ABI_VERSION 1
+#define LINUX64_ABI_VERSION 2
 
 enum linux64_call {
 	LINUX64_CALL_KERNEL_TABLES  = 210,	/* boot: a1 = XNU's kernel L1 table; the host installs its kernel-range entries */
-	LINUX64_CALL_IDLE           = 810,	/* a1 = XNU's next timer deadline (mach_absolute_time); the host runs Linux until then */
+	LINUX64_CALL_IDLE           = 810,	/* a1 = nanoseconds to XNU's next timer (0: one is due); the host runs Linux meanwhile */
 	LINUX64_CALL_PREEMPTED      = 811,	/* a host interrupt is pending: let Linux handle it; a1 = 1 from the kernel, 0 from EL0 */
 	LINUX64_CALL_WALLCLOCK      = 812,	/* a1 = u64[2]: {seconds, nanoseconds} UTC */
 	LINUX64_CALL_NET_SEND       = 816,	/* a1 = struct linux64_buf_req: one Ethernet frame */

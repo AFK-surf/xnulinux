@@ -42,6 +42,9 @@ static int quiet_line(const char *l, unsigned n)
 		if (!x_strncmp(l + k, "triggered unnest", 16)) return 1;
 	return 0;
 }
+/* Writing 1 ends the run at XNU's next call into the host; insmod returns and the module can be removed */
+static int stop_run;
+module_param(stop_run, int, 0644);
 static int assert_fatal;	/* 1: a failed XNU assert() ends the run; 0: report it and let XNU continue */
 module_param(assert_fatal, int, 0444);
 
@@ -338,6 +341,10 @@ long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 		}
 	}
 	in_xnu = 0;
+	if (*(volatile int *)&stop_run) {	/* the host asked the run to end (scripts/xnulinux-boot.sh stop): XNU is abandoned here */
+		logs("xnu: run stopped by the host (stop_run)");
+		return 1;
+	}
 	long r = xnu_hook_body(call, a1, a2);
 	if (!r) in_xnu = 1;
 	return r;
@@ -483,7 +490,12 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		static unsigned long idles;
 		idles++;
 		if ((idles & (idles - 1)) == 0) logkv("xnu: XNU idle, count", idles);
-		fki_idle_until(a1, 20000000ULL);	/* at most 20 ms per round */
+		if (!a1)		/* a timer is due: only let Linux take its interrupts */
+			fki_yield();
+		else {			/* sleep until XNU's next timer, at most 20 ms (XNU's devices are polled from its timers) */
+			u64_t ns = a1 < 20000000ULL ? a1 : 20000000ULL;
+			fki_idle_until(fki_counter() + ns * fki_counter_frequency() / 1000000000ULL, ns);
+		}
 		return idle_max && idles >= (unsigned long)idle_max;
 	}
 	if (call == LINUX64_CALL_ASSERT) {		/* XNU assert() failed */
