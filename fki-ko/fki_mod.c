@@ -12,6 +12,7 @@
 #include <linux/gfp.h>
 #include <linux/irqflags.h>
 #include <linux/mm.h>
+#include <linux/io.h>
 #include <linux/module.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
@@ -375,20 +376,28 @@ EXPORT_SYMBOL(fki_phys_peek);
 /* ---- contiguous memory and the top foreign window ---- */
 
 /*
- * reserve_mb: take that much from the CMA area when fki loads (early in the host's boot, while the area is clean) and
- * keep it for the foreign kernel's DRAM. Later, a single page the host pinned in the middle of the area (a buffer-head
- * page of a file system, say) is enough to make a multi-GB cma_alloc fail for good.
+ * The foreign kernel's DRAM, one physically contiguous block of GBs, from the first that works of:
+ *  - carve_base/carve_mb: RAM the host kernel does not manage at all (its command line limits it with mem=, the rest is
+ *    left for us), mapped here with memremap. Nothing of Linux's ever lands in it: the block is always there.
+ *  - reserve_mb: taken from the CMA area when fki loads early in the host's boot. A single page pinned in the area
+ *    (a file system's buffer-head page of the block device, allocated movable during the boot) can already be there
+ *    and split the area, so this is best effort.
+ *  - a CMA or alloc_contig_pages allocation at the time of the call.
  */
-static unsigned long reserve_mb;
+static unsigned long carve_base, carve_mb, reserve_mb;
+module_param(carve_base, ulong, 0444);
+module_param(carve_mb, ulong, 0444);
 module_param(reserve_mb, ulong, 0444);
 static struct page *resv_pg;
 static unsigned long resv_cnt;
-static bool resv_used;
+static bool resv_used, carve_used;
 
 static void fki_reserve(void)
 {
 	unsigned long cnt = ALIGN(reserve_mb << 20, SZ_2M) >> PAGE_SHIFT;
 
+	if (carve_mb)
+		pr_info("fki: %lu MiB at %#lx for the foreign kernel's DRAM (outside the host's memory)\n", carve_mb, carve_base);
 	if (!reserve_mb || fki_resolve() || !p_cma_area || !*p_cma_area || !p_cma_alloc)
 		return;
 	resv_pg = p_cma_alloc(*p_cma_area, cnt, get_order(SZ_2M), true);
@@ -405,6 +414,19 @@ int fki_contig_alloc(unsigned long size, struct fki_region *r)
 
 	if (err)
 		return err;
+	if (carve_mb && !carve_used && ALIGN(size, SZ_2M) <= carve_mb << 20 && !(carve_base & (SZ_2M - 1))) {
+		void *va = memremap(carve_base, ALIGN(size, SZ_2M), MEMREMAP_WB);
+		if (va) {
+			carve_used = true;
+			r->va = va;
+			r->size = ALIGN(size, SZ_2M);
+			memset(r->va, 0, r->size);
+			r->pa = carve_base;
+			r->handle = (void *)4UL;	/* bit 2: the carve-out */
+			return 0;
+		}
+		pr_warn("fki: carve-out at %#lx not mappable\n", carve_base);
+	}
 	if (resv_pg && !resv_used && ALIGN(size, SZ_2M) >> PAGE_SHIFT <= resv_cnt) {
 		resv_used = true;
 		r->va = page_address(resv_pg);
@@ -449,6 +471,11 @@ EXPORT_SYMBOL(fki_contig_alloc);
 
 void fki_contig_free(struct fki_region *r)
 {
+	if ((unsigned long)r->handle == 4) {
+		memunmap(r->va);
+		carve_used = false;
+		return;
+	}
 	if ((unsigned long)r->handle & 2) {
 		resv_used = false;	/* back to the reservation, for the next run */
 		return;
