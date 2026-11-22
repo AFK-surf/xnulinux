@@ -25,15 +25,16 @@ build() {	# a module; its compiler errors on failure
 build fki-ko
 build xnu-ko "KBUILD_EXTRA_SYMBOLS=$PWD/fki-ko/Module.symvers"
 sudo dmesg -n "${CONLEVEL:-8}"
-# fki keeps the hosted kernel's DRAM reserved from when it first loaded (reserve_mb): reload it only when it changed
-RESERVE_MB=${RESERVE_MB:-8156}	# the same as scripts/vm-install-fki-service.sh
+# fki has the hosted kernel's DRAM from its load at boot (scripts/vm-install-fki-service.sh): reload it only when it changed,
+# with the same carve-out
+CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || echo 0x400000000) carve_mb=$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null || echo 8156)"
 if [ "$(cat /sys/module/fki/srcversion 2>/dev/null)" != "$(modinfo -F srcversion fki-ko/fki.ko)" ]; then
   sudo systemctl stop xnudrmd 2>/dev/null || true	# it holds fki's /dev/xnu-hostcall
   sudo rmmod fki 2>/dev/null || true
-  sudo insmod fki-ko/fki.ko reserve_mb="$RESERVE_MB"
+  sudo insmod fki-ko/fki.ko $CARVE
 fi
-grep -q . /sys/module/fki/parameters/reserve_mb 2>/dev/null && [ "$(cat /sys/module/fki/parameters/reserve_mb)" != 0 ] ||
-  echo "fki loaded without a DRAM reservation: the allocation may fail on a long-running host" >&2
+[ "$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null)" != 0 ] ||
+  echo "fki has no carve-out (scripts/vm-install-fki-service.sh): the allocation from CMA may fail" >&2
 bash scripts/vm-net-up.sh
 
 # the hosted system's files on the host: console and input queues, the framebuffer xnu.ko writes, the keystore
