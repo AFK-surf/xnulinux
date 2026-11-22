@@ -794,7 +794,7 @@ new file mode 100644
 index 0000000..29cf3df
 --- /dev/null
 +++ b/bsd/net/if_linux64.c
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,331 @@
 +/*
 + * LINUX64 (xnulinux): the hosted kernel's Ethernet interface en0.
 + *
@@ -1025,6 +1025,30 @@ index 0000000..29cf3df
 +		return -6;
 +	}
 +	linux64_stage_arg(820, (unsigned long)&q);
++	return q.result;
++}
++
++/*
++ * A host call (kexts/XnuDrm): len bytes at req to a Linux service through xnu.ko and fki (upcall 830), its reply into
++ * reply (at most max bytes). Returns the reply's length or a negative errno. The CPU waits in the call.
++ */
++struct linux64_hostcall_req {
++	const void      *req;
++	uint64_t        len;
++	void            *reply;
++	uint64_t        max;
++	long            result;
++};
++long linux64_hostcall(const void *req, unsigned long len, void *reply, unsigned long max);
++long
++linux64_hostcall(const void *req, unsigned long len, void *reply, unsigned long max)
++{
++	struct linux64_hostcall_req q = { .req = req, .len = len, .reply = reply, .max = max, .result = -6 };
++
++	if (linux64_hook == 0) {
++		return -6;
++	}
++	linux64_stage_arg(830, (unsigned long)&q);
 +	return q.result;
 +}
 +
