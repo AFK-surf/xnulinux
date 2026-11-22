@@ -6,7 +6,7 @@ Subject: venus: the virtgpu renderer on macOS over the xnulinux DRM bridge
 In the hosted macOS of xnulinux, the GPU is the Linux host's virtio-gpu render node, reached through kexts/XnuDrm.
 gpu/xnu-drm/darwin (libxnudrm: xf86drm.h, the render node's open/mmap/poll) is copied to src/virtio/vulkan/xnudrm by the
 build (gpu/venus/build-darwin.sh) and compiled into the driver; syncobjs are simulated (vn_renderer_sim_syncobj).
-The vtest renderer (a socket to a local virglrenderer) is left out on macOS.
+The vtest renderer (a socket to a local virglrenderer) and VK_EXT_map_memory_placed are left out on macOS.
 
 --- a/src/virtio/vulkan/meson.build
 +++ b/src/virtio/vulkan/meson.build
@@ -38,6 +38,18 @@ The vtest renderer (a socket to a local virglrenderer) is left out on macOS.
  endif
  
  if with_platform_wayland or with_platform_x11 or \
+--- a/src/virtio/vulkan/vn_physical_device.c
++++ b/src/virtio/vulkan/vn_physical_device.c
+@@ -1219,7 +1219,8 @@
+    exts->KHR_deferred_host_operations =
+       physical_dev->ray_tracing && renderer_exts->KHR_acceleration_structure;
+    exts->KHR_map_memory2 = true;
+-#if !DETECT_OS_WINDOWS
++   /* not over the xnulinux DRM bridge: its mappings are made by the hosted kernel where it chooses */
++#if !DETECT_OS_WINDOWS && !defined(VN_XNUDRM)
+    exts->EXT_map_memory_placed = true;
+    exts->EXT_physical_device_drm = true;
+ #endif
 --- a/src/virtio/vulkan/vn_renderer.h
 +++ b/src/virtio/vulkan/vn_renderer.h
 @@ -213,7 +213,7 @@
