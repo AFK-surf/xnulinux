@@ -214,8 +214,11 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
     MTLPurgeableState _purgeable;
     void (^_fallbackDeallocator)(void *, NSUInteger);
     void *_fallbackPtr;
+    NSUInteger _fallbackLen;
+    BOOL _contentsAccessed;
 }
 - (instancetype)initWithHandle:(Xm2vBuffer *)h device:(id)dev options:(MTLResourceOptions)opts;
+- (void)syncFromFallbackHostMemory;
 @end
 
 @implementation XcmBuffer
@@ -237,11 +240,25 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
         d(_fallbackPtr, (NSUInteger)_length);
     }
 }
+- (void)syncFromFallbackHostMemory {
+    if (!_fallbackPtr || !_fallbackLen || !_handle || _contentsAccessed) return;
+    void *dst = xm2v_buffer_contents(_handle);
+    if (dst && dst != _fallbackPtr) {
+        memcpy(dst, _fallbackPtr, _fallbackLen);
+        if (self.storageMode == MTLStorageModeManaged) {
+            xm2v_buffer_did_modify_range(_handle, 0, _fallbackLen);
+        }
+    }
+}
 - (id<MTLDevice>)device { return _device; }
-- (void *)contents { return _handle ? xm2v_buffer_contents(_handle) : nullptr; }
+- (void *)contents {
+    _contentsAccessed = YES;
+    return _handle ? xm2v_buffer_contents(_handle) : nullptr;
+}
 - (NSUInteger)length { return (NSUInteger)_length; }
 - (uint64_t)gpuAddress { return _handle ? xm2v_buffer_gpu_address(_handle) : 0; }
 - (void)didModifyRange:(NSRange)range {
+    [self syncFromFallbackHostMemory];
     if (_handle) xm2v_buffer_did_modify_range(_handle, range.location, range.length);
 }
 - (MTLResourceOptions)resourceOptions { return _options; }
@@ -435,6 +452,17 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
             size_t bpr = 0;
             if (xcmIOSurfacePlaneLayout(_iosurface, _iosurfacePlane, _width, _height, _pixelFormat, &base, &bpr)) {
                 bool ok = xm2v_texture_get_bytes(_handle, base, bpr, 0, 0, 0, 0, _width, _height, 1, 0, 0);
+                if (!ok) {
+                    static int sSyncFailLogs = 0;
+                    if (sSyncFailLogs < 10) {
+                        sSyncFailLogs++;
+                        os_log_error(OS_LOG_DEFAULT,
+                                     "XnuCpuMetal: syncToIOSurface failed (sid=0x%x surfFmt=0x%x fmt=%lu %lux%lu bpr=%zu): %{public}s",
+                                     IOSurfaceGetID(_iosurface), IOSurfaceGetPixelFormat(_iosurface),
+                                     (unsigned long)_pixelFormat, (unsigned long)_width, (unsigned long)_height,
+                                     bpr, xm2v_last_error() ?: "?");
+                    }
+                }
                 if (xcmTraceOn() || !ok) {
                     const uint8_t *p = (const uint8_t *)base;
                     size_t nz = 0;
@@ -590,6 +618,7 @@ static void xcmFillTextureDesc(MTLTextureDescriptor *desc, Xm2vTextureDesc &td) 
 @implementation XcmBuffer (LinearTextures)
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow {
     if (!_handle || !desc) return nil;
+    [self syncFromFallbackHostMemory];
     Xm2vTextureDesc td;
     xcmFillTextureDesc(desc, td);
     Xm2vTexture *t = xm2v_buffer_new_texture(_handle, &td, offset, bytesPerRow);
@@ -610,6 +639,7 @@ static void xcmFillTextureDesc(MTLTextureDescriptor *desc, Xm2vTextureDesc &td) 
 }
 - (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage {
     if (!_handle || !desc) return nil;
+    [self syncFromFallbackHostMemory];
     Xm2vTextureDesc td;
     xcmFillTextureDesc(desc, td);
     Xm2vTexture *t = xm2v_buffer_new_linear_texture(_handle, &td, offset, bytesPerRow, bytesPerImage);
@@ -1992,6 +2022,7 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 - (void)commit {
     BOOL needsWait = NO;
     NSUInteger nSched = 0, nComp = 0, nDirty = 0, nRet = 0;
+    NSArray *retSnapshot = nil;
     @synchronized(self) {
         if (_committed) return;
         _committed = YES;
@@ -1999,7 +2030,16 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
         nComp = _completedHandlers.count;
         nDirty = _dirtyIOSurfaceTextures.count;
         nRet = _retainedResources.count;
+        if (nRet) retSnapshot = [_retainedResources copy];
         needsWait = (nSched || nComp || nDirty || nRet);
+    }
+    for (id res in retSnapshot) {
+        if ([res isKindOfClass:[XcmBuffer class]]) {
+            [(XcmBuffer *)res syncFromFallbackHostMemory];
+        } else if ([res isKindOfClass:[XcmTexture class]]) {
+            XcmBuffer *b = ((XcmTexture *)res)->_buffer;
+            if (b) [b syncFromFallbackHostMemory];
+        }
     }
     if (xcmTraceOn()) fprintf(stderr, "XCM commit cb=%p sched=%lu comp=%lu dirty=%lu ret=%lu\n",
                               (__bridge void *)self, (unsigned long)nSched,
@@ -2294,14 +2334,18 @@ static id xcmDev_newBufferNoCopy(id self, SEL, void *pointer, NSUInteger length,
                                                     ctx ? xcmBufferDeallocCallback : nullptr, ctx);
     if (!b) {
         if (ctx) (void)(__bridge_transfer id)ctx;
-        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: newBufferWithBytesNoCopy failed (ptr=%p len=%lu opts=0x%lx), falling back to copy: %{public}s",
-                     pointer, (unsigned long)length, (unsigned long)opts, xm2v_last_error() ?: "?");
+        static dispatch_once_t sNoCopyLogOnce;
+        dispatch_once(&sNoCopyLogOnce, ^{
+            os_log_info(OS_LOG_DEFAULT, "XnuCpuMetal: newBufferWithBytesNoCopy unsupported (%{public}s), using host-memory copy+sync fallback",
+                        xm2v_last_error() ?: "?");
+        });
         b = xm2v_buffer_new(gXm2vDevice, length, opts, pointer);
         if (!b) return nil;
         XcmBuffer *buf = [[XcmBuffer alloc] initWithHandle:b device:self options:opts];
-        if (buf && deallocator) {
-            buf->_fallbackDeallocator = [deallocator copy];
+        if (buf) {
             buf->_fallbackPtr = pointer;
+            buf->_fallbackLen = length;
+            if (deallocator) buf->_fallbackDeallocator = [deallocator copy];
         }
         return buf;
     }
@@ -2321,12 +2365,28 @@ static id xcmDev_newTexture(id self, SEL, MTLTextureDescriptor *desc) {
     td.resource_options = (uint64_t)desc.resourceOptions;
     td.usage = (uint64_t)desc.usage;
     Xm2vTexture *t = xm2v_texture_new(gXm2vDevice, &td);
-    if (!t || xcmTraceOn()) {
+    if (!t) {
+        const char *err = xm2v_last_error() ?: "?";
+        static int sNewTexFailLogs = 0;
+        if (sNewTexFailLogs < 20) {
+            sNewTexFailLogs++;
+            os_log_error(OS_LOG_DEFAULT,
+                         "XnuCpuMetal: newTexture failed (fmt=%lu type=%lu %lux%lux%lu mip=%lu samp=%lu arr=%lu usage=0x%lx opts=0x%lx): %{public}s",
+                         (unsigned long)desc.pixelFormat, (unsigned long)desc.textureType,
+                         (unsigned long)desc.width, (unsigned long)desc.height, (unsigned long)desc.depth,
+                         (unsigned long)desc.mipmapLevelCount, (unsigned long)desc.sampleCount,
+                         (unsigned long)desc.arrayLength, (unsigned long)desc.usage,
+                         (unsigned long)desc.resourceOptions, err);
+        }
         fprintf(stderr, "XCM newTexture -> %p fmt=%lu type=%lu %lux%lux%lu mip=%lu usage=0x%lx opts=0x%lx err=%s\n",
                 (void *)t, (unsigned long)desc.pixelFormat, (unsigned long)desc.textureType,
                 (unsigned long)desc.width, (unsigned long)desc.height, (unsigned long)desc.depth,
-                (unsigned long)desc.mipmapLevelCount, (unsigned long)desc.usage, (unsigned long)desc.resourceOptions,
-                t ? "ok" : xm2v_last_error());
+                (unsigned long)desc.mipmapLevelCount, (unsigned long)desc.usage, (unsigned long)desc.resourceOptions, err);
+    } else if (xcmTraceOn()) {
+        fprintf(stderr, "XCM newTexture -> %p fmt=%lu type=%lu %lux%lux%lu mip=%lu usage=0x%lx opts=0x%lx err=ok\n",
+                (void *)t, (unsigned long)desc.pixelFormat, (unsigned long)desc.textureType,
+                (unsigned long)desc.width, (unsigned long)desc.height, (unsigned long)desc.depth,
+                (unsigned long)desc.mipmapLevelCount, (unsigned long)desc.usage, (unsigned long)desc.resourceOptions);
     }
     return t ? [[XcmTexture alloc] initWithHandle:t device:self descriptor:desc] : nil;
 }
@@ -2337,6 +2397,19 @@ static id xcmDev_newTextureIOSurface(id self, SEL, MTLTextureDescriptor *desc, I
     MTLTextureDescriptor *copy = [desc copy];
     copy.storageMode = MTLStorageModeShared;
     XcmTexture *tex = xcmDev_newTexture(self, nullptr, copy);
+    if (!tex) {
+        static int sIosFailLogs = 0;
+        if (sIosFailLogs < 20) {
+            sIosFailLogs++;
+            uint32_t sid = surface ? IOSurfaceGetID(surface) : 0;
+            uint32_t pf = surface ? IOSurfaceGetPixelFormat(surface) : 0;
+            os_log_error(OS_LOG_DEFAULT,
+                         "XnuCpuMetal: newTextureIOSurface failed (sid=0x%x surfFmt=0x%x plane=%lu descFmt=%lu %lux%lu usage=0x%lx origOpts=0x%lx)",
+                         sid, pf, (unsigned long)plane, (unsigned long)desc.pixelFormat,
+                         (unsigned long)desc.width, (unsigned long)desc.height,
+                         (unsigned long)desc.usage, (unsigned long)desc.resourceOptions);
+        }
+    }
     if (xcmTraceOn()) fprintf(stderr, "XCM newTextureIOSurface -> %p surf=%p plane=%lu\n", (__bridge void *)tex, surface, (unsigned long)plane);
     if (tex && surface) {
         CFRetain(surface);
@@ -2562,6 +2635,14 @@ static id xcmDev_newComputePSO(id self, SEL, id<MTLFunction> fn, NSError **error
         return nil;
     }
     Xm2vComputePipeline *pso = xm2v_compute_pipeline_new(gXm2vDevice, ((XcmFunction *)fn)->_handle);
+    if (!pso) {
+        static int sCpsoFailLogs = 0;
+        if (sCpsoFailLogs < 20) {
+            sCpsoFailLogs++;
+            os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: newComputePSO failed (fn=%{public}s): %{public}s",
+                         fn.name.UTF8String ?: "?", xm2v_last_error() ?: "?");
+        }
+    }
     if (xcmTraceOn() || !pso) {
         fprintf(stderr, "XCM newComputePSO(%s) -> %p err=%s\n",
                 fn.name.UTF8String ?: "?", (void *)pso, pso ? "ok" : xm2v_last_error());
@@ -2606,6 +2687,14 @@ static id xcmDev_newComputePSODesc(id self, SEL, MTLComputePipelineDescriptor *d
               gXm2vDevice, ((XcmFunction *)desc.computeFunction)->_handle,
               pubLinked.empty() ? nullptr : pubLinked.data(), (uint32_t)pubLinked.size(),
               privLinked.empty() ? nullptr : privLinked.data(), (uint32_t)privLinked.size());
+    if (!pso) {
+        static int sCpsoDescFailLogs = 0;
+        if (sCpsoDescFailLogs < 20) {
+            sCpsoDescFailLogs++;
+            os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: newComputePSODesc failed (fn=%{public}s): %{public}s",
+                         desc.computeFunction.name.UTF8String ?: "?", xm2v_last_error() ?: "?");
+        }
+    }
     if (xcmTraceOn() || !pso) {
         fprintf(stderr, "XCM newComputePSODesc(%s, linked=%zu+%zu) -> %p err=%s\n",
                 desc.computeFunction.name.UTF8String ?: "?", pubLinked.size(), privLinked.size(),
@@ -2769,6 +2858,18 @@ static id xcmDev_newRenderPSO(id self, SEL, MTLRenderPipelineDescriptor *desc, N
             }
         }
         break;
+    }
+    if (!pso) {
+        static int sPsoFailLogs = 0;
+        if (sPsoFailLogs < 20) {
+            sPsoFailLogs++;
+            os_log_error(OS_LOG_DEFAULT,
+                         "XnuCpuMetal: newRenderPSO failed (v=%{public}s f=%{public}s fmt0=%llu): %{public}s",
+                         desc.vertexFunction.name.UTF8String ?: "?",
+                         desc.fragmentFunction.name.UTF8String ?: "-",
+                         (unsigned long long)rd.color_attachments[0].pixel_format,
+                         xm2v_last_error() ?: "?");
+        }
     }
     if (xcmTraceOn() || !pso) {
         const auto &c0 = rd.color_attachments[0];
