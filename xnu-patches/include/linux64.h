@@ -28,10 +28,12 @@
 extern "C" {
 #endif
 
-/* xnu.ko's entry point (0: not hosted), the slide it applied, the thread pointer (TPIDR_EL1 is Linux's) */
+/*
+ * xnu.ko's entry point (0: not hosted) and the slide it applied. TPIDR_EL1 is Linux's per-CPU base: XNU's kernel keeps
+ * its thread pointer in TPIDRRO_EL0 (per CPU), and user space gets its TSD there on each return to EL0.
+ */
 extern unsigned long linux64_hook;
 extern unsigned long linux64_slide;
-extern unsigned long linux64_tpidr;
 /* XNU's interrupt-enable state: hardware interrupts stay masked while XNU runs; this flag is the virtual one */
 extern unsigned int linux64_vint;
 /* enum linux64_counter */
