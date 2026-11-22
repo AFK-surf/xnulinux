@@ -11,7 +11,7 @@ The two sides are kept apart by license and only meet at the FKI (foreign kernel
 | `linux/` | GPL-2.0 | In-tree FKI patch for Linux (`drivers/fki`, `include/linux/fki.h`) |
 | `fki-ko/` | GPL-2.0 | The same FKI v0 as an out-of-tree module, for stock distro kernels |
 | `xnu-ko/` | APSL-2.0 side | `xnu.ko`: loads the XNU kernel collection and calls into it; uses only FKI |
-| `xnu-patches/` | APSL-2.0 | The LINUX64 machine layer and hosted-kernel changes, applied to XNU's sources |
+| `xnu-patches/` | APSL-2.0 | The LINUX64 machine layer and hosted-kernel changes, applied to XNU's sources; `include/linux64_abi.h` is the interface xnu.ko and XNU share |
 | `kexts/` | BSD-2-Clause | Our kexts in the kernel collection: disk, display, input, Ethernet, keystore stand-ins, Metal accelerator, DRM bridge |
 | `gpu/` | per directory | Metal plugin (`xnu-cpu-metal`), the DRM bridge's user-space ends (`xnu-drm`), Mesa Venus patches (`venus`) |
 | `scripts/`, `tools/` | | Build, disk, boot and test tools |
@@ -32,7 +32,8 @@ build time; it is never committed.
 - Rendering: `gpu/xnu-cpu-metal` is a Metal device (metal2vulkan) over Mesa lavapipe on the CPU. The DRM bridge
   (`fki-ko/fki_hostcall.c`, `kexts/XnuDrm`, `gpu/xnu-drm`) gives hosted processes the Linux host's GPU through Mesa Venus:
   on an Apple Silicon host the Linux VM runs under krunkit (`scripts/krun-vm.sh`) and Vulkan in the hosted macOS runs on the
-  host's GPU (`Virtio-GPU Venus (Apple M5 Max)`). Moving the Metal plugin onto it is in progress.
+  host's GPU (`Virtio-GPU Venus (Apple M5 Max)`): the Metal plugin takes it when the bridge is there, and WindowServer
+  composites the desktop on the host GPU.
 - From PoC to production: [`docs/production.md`](docs/production.md).
 
 ## Running
