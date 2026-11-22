@@ -25,19 +25,26 @@ build() {	# a module; its compiler errors on failure
 build fki-ko
 build xnu-ko "KBUILD_EXTRA_SYMBOLS=$PWD/fki-ko/Module.symvers"
 sudo dmesg -n "${CONLEVEL:-8}"
-sudo systemctl stop xnudrmd 2>/dev/null || true	# it holds fki's /dev/xnu-hostcall
-sudo rmmod fki 2>/dev/null || true
-sudo insmod fki-ko/fki.ko
+# fki keeps the hosted kernel's DRAM reserved from when it first loaded (reserve_mb): reload it only when it changed
+RESERVE_MB=${RESERVE_MB:-8156}	# the same as scripts/vm-install-fki-service.sh
+if [ "$(cat /sys/module/fki/srcversion 2>/dev/null)" != "$(modinfo -F srcversion fki-ko/fki.ko)" ]; then
+  sudo systemctl stop xnudrmd 2>/dev/null || true	# it holds fki's /dev/xnu-hostcall
+  sudo rmmod fki 2>/dev/null || true
+  sudo insmod fki-ko/fki.ko reserve_mb="$RESERVE_MB"
+fi
+grep -q . /sys/module/fki/parameters/reserve_mb 2>/dev/null && [ "$(cat /sys/module/fki/parameters/reserve_mb)" != 0 ] ||
+  echo "fki loaded without a DRAM reservation: the allocation may fail on a long-running host" >&2
 bash scripts/vm-net-up.sh
 
 # the hosted system's files on the host: console and input queues, the framebuffer xnu.ko writes, the keystore
 : > "$CONSOLE_IN"; : > "$INPUT_IN"; : > "$FB_DUMP"
 rm -f "$KEYSTORE"; truncate -s 1M "$KEYSTORE"	# fresh each boot, as the disk was made (persisting it: production.md)
 # XNU's DRAM is one physically contiguous block (GBs, from CMA): free the page cache and compact first. Right after the VM
-# boots the allocation can still fail with the area free (pages not yet migratable): wait and try again.
+# boots the allocation can still fail with the area free (a page in the way not yet migratable): wait and try again,
+# for up to three minutes.
 # mode=3: the kernel collection; the run lasts until the hosted system halts (no stage stop, no line or idle budget).
 # insmod returns when the run ends: it runs detached, its output in /var/tmp/xnu-insmod.log.
-for try in 1 2 3 4; do
+for try in 1 2 3 4 5 6 7 8 9; do
   sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
   sudo dmesg -C
   sudo setsid nohup insmod xnu-ko/xnu.ko mode=3 stop=899 kmax=1000000000 idle_max=2000000000 ram_mb="$RAM_MB" image="$IMAGE" \
@@ -46,7 +53,7 @@ for try in 1 2 3 4; do
     > /var/tmp/xnu-insmod.log 2>&1 < /dev/null &
   sleep 5
   sudo dmesg | grep -aq "contiguous allocation failed" || break
-  [ $try = 4 ] && { echo "no contiguous memory for XNU (CMA: $(grep CmaFree /proc/meminfo))" >&2; exit 1; }
+  [ $try = 9 ] && { echo "no contiguous memory for XNU (CMA: $(grep CmaFree /proc/meminfo))" >&2; exit 1; }
   echo "no contiguous memory for XNU yet: trying again in 20 s"; sleep 20
 done
 if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then

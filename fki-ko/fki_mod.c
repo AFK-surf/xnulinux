@@ -374,6 +374,29 @@ EXPORT_SYMBOL(fki_phys_peek);
 
 /* ---- contiguous memory and the top foreign window ---- */
 
+/*
+ * reserve_mb: take that much from the CMA area when fki loads (early in the host's boot, while the area is clean) and
+ * keep it for the foreign kernel's DRAM. Later, a single page the host pinned in the middle of the area (a buffer-head
+ * page of a file system, say) is enough to make a multi-GB cma_alloc fail for good.
+ */
+static unsigned long reserve_mb;
+module_param(reserve_mb, ulong, 0444);
+static struct page *resv_pg;
+static unsigned long resv_cnt;
+static bool resv_used;
+
+static void fki_reserve(void)
+{
+	unsigned long cnt = ALIGN(reserve_mb << 20, SZ_2M) >> PAGE_SHIFT;
+
+	if (!reserve_mb || fki_resolve() || !p_cma_area || !*p_cma_area || !p_cma_alloc)
+		return;
+	resv_pg = p_cma_alloc(*p_cma_area, cnt, get_order(SZ_2M), true);
+	if (resv_pg)
+		resv_cnt = cnt;
+	pr_info("fki: %lu MiB for the foreign kernel's DRAM %s\n", reserve_mb, resv_pg ? "reserved" : "NOT reserved (CMA)");
+}
+
 int fki_contig_alloc(unsigned long size, struct fki_region *r)
 {
 	unsigned long n = 1;
@@ -382,6 +405,15 @@ int fki_contig_alloc(unsigned long size, struct fki_region *r)
 
 	if (err)
 		return err;
+	if (resv_pg && !resv_used && ALIGN(size, SZ_2M) >> PAGE_SHIFT <= resv_cnt) {
+		resv_used = true;
+		r->va = page_address(resv_pg);
+		r->size = ALIGN(size, SZ_2M);
+		memset(r->va, 0, r->size);
+		r->pa = page_to_phys(resv_pg);
+		r->handle = (void *)((unsigned long)resv_pg | 2);	/* bit 1: the reservation, kept when freed */
+		return 0;
+	}
 	/*
 	 * Large blocks (a hosted kernel's DRAM, GBs) come from the CMA area when there is one: a long-running host
 	 * fragments its memory with unmovable pages and alloc_contig_pages then fails. CMA blocks are 2 MiB aligned
@@ -417,6 +449,10 @@ EXPORT_SYMBOL(fki_contig_alloc);
 
 void fki_contig_free(struct fki_region *r)
 {
+	if ((unsigned long)r->handle & 2) {
+		resv_used = false;	/* back to the reservation, for the next run */
+		return;
+	}
 	if ((unsigned long)r->handle & 1) {
 		p_cma_release(*p_cma_area, (struct page *)((unsigned long)r->handle & ~1UL), r->size >> PAGE_SHIFT);
 		return;
@@ -695,6 +731,7 @@ static int __init fki_init(void)
 	int err;
 
 	skb_queue_head_init(&fki_net_rxq);
+	fki_reserve();
 	err = fki_hostcall_init();
 	if (err)
 		pr_warn("fki: no /dev/xnu-hostcall (%d)\n", err);
@@ -719,6 +756,8 @@ static int __init fki_init(void)
 static void __exit fki_exit(void)
 {
 	fki_hostcall_exit();
+	if (resv_pg && !resv_used)
+		p_cma_release(*p_cma_area, resv_pg, resv_cnt);
 	if (fki_netdev) {
 		unregister_netdev(fki_netdev);
 		free_netdev(fki_netdev);
