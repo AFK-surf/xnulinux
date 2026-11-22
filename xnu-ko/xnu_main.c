@@ -124,6 +124,8 @@ static char root_matching[256];
 static void *in_file; static fki_u64 in_off;
 /* hook returns must be 0 (nonzero ends the run): results come back through the request */
 struct xnu_hostdisk_req { u64_t write, off, len; void *buf; long result; };
+/* A host call (upcall 830, kexts/XnuDrm): request and reply buffers in XNU memory, through fki to a Linux service */
+struct xnu_hostcall_req { const void *req; u64_t len; void *reply; u64_t max; long result; };
 struct xnu_net_req { void *buf; u64_t len; long result; };
 struct xnu_world xnu_W;
 
@@ -381,6 +383,11 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 	}
 	if (stage == 812) {		/* the host's wall clock for XNU's calendar: a1 -> u64[2] {seconds, nanoseconds} UTC */
 		if (a1) fki_realtime(&((fki_u64 *)a1)[0], &((fki_u64 *)a1)[1]);
+		return 0;
+	}
+	if (stage == 830) {		/* host call: q->result = the reply's length or -errno */
+		struct xnu_hostcall_req *q = (struct xnu_hostcall_req *)a1;
+		if (q) q->result = fki_hostcall(q->req, (unsigned long)q->len, q->reply, (unsigned long)q->max);
 		return 0;
 	}
 	if (stage == 821) {		/* the block disk's size in bytes into *a1, 0 when there is none */
