@@ -34,8 +34,21 @@ extern "C" {
  */
 extern unsigned long linux64_hook;
 extern unsigned long linux64_slide;
-/* XNU's interrupt-enable state: hardware interrupts stay masked while XNU runs; this flag is the virtual one */
-extern unsigned int linux64_vint;
+/* This CPU's slot in the per-CPU arrays (LINUX64_CPU_SLOT of its MPIDR): valid before XNU knows its cpu number */
+static inline unsigned
+linux64_cpu_slot(void)
+{
+	unsigned long mpidr;
+
+	__asm__ volatile ("mrs %0, MPIDR_EL1" : "=r"(mpidr));
+	return LINUX64_CPU_SLOT(mpidr);
+}
+
+/* Each CPU's interrupt-enable state: hardware interrupts stay masked while XNU runs; this flag is the virtual one */
+extern unsigned int linux64_vint[LINUX64_CPU_SLOTS];
+#define LINUX64_VINT linux64_vint[linux64_cpu_slot()]
+/* Each CPU's pending inter-processor interrupt (set by the sender, taken where XNU's interrupts are enabled again) */
+extern unsigned int linux64_ipi_pending[LINUX64_CPU_SLOTS];
 /* enum linux64_counter */
 extern unsigned long linux64_dbg[LINUX64_NCOUNTERS];
 
@@ -95,12 +108,18 @@ linux64_count(enum linux64_counter c)
 
 /* osfmk/arm/arm_init.c */
 void linux64_assert_report(const char *file, int line, const char *expr);
+/* osfmk/arm/machine_routines_common.c: IPIs. With XNU's interrupts off: take this CPU's pending IPI, if any */
+void linux64_ipi_take(void);
+/* signal a CPU (kexts/XnuCPU's IOCPU::signalCPU): its logical number */
+void linux64_cpu_signal(unsigned int cpu);
 /* bsd/kern/kern_trustcache.c, libkern/amfi/amfi.c */
 void linux64_trust_cache_late_init(void);
 int linux64_amfi_off(void);
 /* osfmk/arm64/cswitch.s, sleh.c: user space while hosted */
 void linux64_el0_run(void *saved_state, unsigned long arg) __attribute__((noreturn));
-/* osfmk/kern/sched_prim.c: every thread's state and saved frames to the host log (LINUX64_DEBUG) */
+/* osfmk/arm/machine_routines_common.c: in a spin-wait, let the host take this CPU now and then (see arm/locks.h) */
+void linux64_spin_relax(void);
+/* osfmk/kern/sched_prim.c: every thread's state and saved frames to the host log (on the host's request) */
 void linux64_dump_threads(void);
 
 #ifdef __cplusplus

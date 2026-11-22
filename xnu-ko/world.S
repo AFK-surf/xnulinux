@@ -1,7 +1,15 @@
 /* World switch, see world.h. No PAC instructions here: keys change under our feet.
- * TPIDR_EL1 stays Linux's: the LINUX64 XNU keeps its thread pointer in memory (linux64_tpidr),
- * so a fault taken in XNU code reaches Linux with a sane per-cpu base and becomes a normal oops. */
-#define W(reg) adrp reg, xnu_W; add reg, reg, :lo12:xnu_W
+ * x18 is Linux's shadow call stack pointer (CONFIG_SHADOW_CALL_STACK), which belongs to the Linux task that entered the
+ * world on this CPU. XNU does not use it or save it per thread, so it stays this CPU's while XNU runs (Linux code XNU
+ * calls pushes and pops on it, balanced); the way out puts back the value the task entered with.
+ * TPIDR_EL1 stays Linux's: the LINUX64 XNU keeps its thread pointer in TPIDRRO_EL0, so a fault taken in XNU code
+ * reaches Linux with a sane per-cpu base and becomes a normal oops. Each CPU has its own save area. */
+/*
+ * This CPU's save area: xnu_worlds[slot], slot = affinity 0 and 1 of MPIDR_EL1, four bits each (LINUX64_CPU_SLOT).
+ * Clobbers x10.
+ */
+#define W(reg) mrs reg, mpidr_el1; and x10, reg, #0xf; ubfx reg, reg, #8, #4; orr reg, x10, reg, lsl #4; \
+	adrp x10, xnu_worlds; add x10, x10, :lo12:xnu_worlds; ldr reg, [x10, reg, lsl #3]
 
 /*
  * The user half (TTBR0, TCR.T0SZ) belongs to whichever world runs: XNU switches TTBR0 to its user pmaps (with its own
@@ -42,6 +50,7 @@
 	.type	xnu_world_call, %function
 xnu_world_call:
 	W(x9)
+	str	x18, [x9, #464]
 	stp	x19, x20, [x9, #0]
 	stp	x21, x22, [x9, #16]
 	stp	x23, x24, [x9, #32]
@@ -74,6 +83,7 @@ xnu_world_abort:			/* from the upcall: Linux keys and TPIDR are live */
 	W(x9)
 	mov	x19, #1
 2:	TO_LINUX_MM
+	ldr	x18, [x9, #464]
 	ldr	x10, [x9, #216]
 	msr	tpidr_el0, x10
 	ldr	x10, [x9, #224]

@@ -67,9 +67,10 @@ int fki_window_l1(unsigned long va, unsigned long long **l1_va, fki_u64 *l1_pa);
 void fki_window_set(unsigned long long *slot, fki_u64 desc);
 /*
  * Called from inside fki_enter() (preemption and IRQs off): let Linux run (IRQs and preemption on)
- * until the counter reaches deadline or max_ns pass, then return with them off again.
+ * until the counter reaches deadline or max_ns pass, or fki_kick_cpu() is called for this CPU, then return with them off
+ * again. Not at all if *wake (when given) is already nonzero: the kicker sets it before kicking.
  */
-void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns);
+void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns, const volatile unsigned int *wake);
 /*
  * Called from inside fki_enter() while the hosted kernel is busy: let Linux take its pending interrupts and
  * reschedule if it must (RCU, other tasks on this CPU), then return with IRQs and preemption off again.
@@ -86,6 +87,11 @@ long fki_net_recv(void *buf, unsigned long len);
 long fki_net_pending(void);
 /* Keep the calling task on one CPU (the hosted kernel sees that CPU's MPIDR). */
 int fki_bind_cpu(int cpu);
+/* CPUs: how many are online, and a CPU's MPIDR (from ordinary Linux context) */
+int fki_num_cpus(void);
+int fki_cpu_mpidr(int cpu, fki_u64 *mpidr);
+/* Make the foreign kernel on a CPU look at its pending work: wake its idle call, or interrupt it (interrupts may be off) */
+void fki_kick_cpu(int cpu);
 /*
  * A helper kernel thread bound to one CPU: fn(arg) runs until it returns or fki_thread_stop() is called;
  * fn should loop on !fki_thread_should_stop() and sleep with fki_msleep().
@@ -93,6 +99,10 @@ int fki_bind_cpu(int cpu);
 void *fki_thread_start(int (*fn)(void *), void *arg, int cpu, const char *name);
 void fki_thread_stop(void *thread);
 int fki_thread_should_stop(void);
+/* In a helper thread: sleep until *flag is non-zero or the thread is told to stop; fki_thread_wake() wakes it (callable
+ * with interrupts off, after setting the flag) */
+void fki_thread_wait(const volatile unsigned long *flag);
+void fki_thread_wake(void *thread);
 void fki_msleep(unsigned int ms);
 /*
  * Foreign kernel faults: a kernel-mode data or instruction abort whose address or faulting pc is in [lo, hi) is offered
@@ -105,6 +115,7 @@ unsigned long fki_regs_lr(void *regs);
 unsigned long fki_regs_pstate(void *regs);	/* the interrupted PSTATE (SPSR) */
 void fki_regs_set_pc(void *regs, unsigned long pc);
 void fki_regs_set_reg(void *regs, unsigned int n, unsigned long v);	/* x0..x30 */
+unsigned long fki_regs_reg(void *regs, unsigned int n);			/* x0..x30 */
 int fki_fault_register(unsigned long lo, unsigned long hi, int (*handler)(unsigned long far, unsigned long esr, void *regs));
 void fki_fault_unregister(void);
 /* Read 8 bytes of RAM by physical address (debugging: walking a foreign page table). */
