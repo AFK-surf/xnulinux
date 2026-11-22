@@ -10,7 +10,7 @@
 //
 // Here: an AppleNVMeEAN instance (never started: it has no device) is registered so the cast succeeds, and the four entry
 // points of the class are redirected to the functions below (a branch written over each one's first instruction). The blobs
-// live in memory and are written through to a file on the Linux side (xnu.ko keystore=, upcall 819 in bsd/net/if_linux64.c),
+// live in memory and are written through to a file on the Linux side (xnu.ko keystore=, linux64_store_rw in bsd/kern/linux64_host.c),
 // so they last as long as that file does. Nothing else on this system uses AppleNVMeEAN.
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>

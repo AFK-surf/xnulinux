@@ -6,18 +6,19 @@ What the PoC did to get each step running, and what replaces it. Ordered by what
 
 | Now | Replace with |
 |---|---|
-| One 4300-line patch (`xnu-patches/0001-linux64-stage-hook.patch`, 61 files) | A topic series: `00xx-linux64-{config,el0,pmap,timer,upcall,iokit-platform,bsd-root,syscalls,amfi,debug}.patch`, each building on its own |
-| `extern uintptr_t linux64_hook;` declared inline at ~60 call sites, `if (linux64_hook)` as the hosted test | One header (`osfmk/arm64/linux64.h`): `linux64_hosted()`, typed upcall wrappers; code under `CONFIG_LINUX64` so a non-hosted build is the stock kernel |
-| Debug instrumentation in the hot paths (`linux64_dbg[16]` counters in the idle loop, scheduler, EL0 entry; a thread dump every 150000 idle rounds; `DEBUG_BSDINIT 1`) | Behind `LINUX64_DEBUG` (off by default), thread dump on demand (an upcall from the host), not on an idle counter |
-| Dead paths from earlier milestones: the BSD `ifnet` half of `bsd/net/if_linux64.c` (`kexts/XnuEthernet` is en0 now; only its frame transport stays, as ABI calls), memdev host mode `hostdisk=` (replaced by `kexts/XnuDisk`), HFS+ read-write root | Removed |
+| Done: four topic patches (`xnu-patches/000{1..4}-linux64-*.patch`: machine layer, host devices, boot without iBoot, macOS 27 userland), each file in one of them | Finer topics as they change (el0, pmap, timer within the machine layer) |
+| Done: one header pair (`xnu-patches/include/linux64.h`, `linux64_abi.h`, copied into `EXTERNAL_HEADERS/linux64`); calls through `linux64_call()`; `if (linux64_hook)` as the hosted test | Code under `CONFIG_LINUX64` so a non-hosted build is the stock kernel |
+| Done: bring-up stage markers, the dead second idle path, the kernel's own en0, unused page-table walkers and probes removed; the idle-loop thread dump behind `LINUX64_DEBUG`; system call and exec path logging only with boot-arg `linux64_trace`; monitor counters named (`enum linux64_counter`) | A thread dump on demand (a call from the host) instead of on an idle counter |
+| Done: the PoC's non-cryptographic xorshift fallback for `read_random`/`cc_rand_generate` before corecrypto registers | The host's generator (`LINUX64_CALL_RANDOM`: Linux `get_random_bytes`) |
+| memdev host mode `hostdisk=` (replaced by `kexts/XnuDisk`), HFS+ read-write root | Removed |
 
 ## 2. The xnu.ko ↔ XNU boundary
 
 | Now | Replace with |
 |---|---|
-| Upcalls are bare stage numbers (810–821, 993–995) with ad-hoc argument structs | `xnu-ko/linux64_abi.h`, shared by both sides: an enum of named calls, one request struct per call, a version number checked at load |
+| Done: `linux64_abi.h` shared by both sides: named calls (`enum linux64_call`), one request struct per call, `LINUX64_ABI_VERSION`; xnu.ko logs a call it does not know and goes on | Check the version at load (XNU exports it) |
 | Console input, input events, framebuffer: host files appended to or dumped on a timer (`console_in=`, `input_in=`, `fb_dump=`) | Character devices from fki.ko (`/dev/xnu/console`, `/dev/xnu/input`, `/dev/xnu/fb` with mmap), so a host program talks to them like any device |
-| Module parameters for everything (`stop`, `kmax`, `idle_max`, `mode`, bisecting knobs) | Drop the PoC-only ones; the run ends when XNU halts, not on a counter |
+| Module parameters from bring-up (`mode`, `kmax`, `idle_max`, `ramdisk`, `hostdisk`; `stop` is gone, `kmax`/`idle_max` default to no limit) | Drop the rest; the run ends when XNU halts |
 
 ## 3. Boot and the system disk
 
@@ -32,7 +33,7 @@ What the PoC did to get each step running, and what replaces it. Ordered by what
 
 | Now | Replace with |
 |---|---|
-| ~30 scripts; the boot itself ran from `vm-m2-kbisect.sh` (now `xnulinux-boot.sh`: builds, checks, retries, GPU bridge) (`mode=3 stop=899 kmax=…`, a bisecting tool's knobs); several have session paths (`/Users/admin/...`), tty names, fixed `sleep`s | One driver (`xnulinux` CLI): `build`, `disk`, `boot`, `console`, `screenshot`, `test`; configuration in one file |
+| ~30 scripts; the boot runs from `xnulinux-boot.sh` (builds, checks, retries, GPU bridge; the bisecting `vm-m2-kbisect.sh` is gone); several have session paths (`/Users/admin/...`), tty names, fixed `sleep`s | One driver (`xnulinux` CLI): `build`, `disk`, `boot`, `console`, `screenshot`, `test`; configuration in one file |
 | HFS+ route scripts (`mk-fulldisk.sh`, `vm-sysdisk-*`, `vm-mk-sysdisk.sh`, `vm-m2-*`, `run-poc.sh`) | Removed (done: APFS route only) |
 | `tools/hosted/tests/t*.sh`, `af*.sh`: one-off probes (removed) | A test suite with expected results: boot to desktop, Safari/Chrome page load (screenshot compare), `xcodebuild` of a pinned project, Metal unit tests |
 | No CI | CI: fki.ko/xnu.ko build against a pinned kernel, XNU + collection build (x86_64 Linux works with the DroidVM toolchain), GPU plugin host tests on macOS |
@@ -62,5 +63,9 @@ Venus → MoltenVK → Metal on the host GPU); on a Linux machine with its own G
   the render node), `gpu/xnu-drm/darwin` (libxnudrm, compiled into Mesa by `gpu/venus/patches/0002`).
 - Metal on it: the plugin (`gpu/xnu-cpu-metal`) carries both drivers and takes Venus when `XnuDrm` is there; a Metal
   program in the hosted macOS gets `Virtio-GPU Venus (Apple M5 Max)` (textures, IOSurface textures, buffers, blits).
-  Open: WindowServer still ends on lavapipe (the loader runs in secure mode there and sees both drivers); IOSurfaces
-  are still copied to and from GPU memory each frame (2-5 ms at 1080p-1440p, measured on the host).
+- WindowServer composites on the host GPU: the plugin hands the loader the chosen driver directly
+  (`VK_LUNARG_direct_driver_loading`, lavapipe is not loaded with Venus), the bridge's user client sits on the Metal
+  accelerator service (the sandbox's `system-graphics` rule), and `newBufferWithBytesNoCopy` buffers, copied because
+  Venus has no `VK_EXT_external_memory_host`, are synced from the caller's memory before each submission.
+- Open: those copies (up to the 33 MB wallpaper per submission) and the IOSurface copies to and from GPU memory each
+  frame (2-5 ms at 1080p-1440p, measured on the host): host-memory import and IOSurfaces backed by bridge blobs.
