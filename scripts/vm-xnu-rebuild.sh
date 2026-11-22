@@ -51,3 +51,4 @@ if [ -e out/kc/kc27.bin ]; then
 fi
 ls -la out/k27/kernel-k27.macho
 sudo cp out/k27/kernel-k27.macho /lib/firmware/xnu/kernel.macho
+sync	# the VM may be stopped from the host right after (tart/krunkit stop): unsynced pages of the collection would be lost
