@@ -38,8 +38,8 @@ build time; it is never committed.
 
 ## Running
 
-The host is an arm64 Linux VM with PAC on an Apple Silicon Mac (`scripts/krun-vm.sh`; tart works without the GPU), with
-`cma=10G@0x100000000-0x600000000` on its kernel command line.
+The host is an arm64 Linux VM with PAC on an Apple Silicon Mac (`scripts/krun-vm.sh`; tart works without the GPU), 24 GB:
+`scripts/vm-install-fki-service.sh` gives Linux 15 GB (`mem=15G`) and the 8 GB above to the hosted kernel (fki's carve-out).
 
 1. `scripts/vm-xnu-build.sh` (once) sets up the macOS-DroidVM Linux toolchain and builds XNU natively on arm64.
 2. `scripts/vm-xnu-rebuild.sh` applies `xnu-patches/`, rebuilds the kernel, builds `kexts/` and links the kernel collection.
