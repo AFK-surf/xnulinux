@@ -24,7 +24,9 @@ build() {	# a module; its compiler errors on failure
 }
 build fki-ko
 build xnu-ko "KBUILD_EXTRA_SYMBOLS=$PWD/fki-ko/Module.symvers"
-sudo dmesg -n "${CONLEVEL:-8}"
+# XNU prints a lot (console lines, kprintf): to the ring buffer only (journalctl -k, scripts/vm-dmesg-shell.sh), not the
+# VM console, where a CPU printing waits for the console with interrupts off
+sudo dmesg -n "${CONLEVEL:-1}"
 # fki has the hosted kernel's DRAM from its load at boot (scripts/vm-install-fki-service.sh): reload it only when it changed,
 # with the same carve-out
 CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || echo 0x400000000) carve_mb=$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null || echo 8156)"
