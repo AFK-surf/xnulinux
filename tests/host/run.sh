@@ -7,6 +7,6 @@ cd "$(dirname "$0")"
 O=${TMPDIR:-/tmp}
 cc -O2 -o $O/fpcheck fpcheck.c && cc -O2 -o $O/memcheck memcheck.c
 $O/fpcheck 0 25 & f=$!
-sudo $O/memcheck 4 25; m=$?
-wait $f; f=$?
+m=0; sudo $O/memcheck 4 25 || m=$?
+f=0; wait $f || f=$?
 [ $f = 0 ] && [ $m = 0 ] && echo "host tests: pass" || { echo "host tests: FAIL (fpcheck $f, memcheck $m)"; exit 1; }
