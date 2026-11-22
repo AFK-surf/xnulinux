@@ -69,3 +69,34 @@ Venus → MoltenVK → Metal on the host GPU); on a Linux machine with its own G
   Venus has no `VK_EXT_external_memory_host`, are synced from the caller's memory before each submission.
 - Open: those copies (up to the 33 MB wallpaper per submission) and the IOSurface copies to and from GPU memory each
   frame (2-5 ms at 1080p-1440p, measured on the host): host-memory import and IOSurfaces backed by bridge blobs.
+
+## 6. Performance
+
+Measured against the same macOS 27.2.1 install booted as an Apple Virtualization.framework VM (tart, 2 CPUs) on the same
+host, back to back; time from `kern.boottime` to the Dock process starting (first login, automatic):
+
+| | loginwindow | Dock |
+|---|---|---|
+| Native VM, 2 CPUs | +3 s | +49 s |
+| Hosted, 1 CPU | +11 s | +32 s |
+| Hosted, 2 CPUs | +11 s | +31 s |
+
+What it took:
+
+- The machine identity (`xnu.ko model=`, default `VirtualMac2,1`): sandboxed processes read MobileGestalt's product type
+  from `/product`'s `sub-product-type` and `unique-model` only; without them apsd aborted at every start and loginwindow's
+  MDM pre-login check-in (`CP_PreLoginCheckIn`) waited about 100 s for it.
+- The user-space exception entry stores the user state and signs it once (it checked and re-signed it five times).
+
+Per operation (hosted / native VM): getppid 270 / 87 ns, write 64 B 533 / 651 ns, pipe round trip 3.3 / 8.7 µs,
+fork+exit+wait 0.97 / 0.25 ms, posix_spawn+wait 3.0 / 1.0 ms. Memory access with 4 KB pages: a 4 MB pointer chase
+27–37 / 18 ns (the hardware translation granule is the host's; Linux in the same VM measures the same).
+
+Tools: `xnu.ko perf=1` prints, every 2 s, each host call's share of the time and the user-space exceptions by class
+(system call, data and instruction abort, IRQ) with their time until the CPU is back in user space; XNU's `pc-sample=`
+records, hosted, the caller where interrupts are re-enabled for kernel samples.
+
+| Now | Replace with |
+|---|---|
+| 4 KB VM pages: four times the page faults of a native (16 KB) macOS; process spawn about 3x | `vm16k=1` (16 KB VM pages over the 4 KB granule, XNU's PAGE_RATIO 4) boots to the desktop with a quarter of the faults, but WindowServer aborts once per boot waiting in `MTLRegisterDevices`, and a boot has hung once in early VM setup: fix both, then make it the default |
+| The system disk keeps hardware daemons that crash or retry without their hardware | No crash reports after a boot: each crashing daemon fixed (a stand-in service or property) or disabled with a reason |
