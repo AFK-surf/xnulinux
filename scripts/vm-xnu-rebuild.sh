@@ -6,10 +6,15 @@ set -e -o pipefail	# a failed kernel build stops here: never repackage the previ
 cd ~/w/dvm
 export PATH=$PATH:/usr/lib/llvm-21/bin
 T=out/k27/xnu
-for p in ~/w/poc/xnu-patches/*.patch; do
-  for f in $(grep '^+++ b/' $p | sed 's|^+++ b/||'); do git -C $T checkout -q -- $f 2>/dev/null || rm -f $T/$f; done
+# back to the tree's own sources: every file the patches touched last time (.linux64-patched) or touch now
+P=~/w/poc/xnu-patches
+for f in $(cat $T/.linux64-patched 2>/dev/null; grep -h '^+++ b/' $P/*.patch | sed 's|^+++ b/||'); do
+  git -C $T checkout -q -- $f 2>/dev/null || rm -f $T/$f
 done
-for p in ~/w/poc/xnu-patches/*.patch; do git -C $T apply $p; echo "applied $(basename $p)"; done
+for p in $P/*.patch; do git -C $T apply $p; echo "applied $(basename $p)"; done
+grep -h '^+++ b/' $P/*.patch | sed 's|^+++ b/||' > $T/.linux64-patched
+# the machine layer's headers (shared with xnu.ko), where every component's sources find them
+mkdir -p $T/EXTERNAL_HEADERS/linux64 && cp $P/include/*.h $T/EXTERNAL_HEADERS/linux64/
 JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -15
 if [ -e out/kc/kc27.bin ]; then
   # the hosted system's extra Apple kexts (in kc27, not kept by default): IOSurface for actool, CoreImage and friends

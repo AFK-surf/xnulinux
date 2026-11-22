@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // XnuDrm: the hosted macOS's door to the Linux host's GPU (the DRM bridge, gpu/xnu-drm). A process opens a user client
-// (libxnudrm, inside Mesa's Venus driver); each of its requests is one host call (linux64_hostcall: upcall 830, xnu.ko,
+// (libxnudrm, inside Mesa's Venus driver); each of its requests is one host call (linux64_hostcall: LINUX64_CALL_HOSTCALL, xnu.ko,
 // fki) answered by xnudrmd, the Linux service that owns the DRM render node. Buffer mappings come back as the physical
 // pages Linux mapped, which this kext maps into the calling task: the process and the GPU share the memory, no copies.
 //

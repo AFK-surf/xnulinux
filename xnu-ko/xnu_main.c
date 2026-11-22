@@ -3,10 +3,10 @@
  * xnu.ko: hosts an XNU kernel image inside Linux. Talks to Linux only
  * through FKI (fki.h); <linux/module.h> provides the module ABI.
  *
- * mode=1 (M1): load, slide and sign the image, call two XNU functions.
- * mode=2 (M2a, default): hand XNU boot args and an ADT and run arm_init in
- *        the XNU world; XNU reports stages through linux64_hook, and the run
- *        ends at stage `stop`.
+ * mode=1: load, slide and sign the image, call two XNU functions (a smoke test).
+ * mode=2: a bare kernel image; mode=3: a kernel collection. Hand XNU boot args
+ *        and an ADT and run arm_init in the XNU world; XNU calls into this
+ *        module through linux64_hook (the interface: linux64_abi.h).
  */
 #include <linux/module.h>
 #include "../fki-ko/fki.h"
@@ -14,19 +14,18 @@
 #include "macho.h"
 #include "adt.h"
 #include "world.h"
+#include "../xnu-patches/include/linux64_abi.h"
 
 static char *image = "xnu/kernel.macho";
 module_param(image, charp, 0444);
 static int mode = 2;
 module_param(mode, int, 0444);
-static int stop = 199;
-module_param(stop, int, 0444);
 static int ram_mb = 256;
 module_param(ram_mb, int, 0444);
 static int kmax;	/* end the run after this many XNU kprintf lines (0: no limit) */
 module_param(kmax, int, 0444);
 static int kcount;
-static int idle_max = 200;	/* end the run after this many XNU idle rounds (0: never) */
+static int idle_max;	/* end the run after this many XNU idle rounds (0: never) */
 module_param(idle_max, int, 0444);
 static int quiet_console = 1;	/* drop the known high-volume console and kprintf lines (see quiet_line) */
 module_param(quiet_console, int, 0444);
@@ -81,27 +80,26 @@ module_param(fb_dump_ms, int, 0444);
 static u64_t fb_off;	/* the framebuffer's offset in the contiguous region (its Linux address: img.region.va + fb_off) */
 #define FB_SIZE (fb_width > 0 && fb_height > 0 ? (u64_t)fb_width * fb_height * 4 : 0)
 #define BOOT_EXTRA (((rd_size + 0x3fff) & ~0x3fffULL) + ((TC_SEG_SIZE + 0x3fff) & ~0x3fffULL) + ((FB_SIZE + 0x3fff) & ~0x3fffULL))
-/* A root disk backed by a host file (an HFS+ image): XNU's memdev md0 in host mode, stages 995 (size) and 994 (I/O). */
+/* A root disk backed by a host file (an HFS+ image): XNU's memdev md0 in host mode (LINUX64_CALL_RAMDISK_SIZE, _RW). */
 static char *hostdisk;
 static int hostdisk_rw;
 module_param(hostdisk, charp, 0444);
 module_param(hostdisk_rw, int, 0444);
 static void *hd_file; static fki_u64 hd_size;
-/* Console input for XNU's /dev/console: bytes appended to this host file are typed in (stage 993) */
+/* Console input for XNU's /dev/console: bytes appended to this host file are typed in (LINUX64_CALL_CONSOLE_READ) */
 static char *console_in;
 module_param(console_in, charp, 0444);
 static void *ci_file; static fki_u64 ci_off;
-struct xnu_cons_req { void *buf; u64_t len; long result; };
 /*
  * Input events for XnuInput (kexts/XnuInput): a host file of 8-byte records {u16 type, u16 code, s32 value} as Linux's evdev
- * (tools/hosted/xnu-input.py appends them); upcall 818 reads the whole records written since the load.
+ * (tools/hosted/xnu-input.py appends them); LINUX64_CALL_INPUT_READ reads the whole records written since the load.
  */
 static char *input_in;
 module_param(input_in, charp, 0444);
-static char *keystore;		/* the hosted keystore's file (XnuEAN's EAN blobs): read and written through upcall 819 */
+static char *keystore;		/* the hosted keystore's file (XnuEAN's EAN blobs): read and written through LINUX64_CALL_KEYSTORE_RW */
 module_param(keystore, charp, 0444);
 static void *ks_file;
-/* The hosted system's block disk (kexts/XnuDisk: IOKit media, e.g. an APFS container), read-write: upcalls 821 (size), 820 (I/O) */
+/* The hosted system's block disk (kexts/XnuDisk: IOKit media, e.g. an APFS container), read-write (LINUX64_CALL_DISK_SIZE, _RW) */
 static char *disk;
 module_param(disk, charp, 0444);
 static void *dk_file; static fki_u64 dk_size;
@@ -122,11 +120,6 @@ static char *root_uuid;
 module_param(root_uuid, charp, 0444);
 static char root_matching[256];
 static void *in_file; static fki_u64 in_off;
-/* hook returns must be 0 (nonzero ends the run): results come back through the request */
-struct xnu_hostdisk_req { u64_t write, off, len; void *buf; long result; };
-/* A host call (upcall 830, kexts/XnuDrm): request and reply buffers in XNU memory, through fki to a Linux service */
-struct xnu_hostcall_req { const void *req; u64_t len; void *reply; u64_t max; long result; };
-struct xnu_net_req { void *buf; u64_t len; long result; };
 struct xnu_world xnu_W;
 
 static void logs(const char *s) { fki_log(s, x_strlen(s)); }
@@ -256,7 +249,7 @@ unsigned long xnu_fault_deferred(unsigned long *frame)
 		}
 		/* a fault loop runs with interrupts masked: let Linux take its interrupts now and then (RCU, network) */
 		if ((repeats & 63) == 63)
-			((void (*)(unsigned long, unsigned long, unsigned long))xnu_world_upcall)(811, 0, 0);
+			((void (*)(unsigned long, unsigned long, unsigned long))xnu_world_upcall)(LINUX64_CALL_PREEMPTED, 0, 0);
 		return pc;
 	}
 	/* inside copyin/copyout: the routine's recovery path returns EFAULT to its caller, as XNU's own abort handler does */
@@ -329,8 +322,9 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 	return 0;
 }
 
-static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2);
-long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
+/* XNU calls into the host: enum linux64_call (linux64_abi.h); a non-zero return ends the run */
+static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2);
+long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 {
 	{
 		/* debugging: an XNU stack Linux's overflow check would reject (bit 14 of sp set) */
@@ -340,19 +334,19 @@ long xnu_hook(unsigned long stage, unsigned long a1, unsigned long a2)
 		if ((sp & 0x4000) && told < 3) {
 			told++;
 			logkv("xnu: upcall on an XNU stack with sp bit 14 set, sp", sp);
-			logkv("xnu:   stage", stage);
+			logkv("xnu:   call", call);
 		}
 	}
 	in_xnu = 0;
-	long r = xnu_hook_body(stage, a1, a2);
+	long r = xnu_hook_body(call, a1, a2);
 	if (!r) in_xnu = 1;
 	return r;
 }
 
-static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a2)
+static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2)
 {
-	if (stage == 993) {		/* console input: new bytes of console_in */
-		struct xnu_cons_req *q = (struct xnu_cons_req *)a1;
+	if (call == LINUX64_CALL_CONSOLE_READ) {		/* console input: new bytes of console_in */
+		struct linux64_buf_req *q = (struct linux64_buf_req *)a1;
 		if (!q) return 0;
 		q->result = 0;
 		if (ci_file) {
@@ -361,8 +355,8 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		}
 		return 0;
 	}
-	if (stage == 818) {		/* input events: whole 8-byte records of input_in, into q->buf */
-		struct xnu_cons_req *q = (struct xnu_cons_req *)a1;
+	if (call == LINUX64_CALL_INPUT_READ) {		/* input events: whole 8-byte records of input_in, into q->buf */
+		struct linux64_buf_req *q = (struct linux64_buf_req *)a1;
 		if (!q) return 0;
 		q->result = 0;
 		if (in_file && q->len >= 8) {
@@ -371,53 +365,53 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		}
 		return 0;
 	}
-	if (stage == 815) {		/* frames Linux sent on xnu0 waiting for XNU, into *a1 */
-		if (a1) *(u64_t *)a1 = (u64_t)fki_net_pending();
-		return 0;
-	}
-	if (stage == 816 || stage == 817) {	/* XNU's Ethernet link: 816 sends q->buf (q->len bytes), 817 receives into it */
-		struct xnu_net_req *q = (struct xnu_net_req *)a1;
+	if (call == LINUX64_CALL_NET_SEND || call == LINUX64_CALL_NET_RECV) {	/* XNU's Ethernet link: one frame each way */
+		struct linux64_buf_req *q = (struct linux64_buf_req *)a1;
 		if (!q) return 0;
-		q->result = stage == 816 ? fki_net_send(q->buf, (unsigned long)q->len) : fki_net_recv(q->buf, (unsigned long)q->len);
+		q->result = call == LINUX64_CALL_NET_SEND ? fki_net_send(q->buf, (unsigned long)q->len) : fki_net_recv(q->buf, (unsigned long)q->len);
 		return 0;
 	}
-	if (stage == 812) {		/* the host's wall clock for XNU's calendar: a1 -> u64[2] {seconds, nanoseconds} UTC */
+	if (call == LINUX64_CALL_WALLCLOCK) {		/* the host's wall clock for XNU's calendar: a1 -> u64[2] {seconds, nanoseconds} UTC */
 		if (a1) fki_realtime(&((fki_u64 *)a1)[0], &((fki_u64 *)a1)[1]);
 		return 0;
 	}
-	if (stage == 830) {		/* host call: q->result = the reply's length or -errno */
-		struct xnu_hostcall_req *q = (struct xnu_hostcall_req *)a1;
+	if (call == LINUX64_CALL_RANDOM) {	/* a1: a2 bytes from Linux's generator */
+		if (a1) fki_random((void *)a1, a2);
+		return 0;
+	}
+	if (call == LINUX64_CALL_HOSTCALL) {		/* host call: q->result = the reply's length or -errno */
+		struct linux64_hostcall_req *q = (struct linux64_hostcall_req *)a1;
 		if (q) q->result = fki_hostcall(q->req, (unsigned long)q->len, q->reply, (unsigned long)q->max);
 		return 0;
 	}
-	if (stage == 821) {		/* the block disk's size in bytes into *a1, 0 when there is none */
+	if (call == LINUX64_CALL_DISK_SIZE) {		/* the block disk's size in bytes into *a1, 0 when there is none */
 		if (a1) *(u64_t *)a1 = dk_file ? dk_size : 0;
 		return 0;
 	}
-	if (stage == 820) {		/* block disk I/O: q->result = bytes moved or -errno */
-		struct xnu_hostdisk_req *q = (struct xnu_hostdisk_req *)a1;
+	if (call == LINUX64_CALL_DISK_RW) {		/* block disk I/O: q->result = bytes moved or -errno */
+		struct linux64_rw_req *q = (struct linux64_rw_req *)a1;
 		if (q) q->result = dk_file ? fki_file_rw(dk_file, (int)q->write, q->buf, (unsigned long)q->len, q->off) : -6;
 		return 0;
 	}
-	if (stage == 819) {		/* the keystore file: q->result = bytes moved or -errno */
-		struct xnu_hostdisk_req *q = (struct xnu_hostdisk_req *)a1;
+	if (call == LINUX64_CALL_KEYSTORE_RW) {		/* the keystore file: q->result = bytes moved or -errno */
+		struct linux64_rw_req *q = (struct linux64_rw_req *)a1;
 		if (!q) return 0;
 		q->result = ks_file ? fki_file_rw(ks_file, (int)q->write, q->buf, (unsigned long)q->len, q->off) : -6;
 		return 0;
 	}
-	if (stage == 995) {		/* host disk size in bytes into *a1, 0 when there is none */
+	if (call == LINUX64_CALL_RAMDISK_SIZE) {		/* host disk size in bytes into *a1, 0 when there is none */
 		if (a1) *(u64_t *)a1 = hd_file ? hd_size : 0;
 		return 0;
 	}
-	if (stage == 994) {		/* host disk I/O: q->result = bytes moved or -errno */
-		struct xnu_hostdisk_req *q = (struct xnu_hostdisk_req *)a1;
+	if (call == LINUX64_CALL_RAMDISK_RW) {		/* host disk I/O: q->result = bytes moved or -errno */
+		struct linux64_rw_req *q = (struct linux64_rw_req *)a1;
 		if (!q) return 0;
 		if (!hd_file) q->result = -6;
 		else if (q->write && !hostdisk_rw) q->result = -30;
 		else q->result = fki_file_rw(hd_file, (int)q->write, q->buf, (unsigned long)q->len, q->off);
 		return 0;
 	}
-	if (stage == 996) {		/* XNU console bytes (/dev/console): line-buffered into the host log */
+	if (call == LINUX64_CALL_CONSOLE_WRITE) {		/* XNU console bytes (/dev/console): line-buffered into the host log */
 		static char line[1000]; static unsigned n;
 		const char *b = (const char *)a1; unsigned long i;
 		for (i = 0; b && i < a2; i++) {
@@ -447,7 +441,7 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		}
 		return 0;
 	}
-	if (stage == 998) {		/* XNU kprintf */
+	if (call == LINUX64_CALL_KPRINTF) {		/* XNU kprintf */
 		char m[260]; const char *f = (const char *)a1; unsigned i = 0, j = 0;
 		m[j++] = 'x'; m[j++] = 'n'; m[j++] = 'u'; m[j++] = ']'; m[j++] = ' ';
 		while (f && f[i] && j < sizeof(m) - 1) { if (f[i] != '\n') m[j++] = f[i]; i++; }
@@ -458,7 +452,7 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		if (kmax && ++kcount >= kmax) { logs("xnu: kprintf budget reached"); return 1; }
 		return 0;
 	}
-	if (stage == 210 && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
+	if (call == LINUX64_CALL_KERNEL_TABLES && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
 		const unsigned long long *tte = (const unsigned long long *)a1;
 		walk_log("xnu: XNU table walk for arm_init (text)", diag_va[0], tte);
 		walk_log("xnu: XNU table walk for the Mach-O header", diag_va[1], tte);
@@ -481,18 +475,19 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		if (diag_va[5]) { unsigned long l = ((unsigned long (*)(const char *))diag_va[5])("xnulinux"); logkv("xnu: probe exec strlen through XNU tables", l); }
 		logs("xnu: probes done");
 	}
-	if (stage == 811) {		/* XNU busy: a host IRQ preempted its user code; let Linux handle it */
+	if (call == LINUX64_CALL_PREEMPTED) {		/* XNU busy: a host IRQ preempted its user code; let Linux handle it */
 		fki_yield();
 		return 0;
 	}
-	if (stage == 810) {		/* XNU idle: let Linux run until XNU's next timer deadline */
+	if (call == LINUX64_CALL_IDLE) {		/* XNU idle: let Linux run until XNU's next timer deadline */
 		static unsigned long idles;
-		if ((++idles & (idles - 1)) == 0) logkv("xnu: XNU idle, count", idles);
+		idles++;
+		if ((idles & (idles - 1)) == 0) logkv("xnu: XNU idle, count", idles);
 		fki_idle_until(a1, 20000000ULL);	/* at most 20 ms per round */
 		return idle_max && idles >= (unsigned long)idle_max;
 	}
-	if (stage == 997) {		/* XNU assert() failed */
-		const struct { const char *file; long line; const char *expr; } *a = (const void *)a1;
+	if (call == LINUX64_CALL_ASSERT) {		/* XNU assert() failed */
+		const struct linux64_assert_info *a = (const void *)a1;
 		char m[240]; unsigned j = 0, i;
 		const char *parts[3] = { "xnu: XNU assert failed: ", a->file, ": " };
 		for (int p = 0; p < 3; p++)
@@ -503,11 +498,11 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		logkv("xnu:   at line", a->line);
 		return assert_fatal;
 	}
-	if (stage == 9100) {		/* the first entry into user space (linux64_el0_run follows) */
+	if (call == LINUX64_CALL_USER_ENTER) {		/* the first entry into user space (linux64_el0_run follows) */
 		logkv("xnu: XNU enters user space (EL0); user pc", a1);
 		return 0;
 	}
-	if (stage == 999) {
+	if (call == LINUX64_CALL_PANIC) {
 		char m[500]; const char *f = (const char *)a1; unsigned i = 0;
 		while (f && f[i] && i < sizeof(m) - 1) { m[i] = f[i]; i++; }
 		m[i] = 0;
@@ -526,39 +521,13 @@ static long xnu_hook_body(unsigned long stage, unsigned long a1, unsigned long a
 		}
 		return 1;
 	}
-	static const struct { unsigned long s; const char *what; } names[] = {
-		{ 101, "image slid, structors signed" }, { 110, "PE_init_platform: ADT parsed" },
-		{ 120, "ml_parse_cpu_topology" }, { 130, "kernel_startup_bootstrap returned" },
-		{ 140, "timer_call_init" }, { 150, "cpu_init" }, { 160, "processor_bootstrap" },
-		{ 170, "boot-arg parsing" }, { 175, "nanoseconds_to_absolutetime" }, { 180, "/chosen dram-base/size" },
-		{ 199, "arm_init reached arm_vm_init" },
-		{ 201, "arm_vm_init: memory sizes" }, { 202, "arm_vm_init: physmap placed" }, { 203, "arm_vm_init: invalid_tte" },
-		{ 204, "arm_vm_init: kernel tables (init_ptpages)" }, { 205, "arm_vm_init: segments, page size" },
-		{ 206, "arm_vm_prot_init" }, { 207, "arm_vm_init: dynamic tables" }, { 208, "arm_vm_physmap_init" },
-		{ 210, "arm_vm_init: XNU's kernel L1 entries installed in Linux's table" },
-		{ 215, "arm_vm_init: running on XNU's own page tables" }, { 220, "pmap_bootstrap returned" },
-		{ 230, "arm_vm_init returned" }, { 300, "kprintf initialized" },
-		{ 360, "PE_create_console" }, { 370, "PE_init_printf" }, { 380, "cpu_machine_idle_init" },
-		{ 390, "PE_init_platform(TRUE)" }, { 400, "ml_map_cpu_pio" }, { 410, "cpu_timebase_init" },
-		{ 420, "PE_init_cpu" }, { 490, "about to call machine_startup" },
-	};
-	if (stage >= 1000) {
-		logkv("xnu: XNU sub-stage", stage);
-		return stop >= 1000 && (long)stage >= stop;
+	if (call == LINUX64_CALL_KERNEL_TABLES)
+		return 0;
+	{	/* a call this module does not know (an XNU built against a newer linux64_abi.h): say so once, go on */
+		static unsigned long told;
+		if (told != call) { told = call; logkv("xnu: unknown call from XNU", call); }
 	}
-	const char *what = "?";
-	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
-		if (names[i].s == stage) what = names[i].what;
-	char buf[96]; char *p = buf; const char *q = "xnu: XNU stage ";
-	while (*q) *p++ = *q++;
-	p[0] = '0' + stage / 100; p[1] = '0' + stage / 10 % 10; p[2] = '0' + stage % 10; p += 3;
-	*p++ = ':'; *p++ = ' ';
-	while (*what && p < buf + 94) *p++ = *what++;
-	*p = 0;
-	logs(buf);
-	if (stop >= 1000)		/* sub-stage ids: stop exactly there */
-		return (long)stage == stop;
-	return (long)stage >= stop && stage < 900;
+	return 0;
 }
 
 /*
@@ -754,44 +723,32 @@ static char *put_dec(char *p, unsigned long v)
 	return p;
 }
 
+static void put_str(char **p, const char *s) { while (*s) *(*p)++ = *s++; }
+static void put_hex(char **p, unsigned long v) { for (int i = 44; i >= 0; i -= 4) *(*p)++ = "0123456789abcdef"[(v >> i) & 15]; }
+
+/* XNU's counters (enum linux64_counter) every 2 s for the first 3 minutes, then every 20 s */
 static int monitor_fn(void *arg)
 {
-	static const char *const names[] = { "idleloop", "machine_idle", "cpu_idle", "host_idle", "invoke",
-		"-", "stage", "rtclock" };
+	static const struct { int i; const char *name; } dec[] = {
+		{ LINUX64_CTR_IDLE_THREAD, " idle_thread=" }, { LINUX64_CTR_MACHINE_IDLE, " machine_idle=" },
+		{ LINUX64_CTR_CPU_IDLE, " cpu_idle=" }, { LINUX64_CTR_HOST_IDLE, " host_idle=" }, { LINUX64_CTR_SWITCHES, " switches=" },
+		{ LINUX64_CTR_LAST_CALL, " last_call=" }, { LINUX64_CTR_RTCLOCK, " rtclock=" }, { LINUX64_CTR_EL0_EXC, " el0exc=" },
+	}, hex[] = {
+		{ LINUX64_CTR_EL0_ESR, " esr=0x" }, { LINUX64_CTR_EL0_FAR, " far=0x" }, { LINUX64_CTR_EL0_PC, " pc=0x" },
+		{ LINUX64_CTR_BAD_ESR, " bad_esr=0x" }, { LINUX64_CTR_THREAD, " thread=0x" },
+	};
 	int lines = 0;
+	unsigned long ticks = 0;
 	(void)arg;
 	while (!fki_thread_should_stop()) {
 		fki_msleep(2000);
-		/* every 2 s for the first 3 minutes, then every 20 s */
-		static unsigned long ticks;
 		if (!xnu_dbg || (lines >= 90 && (++ticks % 10) != 0))
 			continue;
 		char buf[420]; char *p = buf;
-		const char *h = "xnu: monitor";
-		while (*h) *p++ = *h++;
-		for (int i = 0; i < 8; i++) {
-			if (i == 5) continue;
-			*p++ = ' ';
-			for (const char *n = names[i]; *n; n++) *p++ = *n;
-			*p++ = '=';
-			p = put_dec(p, xnu_dbg[i]);
-		}
-		h = " el0exc=";
-		while (*h) *p++ = *h++;
-		p = put_dec(p, xnu_dbg[10]);
-		h = " kfaults=";
-		while (*h) *p++ = *h++;
-		p = put_dec(p, kfaults);
-		{
-			static const char *const k[] = { " esr=0x", " far=0x", " pc=0x", " bad_esr=0x", " step=0x" };
-			for (int j = 0; j < 5; j++) {
-				for (h = k[j]; *h; h++) *p++ = *h;
-				for (int i = 44; i >= 0; i -= 4) *p++ = "0123456789abcdef"[(xnu_dbg[11 + j] >> i) & 15];
-			}
-		}
-		h = " thread=0x";
-		while (*h) *p++ = *h++;
-		for (int i = 44; i >= 0; i -= 4) *p++ = "0123456789abcdef"[(xnu_dbg[9] >> i) & 15];
+		put_str(&p, "xnu: monitor");
+		for (unsigned i = 0; i < sizeof(dec) / sizeof(dec[0]); i++) { put_str(&p, dec[i].name); p = put_dec(p, xnu_dbg[dec[i].i]); }
+		put_str(&p, " kfaults="); p = put_dec(p, kfaults);
+		for (unsigned i = 0; i < sizeof(hex) / sizeof(hex[0]); i++) { put_str(&p, hex[i].name); put_hex(&p, xnu_dbg[hex[i].i]); }
 		*p = 0;
 		logs(buf);
 		lines++;
