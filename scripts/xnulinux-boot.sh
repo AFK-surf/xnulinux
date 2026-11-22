@@ -4,7 +4,13 @@
 # and loads xnu.ko on the disk mk-macvm-disk.sh made. Returns once XNU is running; xnu.ko stays loaded until the hosted
 # system halts or `xnulinux-boot.sh stop` ends it.
 #
-# Configuration: /var/tmp/mac.conf (written by mk-macvm-disk.sh: ROOT_UUID, BOOT_UUID), then the environment:
+# Usage: xnulinux-boot.sh            boot it and return once XNU runs
+#        xnulinux-boot.sh --wait     boot it and stay until the run ends (systemd: scripts/install-service.sh); the run's
+#                                    kernel log goes to /var/log/xnulinux/, the exit status says how it ended
+#        xnulinux-boot.sh stop       end it (the disk synced first)
+#
+# Configuration: /etc/xnulinux.conf, then /var/tmp/mac.conf (written by mk-macvm-disk.sh: ROOT_UUID, BOOT_UUID), then the
+# environment:
 #   DISK (/var/tmp/mac.img)  RAM_MB (7900)  BOOTARGS  CONSOLE_IN (/var/tmp/console-in)  INPUT_IN (/var/tmp/xnu-input)
 #   FB_DUMP (/var/tmp/xnu-fb.raw)  KEYSTORE (/var/tmp/xnu-keystore.bin)  TRUSTCACHE (xnu/trustcache-mac.bin)
 #   IMAGE (xnu/kc.bin: the kernel collection under /lib/firmware)  GPU (auto|off)  CPUS (1: the hosted system's CPUs)  XNU_ARGS (more xnu.ko parameters)
@@ -18,6 +24,8 @@ if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced fi
   sudo rmmod xnu && echo "hosted system stopped"
   exit
 fi
+WAIT=0; [ "${1:-}" = --wait ] && WAIT=1
+[ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf
 [ -f /var/tmp/mac.conf ] && . /var/tmp/mac.conf
 DISK=${DISK:-/var/tmp/mac.img}; RAM_MB=${RAM_MB:-7900}; GPU=${GPU:-auto}; CPUS=${CPUS:-1}
 CONSOLE_IN=${CONSOLE_IN:-/var/tmp/console-in}; INPUT_IN=${INPUT_IN:-/var/tmp/xnu-input}; FB_DUMP=${FB_DUMP:-/var/tmp/xnu-fb.raw}
@@ -83,3 +91,17 @@ if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
   echo "gpu: xnudrmd on /dev/dri/renderD128 (journalctl -u xnudrmd)"
 fi
 echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB_DUMP"
+[ $WAIT = 1 ] || exit 0
+
+# --wait: until the run ends (insmod returns), then keep its kernel log and say how it ended: 0 a halt or a stop asked for,
+# 2 an XNU panic, 3 the run ended otherwise
+START=$(date +%s)
+while pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null; do sleep 5; done
+LOGDIR=/var/log/xnulinux; sudo mkdir -p "$LOGDIR"
+LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
+{ cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:"; } |
+  sudo tee "$LOG" >/dev/null
+ls -1t "$LOGDIR"/run-*.log | tail -n +21 | xargs -r sudo rm -f	# the last 20 runs
+if grep -aq "XNU panic" "$LOG"; then echo "the hosted system panicked: $LOG" >&2; exit 2; fi
+if grep -aq "run stopped by the host\|halt\|shutdown" "$LOG"; then echo "the hosted system ended: $LOG"; exit 0; fi
+echo "the run ended: $LOG" >&2; exit 3
