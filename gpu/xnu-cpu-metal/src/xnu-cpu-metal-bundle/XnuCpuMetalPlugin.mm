@@ -3296,11 +3296,14 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
     std::string lvpDylib = contentsDir.empty() ? "" : (contentsDir + "/Frameworks/libvulkan_lvp.dylib");
     std::string venusDylib = contentsDir.empty() ? "" : (contentsDir + "/Frameworks/libvulkan_virtio.dylib");
 
-    const char *envLoader = getenv("XNU_CPU_METAL_LOADER");
+    // The overrides name code to load into the process: never honoured where the environment is not the process's own
+    // (set-id programs), as dyld ignores DYLD_* there.
+    auto xcmEnv = [](const char *name) -> const char * { return issetugid() ? nullptr : getenv(name); };
+    const char *envLoader = xcmEnv("XNU_CPU_METAL_LOADER");
     if (envLoader && envLoader[0]) loader = envLoader;
-    const char *envDriver = getenv("XNU_CPU_METAL_DRIVER");
-    const char *envIcd = getenv("XNU_CPU_METAL_ICD");
-    const char *envBackend = getenv("XNU_CPU_METAL_BACKEND");
+    const char *envDriver = xcmEnv("XNU_CPU_METAL_DRIVER");
+    const char *envIcd = xcmEnv("XNU_CPU_METAL_ICD");
+    const char *envBackend = xcmEnv("XNU_CPU_METAL_BACKEND");
 
     bool useVenus = false;
     bool forcedBackend = false;
