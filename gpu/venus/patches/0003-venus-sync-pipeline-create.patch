@@ -10,8 +10,11 @@ multi_variable_dynamic_creates self-check) to miss the failure and causing
 subsequent vkDestroyPipeline/vkCmdBindPipeline calls to hit a fatal CS error
 on unhardened virglrenderer.
 
-Force synchronous pipeline creation (want_sync = true) on __APPLE__ so the
-guest always receives the real VkResult from the host driver and takes its
+Force synchronous pipeline creation (want_sync = true) under #ifdef __APPLE__.
+Note that #ifdef __APPLE__ checks that the guest is Darwin (not that the host
+renderer is MoltenVK); this Darwin build of Venus exclusively serves hosted
+macOS whose host renderer is MoltenVK, so both always hold together here and
+the guest always receives the real VkResult from the host driver and takes its
 fallback path cleanly.
 
 ---
