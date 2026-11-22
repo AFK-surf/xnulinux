@@ -268,16 +268,19 @@ unsigned long xnu_fault_deferred(unsigned long *frame) __attribute__((no_sanitiz
 unsigned long xnu_fault_deferred(unsigned long *frame)
 {
 	unsigned long far = xnu_deferred.far, esr = xnu_deferred.esr, pc = xnu_deferred.pc;
-	static unsigned long last_far, repeats;
+	/* per CPU: with one global record, two CPUs faulting at once reset each other's count, and a CPU looping on one
+	 * address never reached the every-64 yield below (it held its Linux CPU, and Linux with it, for good) */
+	static unsigned long last_far_slot[LINUX64_CPU_SLOTS], repeats_slot[LINUX64_CPU_SLOTS];
+	unsigned s0 = this_slot();
+	unsigned long repeats = (far == last_far_slot[s0]) ? repeats_slot[s0] + 1 : 0;
+	repeats_slot[s0] = repeats;
+	last_far_slot[s0] = far;
 
 	frame[31] = xnu_deferred.pstate;	/* the SPSR the trampoline returns with */
-	repeats = (far == last_far) ? repeats + 1 : 0;
-	last_far = far;
 	/*
 	 * The same address faulting again is normal (libmalloc's MADV_FREE_REUSABLE clears a page's referenced and
 	 * modified state, so each reuse takes one fault). Only report it, rarely, when it looks endless.
 	 */
-	unsigned s0 = this_slot();
 	long kr = xnu_kfault(far, esr);
 	if (this_slot() != s0) {
 		/*
@@ -435,8 +438,14 @@ static inline void acct_add(unsigned long call, u64_t ticks)
 
 /* XNU calls into the host: enum linux64_call (linux64_abi.h); a non-zero return ends the run */
 static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2);
+/* each CPU's host calls so far, the last one's number, and whether it is inside one: the monitor's silent-CPU check */
+static unsigned long upcalls_slot[LINUX64_CPU_SLOTS], last_call_slot[LINUX64_CPU_SLOTS];
+static volatile int in_call_slot[LINUX64_CPU_SLOTS];
 long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 {
+	unsigned in_s = this_slot();	/* the thread is bound to its CPU while in the host */
+	upcalls_slot[in_s]++;
+	last_call_slot[in_s] = call;
 	{
 		/* debugging: an XNU stack Linux's overflow check would reject (bit 14 of sp set) */
 		static int told;
@@ -454,7 +463,9 @@ long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 		return 1;
 	}
 	u64_t t0 = fki_counter();
+	in_call_slot[in_s] = 1;
 	long r = xnu_hook_body(call, a1, a2);
+	in_call_slot[in_s] = 0;
 	acct_add(call, fki_counter() - t0);
 	if (!r) in_xnu = 1;
 	return r;
@@ -978,6 +989,35 @@ static int monitor_fn(void *arg)
 		if (xnu_dbg && *(volatile int *)&dump_threads) {
 			((volatile unsigned long *)xnu_dbg)[LINUX64_CTR_DUMP_REQ] = 1;
 			dump_threads = 0;
+		}
+		{	/* a CPU in XNU that has not called the host for 2 s holds its Linux CPU with interrupts masked */
+			static unsigned long seen[XNU_MAX_CPUS], still[XNU_MAX_CPUS];
+			for (int c = 0; c < cpus && xnu_dbg; c++) {
+				unsigned s = LINUX64_CPU_SLOT(cpu_mpidr[c]);
+				if ((c && !cpu_running[c]) || upcalls_slot[s] != seen[c]) { seen[c] = upcalls_slot[s]; still[c] = 0; continue; }
+				if (++still[c] == 1) {
+					struct xnu_world *w = xnu_worlds[s];
+					unsigned long fp = w->xnu_regs[10];
+					logkv("xnu: XNU CPU silent for 2 s (no host call), cpu", (u64_t)c);
+					logkv("xnu:   its last host call", last_call_slot[s]);
+					logkv("xnu:   still inside it (1) or back in XNU (0)", in_call_slot[s]);
+					logkv("xnu:   lr at that call", w->xnu_regs[11]);
+					for (int f = 0; f < 16 && fp >= XNU_VA_LO && fp < XNU_VA_HI && !(fp & 7); f++) {
+						logkv("xnu:   frame", ((unsigned long *)fp)[1]);
+						fp = ((unsigned long *)fp)[0];
+					}
+				}
+			}
+		}
+		if (perf && cpus > 1) {	/* each XNU CPU's host calls so far and the last one's number */
+			char cb[200]; char *q = cb;
+			put_str(&q, "xnu: calls");
+			for (int c = 0; c < cpus; c++) {
+				unsigned s = LINUX64_CPU_SLOT(cpu_mpidr[c]);
+				put_str(&q, " "); q = put_dec(q, upcalls_slot[s]); put_str(&q, "/"); q = put_dec(q, last_call_slot[s]);
+			}
+			*q = 0;
+			logs(cb);
 		}
 		if (perf)
 			acct_report();
