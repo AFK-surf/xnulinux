@@ -1,7 +1,7 @@
 // XnuDisk: the hosted macOS's internal disk, a block storage device whose blocks are a file on the Linux side.
 //
 // The file is a whole disk as macOS makes one: a GUID partition table and an APFS container (System and Data volumes),
-// built on a macOS host with Apple's own tools (scripts/mk-apfs-disk.sh). IOStorageFamily's IOBlockStorageDriver takes
+// built on a macOS host with Apple's own tools (scripts/mk-macvm-disk.sh). IOStorageFamily's IOBlockStorageDriver takes
 // this device, publishes its media, the GUID partition scheme finds the container partition and APFS mounts its volumes,
 // as on a Mac's internal SSD. I/O goes through the host: xnu.ko disk=, upcalls 820 (I/O) and 821 (size) in
 // bsd/net/if_linux64.c, done synchronously through a bounce buffer (the host reads and writes the file in Linux context).

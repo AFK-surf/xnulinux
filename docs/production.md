@@ -33,8 +33,8 @@ What the PoC did to get each step running, and what replaces it. Ordered by what
 | Now | Replace with |
 |---|---|
 | ~30 scripts; the boot itself runs from `vm-m2-kbisect.sh` (`mode=3 stop=899 kmax=…`, a bisecting tool's knobs); several have session paths (`/Users/admin/...`), tty names, fixed `sleep`s | One driver (`xnulinux` CLI): `build`, `disk`, `boot`, `console`, `screenshot`, `test`; configuration in one file |
-| HFS+ route scripts (`mk-fulldisk.sh`, `vm-sysdisk-*`, `vm-mk-sysdisk.sh`, `vm-m2-*`, `run-poc.sh`) | Removed (APFS route only) |
-| `tools/hosted/tests/t*.sh`, `af*.sh`: one-off probes | A test suite with expected results: boot to desktop, Safari/Chrome page load (screenshot compare), `xcodebuild` of a pinned project, Metal unit tests |
+| HFS+ route scripts (`mk-fulldisk.sh`, `vm-sysdisk-*`, `vm-mk-sysdisk.sh`, `vm-m2-*`, `run-poc.sh`) | Removed (done: APFS route only) |
+| `tools/hosted/tests/t*.sh`, `af*.sh`: one-off probes (removed) | A test suite with expected results: boot to desktop, Safari/Chrome page load (screenshot compare), `xcodebuild` of a pinned project, Metal unit tests |
 | No CI | CI: fki.ko/xnu.ko build against a pinned kernel, XNU + collection build (x86_64 Linux works with the DroidVM toolchain), GPU plugin host tests on macOS |
 
 ## 5. GPU
