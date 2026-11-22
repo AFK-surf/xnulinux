@@ -152,6 +152,8 @@ const char *xm2v_last_error(void);
 
 /* Device */
 Xm2vDevice *xm2v_device_open(const char *loader_path, const char *icd_json_path, const char *cache_dir);
+Xm2vDevice *xm2v_device_open_direct(const char *loader_path, void *direct_driver_pfn,
+                                    const char *icd_json_path, const char *cache_dir);
 void xm2v_device_release(Xm2vDevice *dev);
 size_t xm2v_device_name(const Xm2vDevice *dev, char *out, size_t size);
 uint64_t xm2v_device_max_buffer_length(const Xm2vDevice *dev);
