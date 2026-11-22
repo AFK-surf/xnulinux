@@ -4,9 +4,11 @@
 // fki) answered by xnudrmd, the Linux service that owns the DRM render node. Buffer mappings come back as the physical
 // pages Linux mapped, which this kext maps into the calling task: the process and the GPU share the memory, no copies.
 //
-// The user client's class is named AGXDeviceUserClient, the name Apple GPUs' device user client has: the sandbox profiles
-// of the processes that draw (apps, WebKit's GPU process, agents) let them open user clients of that class and of few
-// others, and refuse any other (MACF: "IOUC ... failed MACF"). No AGX kext is in the hosted collection, so the name is free.
+// Processes open the user client on the Metal accelerator service (kexts/XnuCpuMetal names it as its IOUserClientClass):
+// the sandbox profiles of processes that draw allow user clients of an IOAccelerator (system.sb's system-graphics) and
+// refuse others ("IOUC ... failed MACF"). The class is named AGXDeviceUserClient, Apple GPUs' device user client, which
+// the profiles that list classes by name admit too; no AGX kext is in the hosted collection, so the name is free. The
+// XnuDrm service itself only says the bridge is there.
 //
 // Methods (IOConnectCallScalarMethod):
 //   0 call(in_ptr, in_len, out_ptr, out_max) -> reply_len   a message for xnudrmd (xnudrm_proto.h), client id filled in
@@ -63,15 +65,19 @@ public:
 OSDefineMetaClassAndStructors(XnuDrm, IOService)
 OSDefineMetaClassAndStructors(AGXDeviceUserClient, IOUserClient)
 
+static bool bridgeInit()
+{
+	if (gCallLock) return true;
+	gIn = (uint8_t *)IOMallocData(sizeof(xnudrm_hdr) + XNUDRM_MAX_MSG);
+	gOut = (uint8_t *)IOMallocData(sizeof(xnudrm_hdr) + XNUDRM_MAX_MSG);
+	gCallLock = gIn && gOut ? IOLockAlloc() : nullptr;
+	return gCallLock != nullptr;
+}
+
 bool XnuDrm::start(IOService *provider)
 {
 	if (!IOService::start(provider)) return false;
-	if (!gCallLock) {
-		gCallLock = IOLockAlloc();
-		gIn = (uint8_t *)IOMallocData(sizeof(xnudrm_hdr) + XNUDRM_MAX_MSG);
-		gOut = (uint8_t *)IOMallocData(sizeof(xnudrm_hdr) + XNUDRM_MAX_MSG);
-		if (!gCallLock || !gIn || !gOut) return false;
-	}
+	if (!bridgeInit()) return false;
 	setProperty("IOUserClientClass", "AGXDeviceUserClient");
 	registerService();
 	IOLog("XnuDrm: GPU bridge ready\n");
@@ -80,7 +86,10 @@ bool XnuDrm::start(IOService *provider)
 
 bool AGXDeviceUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
+	// only libxnudrm's opens (type 'XNDR'): Metal or anything else opening the accelerator gets no bridge client
+	if (type != XNUDRM_CONNECT_TYPE) return false;
 	if (!IOUserClient::initWithTask(owningTask, securityID, type)) return false;
+	if (!bridgeInit()) return false;	// opened on the accelerator before XnuDrm started
 	fTask = owningTask;
 	xnudrm_hdr r;
 	long n = simple(XNUDRM_OPEN, XNUDRM_VERSION, 0, &r);

@@ -14,6 +14,7 @@
 #define XNUDRM_MAGIC 0x4d52444eu	/* "NDRM" */
 #define XNUDRM_VERSION 1
 #define XNUDRM_MAX_MSG (8u << 20)
+#define XNUDRM_CONNECT_TYPE 0x584e4452u	/* IOServiceOpen type of the bridge's user client: 'XNDR' */
 /* status is a Linux errno; the ones a client tests by value (macOS numbers some differently: ETIME is 101 there) */
 #define XNUDRM_ETIME 62
 
