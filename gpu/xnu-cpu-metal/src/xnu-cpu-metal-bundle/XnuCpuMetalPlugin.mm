@@ -15,6 +15,9 @@
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
+#include <atomic>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -205,6 +208,37 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
 
 /* ======================== Buffer ======================== */
 
+static std::atomic<uint64_t> gNoCopyAliased{0};
+static std::atomic<uint64_t> gNoCopyFallbackUnaligned{0};
+static std::atomic<uint64_t> gNoCopyFallbackReadOnly{0};
+static std::atomic<uint64_t> gNoCopyFallbackRemapErr{0};
+static std::atomic<uint64_t> gNoCopyCommitSyncCopies{0};
+static std::atomic<uint64_t> gNoCopyCommitSyncBytes{0};
+
+static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
+    if (!ptr || len == 0) return NO;
+    mach_vm_address_t cur = (mach_vm_address_t)ptr;
+    mach_vm_address_t end = cur + (mach_vm_size_t)len;
+    if (end < cur) return NO;
+    while (cur < end) {
+        mach_vm_address_t regAddr = cur;
+        mach_vm_size_t regSize = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        kern_return_t kr = mach_vm_region(mach_task_self(), &regAddr, &regSize,
+                                          VM_REGION_BASIC_INFO_64,
+                                          (vm_region_info_t)&info, &count, &obj);
+        if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+        if (kr != KERN_SUCCESS || regSize == 0 || regAddr > cur) return NO;
+        if ((info.protection & VM_PROT_WRITE) == 0) return NO;
+        mach_vm_address_t next = regAddr + regSize;
+        if (next <= cur) return NO;
+        cur = next;
+    }
+    return YES;
+}
+
 @interface XcmBuffer : XcmObject {
 @public
     Xm2vBuffer *_handle;
@@ -215,6 +249,8 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
     void (^_fallbackDeallocator)(void *, NSUInteger);
     void *_fallbackPtr;
     NSUInteger _fallbackLen;
+    BOOL _fallbackAliased;
+    BOOL _fallbackReadOnly;
     BOOL _contentsAccessed;
 }
 - (instancetype)initWithHandle:(Xm2vBuffer *)h device:(id)dev options:(MTLResourceOptions)opts;
@@ -233,6 +269,35 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
     return self;
 }
 - (void)dealloc {
+    if (_fallbackAliased && _fallbackPtr && _fallbackLen) {
+        // Detach caller's VA from the GPU blob's physical pages BEFORE releasing _handle
+        // (XnuDrm::doUnmap releases the Linux physical pages immediately on XNUDRM_UNMAP).
+        // Guard with mach_vm_read_overwrite / xcmRangeIsFullyWritable in case the caller
+        // already munmap'd _fallbackPtr before the autorelease pool drained this buffer.
+        mach_vm_address_t addr = (mach_vm_address_t)_fallbackPtr;
+        if (_fallbackDeallocator) {
+            if (xcmRangeIsFullyWritable(_fallbackPtr, _fallbackLen)) {
+                mach_vm_allocate(mach_task_self(), &addr, (mach_vm_size_t)_fallbackLen,
+                                 VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+            }
+        } else {
+            mach_vm_address_t tmp = 0;
+            mach_vm_size_t readSz = 0;
+            if (mach_vm_allocate(mach_task_self(), &tmp, (mach_vm_size_t)_fallbackLen,
+                                 VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
+                kern_return_t rkr = mach_vm_read_overwrite(
+                    mach_task_self(), addr, (mach_vm_size_t)_fallbackLen, tmp, &readSz);
+                if (rkr == KERN_SUCCESS && readSz == (mach_vm_size_t)_fallbackLen) {
+                    vm_prot_t curProt = 0, maxProt = 0;
+                    mach_vm_remap(mach_task_self(), &addr, (mach_vm_size_t)_fallbackLen, 0,
+                                  VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                                  mach_task_self(), tmp, FALSE, &curProt, &maxProt, VM_INHERIT_NONE);
+                }
+                mach_vm_deallocate(mach_task_self(), tmp, (mach_vm_size_t)_fallbackLen);
+            }
+        }
+        _fallbackAliased = NO;
+    }
     if (_handle) { xm2v_buffer_release(_handle); _handle = nullptr; }
     if (_fallbackDeallocator) {
         void (^d)(void *, NSUInteger) = _fallbackDeallocator;
@@ -241,10 +306,13 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
     }
 }
 - (void)syncFromFallbackHostMemory {
-    if (!_fallbackPtr || !_fallbackLen || !_handle || _contentsAccessed) return;
+    // True physical-page alias & read-only buffers never need per-commit host copies.
+    if (_fallbackAliased || _fallbackReadOnly || !_fallbackPtr || !_fallbackLen || !_handle || _contentsAccessed) return;
     void *dst = xm2v_buffer_contents(_handle);
     if (dst && dst != _fallbackPtr) {
         memcpy(dst, _fallbackPtr, _fallbackLen);
+        gNoCopyCommitSyncCopies.fetch_add(1, std::memory_order_relaxed);
+        gNoCopyCommitSyncBytes.fetch_add((uint64_t)_fallbackLen, std::memory_order_relaxed);
         if (self.storageMode == MTLStorageModeManaged) {
             xm2v_buffer_did_modify_range(_handle, 0, _fallbackLen);
         }
@@ -252,6 +320,7 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
 }
 - (id<MTLDevice>)device { return _device; }
 - (void *)contents {
+    if (_fallbackAliased) return _fallbackPtr;
     _contentsAccessed = YES;
     return _handle ? xm2v_buffer_contents(_handle) : nullptr;
 }
@@ -1652,12 +1721,30 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     [self setFragmentTexture:texture atIndex:texIdx];
     [self setFragmentSamplerState:sampler atIndex:sampIdx];
 }
+- (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMin lodMaxClamp:(float)lodMax atIndex:(NSUInteger)index {
+    if (!_handle) return;
+    Xm2vSampler *sh = nullptr;
+    if (sampler && [(id)sampler isKindOfClass:[XcmSampler class]]) {
+        [_cmdBuf retainResource:sampler];
+        sh = ((XcmSampler *)sampler)->_handle;
+    }
+    if (xcmTraceOn() && index < 32) { if (sh) _tFsampMask |= (1u << index); else _tFsampMask &= ~(1u << index); }
+    xm2v_render_encoder_set_fragment_sampler_lod(_handle, sh, lodMin, lodMax, (uint32_t)index);
+}
+- (void)setVertexSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMin lodMaxClamp:(float)lodMax atIndex:(NSUInteger)index {
+    if (!_handle) return;
+    Xm2vSampler *sh = nullptr;
+    if (sampler && [(id)sampler isKindOfClass:[XcmSampler class]]) {
+        [_cmdBuf retainResource:sampler];
+        sh = ((XcmSampler *)sampler)->_handle;
+    }
+    xm2v_render_encoder_set_vertex_sampler_lod(_handle, sh, lodMin, lodMax, (uint32_t)index);
+}
 - (void)setFragmentTexture:(id<MTLTexture>)texture atTextureIndex:(NSUInteger)texIdx
               samplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMin lodMaxClamp:(float)lodMax
             atSamplerIndex:(NSUInteger)sampIdx {
-    (void)lodMin; (void)lodMax;
     [self setFragmentTexture:texture atIndex:texIdx];
-    [self setFragmentSamplerState:sampler atIndex:sampIdx];
+    [self setFragmentSamplerState:sampler lodMinClamp:lodMin lodMaxClamp:lodMax atIndex:sampIdx];
 }
 - (void)setVertexTexture:(id<MTLTexture>)texture atTextureIndex:(NSUInteger)texIdx
             samplerState:(id<MTLSamplerState>)sampler atSamplerIndex:(NSUInteger)sampIdx {
@@ -1667,9 +1754,8 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 - (void)setVertexTexture:(id<MTLTexture>)texture atTextureIndex:(NSUInteger)texIdx
             samplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMin lodMaxClamp:(float)lodMax
           atSamplerIndex:(NSUInteger)sampIdx {
-    (void)lodMin; (void)lodMax;
     [self setVertexTexture:texture atIndex:texIdx];
-    [self setVertexSamplerState:sampler atIndex:sampIdx];
+    [self setVertexSamplerState:sampler lodMinClamp:lodMin lodMaxClamp:lodMax atIndex:sampIdx];
 }
 - (void)setVertexBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index {
     id b = _vbufs[@(index)]; if (b) [self setVertexBuffer:b offset:offset atIndex:index];
@@ -2359,26 +2445,96 @@ static void xcmBufferDeallocCallback(void *ptr, uint64_t length, void *ctx) {
     void (^block)(void *, NSUInteger) = (__bridge_transfer void (^)(void *, NSUInteger))ctx;
     block(ptr, (NSUInteger)length);
 }
+static NSDictionary *xcmDev_noCopyStats(id, SEL) {
+    return @{
+        @"aliased": @(gNoCopyAliased.load(std::memory_order_relaxed)),
+        @"fallbackUnaligned": @(gNoCopyFallbackUnaligned.load(std::memory_order_relaxed)),
+        @"fallbackReadOnly": @(gNoCopyFallbackReadOnly.load(std::memory_order_relaxed)),
+        @"fallbackRemapErr": @(gNoCopyFallbackRemapErr.load(std::memory_order_relaxed)),
+        @"commitSyncCopies": @(gNoCopyCommitSyncCopies.load(std::memory_order_relaxed)),
+        @"commitSyncBytes": @(gNoCopyCommitSyncBytes.load(std::memory_order_relaxed)),
+    };
+}
 static id xcmDev_newBufferNoCopy(id self, SEL, void *pointer, NSUInteger length, MTLResourceOptions opts, void (^deallocator)(void *, NSUInteger)) {
     // Match real macOS Metal: NULL pointer or 0 length returns nil without invoking deallocator.
     if (!gXm2vDevice || !pointer || length == 0) return nil;
-    void *ctx = deallocator ? (__bridge_retained void *)[deallocator copy] : nullptr;
-    Xm2vBuffer *b = xm2v_buffer_new_no_copy_dealloc(gXm2vDevice, pointer, length, opts,
-                                                    ctx ? xcmBufferDeallocCallback : nullptr, ctx);
+    static int sForceNoCopyFallback = -1;
+    if (sForceNoCopyFallback < 0) {
+        const char *e = getenv("XNU_CPU_METAL_FORCE_NOCOPY_FALLBACK");
+        sForceNoCopyFallback = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    void *ctx = (!sForceNoCopyFallback && deallocator) ? (__bridge_retained void *)[deallocator copy] : nullptr;
+    Xm2vBuffer *b = sForceNoCopyFallback ? nullptr :
+        xm2v_buffer_new_no_copy_dealloc(gXm2vDevice, pointer, length, opts,
+                                        ctx ? xcmBufferDeallocCallback : nullptr, ctx);
     if (!b) {
         if (ctx) (void)(__bridge_transfer id)ctx;
-        static dispatch_once_t sNoCopyLogOnce;
-        dispatch_once(&sNoCopyLogOnce, ^{
-            os_log_info(OS_LOG_DEFAULT, "XnuCpuMetal: newBufferWithBytesNoCopy unsupported (%{public}s), using host-memory copy+sync fallback",
-                        xm2v_last_error() ?: "?");
-        });
-        b = xm2v_buffer_new(gXm2vDevice, length, opts, pointer);
+        size_t pageSz = (size_t)vm_page_size;
+        bool callerAligned = (pageSz > 0) &&
+                             (((uintptr_t)pointer & (pageSz - 1)) == 0) &&
+                             ((length & (pageSz - 1)) == 0);
+        b = callerAligned
+            ? xm2v_buffer_new_page_aligned(gXm2vDevice, length, opts, pointer)
+            : xm2v_buffer_new(gXm2vDevice, length, opts, pointer);
         if (!b) return nil;
         XcmBuffer *buf = [[XcmBuffer alloc] initWithHandle:b device:self options:opts];
-        if (buf) {
-            buf->_fallbackPtr = pointer;
-            buf->_fallbackLen = length;
-            if (deallocator) buf->_fallbackDeallocator = [deallocator copy];
+        if (!buf) return nil;
+        buf->_fallbackPtr = pointer;
+        buf->_fallbackLen = length;
+        if (deallocator) buf->_fallbackDeallocator = [deallocator copy];
+
+        // True zero-copy physical-page aliasing: copy caller's initial bytes once (above),
+        // then remap the GPU blob's physical pages onto caller's VA (VM_FLAGS_OVERWRITE, copy=FALSE).
+        void *gpuPtr = xm2v_buffer_contents(b);
+        bool aligned = callerAligned &&
+                       (gpuPtr != nullptr) &&
+                       (((uintptr_t)gpuPtr & (pageSz - 1)) == 0);
+        if (!aligned) {
+            uint64_t n = gNoCopyFallbackUnaligned.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 5 || (n % 256) == 0) {
+                os_log_info(OS_LOG_DEFAULT,
+                            "XnuCpuMetal: NoCopy alias skipped (unaligned, count=%llu ptr=%p len=%lu gpu=%p page=%zu)",
+                            (unsigned long long)n, pointer, (unsigned long)length, gpuPtr, pageSz);
+            }
+        } else if (!xcmRangeIsFullyWritable(pointer, length)) {
+            buf->_fallbackReadOnly = YES;
+            uint64_t n = gNoCopyFallbackReadOnly.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 5 || (n % 256) == 0) {
+                os_log_info(OS_LOG_DEFAULT,
+                            "XnuCpuMetal: NoCopy alias skipped (read-only mapping, count=%llu ptr=%p len=%lu)",
+                            (unsigned long long)n, pointer, (unsigned long)length);
+            }
+        } else {
+            mach_vm_address_t target = (mach_vm_address_t)pointer;
+            vm_prot_t curProt = 0, maxProt = 0;
+            kern_return_t kr = mach_vm_remap(
+                mach_task_self(),
+                &target,
+                (mach_vm_size_t)length,
+                0,
+                VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                mach_task_self(),
+                (mach_vm_address_t)gpuPtr,
+                FALSE,
+                &curProt,
+                &maxProt,
+                VM_INHERIT_NONE);
+            if (kr == KERN_SUCCESS && target == (mach_vm_address_t)pointer && (curProt & VM_PROT_WRITE)) {
+                buf->_fallbackAliased = YES;
+                uint64_t n = gNoCopyAliased.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n == 1) {
+                    os_log_info(OS_LOG_DEFAULT,
+                                "XnuCpuMetal: newBufferWithBytesNoCopy using mach_vm_remap physical-page aliasing (page=%zu)",
+                                pageSz);
+                }
+            } else {
+                uint64_t n = gNoCopyFallbackRemapErr.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 10 || (n % 256) == 0) {
+                    os_log_info(OS_LOG_DEFAULT,
+                                "XnuCpuMetal: NoCopy mach_vm_remap failed (kr=%d curProt=0x%x count=%llu ptr=%p len=%lu gpu=%p), using bounded fallback",
+                                kr, curProt, (unsigned long long)n, pointer, (unsigned long)length, gpuPtr);
+                }
+            }
         }
         return buf;
     }
@@ -3265,6 +3421,7 @@ static Class createBackendDeviceClass(void) {
             {"newBufferWithLength:options:", (IMP)xcmDev_newBufferLen, "@32@0:8Q16Q24"},
             {"newBufferWithBytes:length:options:", (IMP)xcmDev_newBufferBytes, "@40@0:8^v16Q24Q32"},
             {"newBufferWithBytesNoCopy:length:options:deallocator:", (IMP)xcmDev_newBufferNoCopy, "@48@0:8^v16Q24Q32@?40"},
+            {"xcmNoCopyStats", (IMP)xcmDev_noCopyStats, "@16@0:8"},
             {"newTextureWithDescriptor:", (IMP)xcmDev_newTexture, "@24@0:8@16"},
             {"newTextureWithDescriptor:iosurface:plane:", (IMP)xcmDev_newTextureIOSurface, "@40@0:8@16^{__IOSurface=}24Q32"},
             {"newTextureWithDescriptor:iosurface:plane:slice:", (IMP)xcmDev_newTextureIOSurfaceSlice, "@48@0:8@16^{__IOSurface=}24Q32Q40"},
