@@ -96,12 +96,18 @@ echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB
 # --wait: until the run ends (insmod returns), then keep its kernel log and say how it ended: 0 a halt or a stop asked for,
 # 2 an XNU panic, 3 the run ended otherwise
 START=$(date +%s)
-while pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null; do sleep 5; done
-LOGDIR=/var/log/xnulinux; sudo mkdir -p "$LOGDIR"
-LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
-{ cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:"; } |
-  sudo tee "$LOG" >/dev/null
-ls -1t "$LOGDIR"/run-*.log | tail -n +21 | xargs -r sudo rm -f	# the last 20 runs
-if grep -aq "XNU panic" "$LOG"; then echo "the hosted system panicked: $LOG" >&2; exit 2; fi
-if grep -aq "run stopped by the host\|halt\|shutdown" "$LOG"; then echo "the hosted system ended: $LOG"; exit 0; fi
-echo "the run ended: $LOG" >&2; exit 3
+collect() {	# the run's kernel log, kept; the status says how it ended
+  local LOGDIR=/var/log/xnulinux LOG
+  sudo mkdir -p "$LOGDIR"
+  LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
+  { cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:"; } |
+    sudo tee "$LOG" >/dev/null
+  ls -1t "$LOGDIR"/run-*.log | tail -n +21 | xargs -r sudo rm -f	# the last 20 runs
+  if grep -aq "XNU panic" "$LOG"; then echo "the hosted system panicked: $LOG" >&2; return 2; fi
+  if [ "${1:-}" = stopped ] || grep -aq "run stopped by the host" "$LOG"; then echo "the hosted system stopped: $LOG"; return 0; fi
+  echo "the run ended: $LOG" >&2; return 3
+}
+# systemctl stop: ExecStop (xnulinux-boot.sh stop) ends the run, then systemd sends this script SIGTERM
+trap 'while pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null; do sleep 1; done; collect stopped; exit $?' TERM
+while pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null; do sleep 2 & wait $!; done
+collect; exit $?
