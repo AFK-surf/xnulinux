@@ -22,11 +22,12 @@
 #ifndef _LINUX64_ABI_H_
 #define _LINUX64_ABI_H_
 
-#define LINUX64_ABI_VERSION 2
+#define LINUX64_ABI_VERSION 3
 
 enum linux64_call {
 	LINUX64_CALL_KERNEL_TABLES  = 210,	/* boot: a1 = XNU's kernel L1 table; the host installs its kernel-range entries */
-	LINUX64_CALL_IDLE           = 810,	/* a1 = nanoseconds to XNU's next timer (0: one is due); the host runs Linux meanwhile */
+	LINUX64_CALL_IDLE           = 810,	/* a1 = nanoseconds to XNU's next timer (0: one is due), a2 = this CPU's pending-IPI word
+					 * (the host does not sleep while it is set); the host runs Linux meanwhile */
 	LINUX64_CALL_PREEMPTED      = 811,	/* a host interrupt is pending: let Linux handle it; a1 = 1 from the kernel, 0 from EL0 */
 	LINUX64_CALL_WALLCLOCK      = 812,	/* a1 = u64[2]: {seconds, nanoseconds} UTC */
 	LINUX64_CALL_NET_SEND       = 816,	/* a1 = struct linux64_buf_req: one Ethernet frame */
@@ -37,6 +38,8 @@ enum linux64_call {
 	LINUX64_CALL_DISK_SIZE      = 821,	/* a1 = u64 *: the system disk's size in bytes, 0 when there is none */
 	LINUX64_CALL_RANDOM         = 822,	/* a1 = buffer, a2 = length: bytes from the host's cryptographic generator */
 	LINUX64_CALL_HOSTCALL       = 830,	/* a1 = struct linux64_hostcall_req: a message to a Linux service and its reply */
+	LINUX64_CALL_CPU_START      = 840,	/* a1 = a CPU's MPIDR, a2 = its cpu_data_t: the host enters linux64_cpu_entry(a2) there */
+	LINUX64_CALL_IPI            = 841,	/* a1 = the target CPU's MPIDR: its linux64_ipi_pending slot is set; make it look */
 	LINUX64_CALL_CONSOLE_READ   = 993,	/* a1 = struct linux64_buf_req: console input bytes */
 	LINUX64_CALL_RAMDISK_RW     = 994,	/* a1 = struct linux64_rw_req on the host-file md disk */
 	LINUX64_CALL_RAMDISK_SIZE   = 995,	/* a1 = u64 *: the host-file md disk's size, 0 when there is none */
@@ -85,6 +88,13 @@ struct linux64_input_event {
 	int value;
 };
 
+/*
+ * Per-CPU state shared by XNU and the host lives in arrays indexed by a CPU's slot: affinity 0 and affinity 1 of its
+ * MPIDR, four bits each. The host only starts CPUs whose slots differ.
+ */
+#define LINUX64_CPU_SLOTS 256
+#define LINUX64_CPU_SLOT(mpidr) ((unsigned)(((mpidr) & 0xf) | (((mpidr) >> 4) & 0xf0)))
+
 enum linux64_counter {
 	LINUX64_CTR_IDLE_THREAD  = 0,	/* XNU's idle thread loops */
 	LINUX64_CTR_MACHINE_IDLE = 1,	/* machine_idle calls */
@@ -99,6 +109,7 @@ enum linux64_counter {
 	LINUX64_CTR_EL0_FAR      = 12,
 	LINUX64_CTR_EL0_PC       = 13,
 	LINUX64_CTR_BAD_ESR      = 14,	/* the ESR of an exception the EL0 vectors could not take */
+	LINUX64_CTR_DUMP_REQ     = 15,	/* host to XNU: nonzero asks for a thread dump (linux64_dump_threads) at the next idle */
 	LINUX64_NCOUNTERS        = 16,
 };
 

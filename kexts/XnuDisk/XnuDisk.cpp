@@ -3,8 +3,8 @@
 // The file is a whole disk as macOS makes one: a GUID partition table and an APFS container (System and Data volumes),
 // built on a macOS host with Apple's own tools (scripts/mk-macvm-disk.sh). IOStorageFamily's IOBlockStorageDriver takes
 // this device, publishes its media, the GUID partition scheme finds the container partition and APFS mounts its volumes,
-// as on a Mac's internal SSD. I/O goes through the host: xnu.ko disk=, upcalls 820 (I/O) and 821 (size) in
-// bsd/net/if_linux64.c, done synchronously through a bounce buffer (the host reads and writes the file in Linux context).
+// as on a Mac's internal SSD. I/O goes through the host: xnu.ko disk=, LINUX64_CALL_DISK_RW and _SIZE in
+// bsd/kern/linux64_host.c, done synchronously through a bounce buffer (the host reads and writes the file in Linux context).
 // IOBlockStorageDevice.h declares some of its virtual methods (doLockUnlockMedia, reportLockability,
 // reportPollRequirements, doDiscard) only under TARGET_OS_OSX; the collection's IOStorageFamily is the macOS one, so
 // without it this class's vtable is three slots short of the family's and the family's calls land on the wrong methods
@@ -18,6 +18,7 @@
 #include <IOKit/storage/IOBlockStorageDevice.h>
 #include <IOKit/storage/IOStorageProtocolCharacteristics.h>
 #include <IOKit/storage/IOStorageDeviceCharacteristics.h>
+#include <kern/thread.h>
 
 extern "C" uint64_t linux64_disk_size(void);
 extern "C" long linux64_disk_rw(int write, void *buffer, unsigned long length, unsigned long offset);
@@ -36,6 +37,7 @@ class XnuDisk : public IOBlockStorageDevice {
 
 public:
     bool start(IOService *provider) override;
+    static void publishAfterBSD(void *self, wait_result_t);
     void free() override;
     IOReturn doEjectMedia() override { return kIOReturnUnsupported; }
     IOReturn doFormatMedia(UInt64) override { return kIOReturnUnsupported; }
@@ -101,9 +103,37 @@ bool XnuDisk::start(IOService *provider)
     }
     OSSafeReleaseNULL(protocol);
     OSSafeReleaseNULL(device);
-    registerService();
+    /*
+     * The disk is published once the IOBSD resource is (bsd_init's IOKitBSDInit publishes it, then waits for the root
+     * disk). Published earlier, it can deadlock the boot: APFS starts the first container's volumes holding its lock and
+     * waits there for IOBSD on IOResources, while IOResources' own matching (re-run when IOBSD is published) probes
+     * an APFS personality that needs that lock; the main container is never probed and bsd_init waits for its root
+     * volume forever (often, on one CPU). A Mac's internal disk sits under its PCIe controller and
+     * appears in its own time; ours hangs off IOResources and appears at once.
+     */
+    thread_t thread;
+    retain();
+    if (kernel_thread_start(&XnuDisk::publishAfterBSD, this, &thread) == KERN_SUCCESS) {
+        thread_deallocate(thread);
+    } else {
+        release();
+        registerService();
+    }
     IOLog("XnuDisk: %llu blocks of %llu bytes (%llu MB)\n", fBlocks, kBlockSize, bytes >> 20);
     return true;
+}
+
+void XnuDisk::publishAfterBSD(void *arg, wait_result_t)
+{
+    XnuDisk *self = (XnuDisk *)arg;
+    OSDictionary *match = IOService::resourceMatching("IOBSD");
+    IOService *bsd = match ? IOService::waitForMatchingService(match) : nullptr;
+    OSSafeReleaseNULL(match);
+    OSSafeReleaseNULL(bsd);
+    self->registerService();
+    IOLog("XnuDisk: published after IOBSD\n");
+    self->release();
+    thread_terminate(current_thread());
 }
 
 void XnuDisk::free()

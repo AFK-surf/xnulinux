@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // XnuEthernet: en0 of the hosted macOS, an IOEthernetController whose frames go through the host. It follows DroidVMEthernet of
 // Droid-VM/macOS-DroidVM (overlay/kext/DroidVMEthernet.cpp, BSD-2-Clause-Patent) without its virtio-net: the transport is the
-// hosted kernel's (bsd/net/if_linux64.c, upcalls 816/817/815 to the Linux netdev xnu0, where Linux routes, NATs and answers DHCP).
+// hosted kernel's (bsd/kern/linux64_host.c, LINUX64_CALL_NET_SEND/RECV to the Linux netdev xnu0, where Linux routes, NATs and answers DHCP).
 //
 // Why a driver and not only the kernel's own ifnet: IOTimeSyncClockManager takes the TimeSync clock identifier from a built-in
 // IOEthernetInterface's MAC, once, at its start; without one it never registers, clocksyncd waits for it and WindowServer
@@ -19,7 +19,7 @@
 #include <kern/thread.h>
 #include <net/ethernet.h>
 
-// bsd/net/if_linux64.c (the xnulinux kernel patch): one frame to the host, the next frame from it (bytes, 0 when none waits).
+// bsd/kern/linux64_host.c (the xnulinux kernel patch): one frame to the host, the next frame from it (bytes, 0 when none waits).
 extern "C" long linux64_net_send(const void *frame, unsigned long length);
 extern "C" long linux64_net_recv(void *buffer, unsigned long size);
 

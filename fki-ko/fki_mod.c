@@ -30,6 +30,7 @@
 #include <linux/kprobes.h>
 #include <linux/hrtimer.h>
 #include <linux/kthread.h>
+#include <linux/smp.h>
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/sched.h>
@@ -271,6 +272,25 @@ int fki_thread_should_stop(void)
 }
 EXPORT_SYMBOL(fki_thread_should_stop);
 
+void fki_thread_wait(const volatile unsigned long *flag)
+{
+	for (;;) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (READ_ONCE(*flag) || kthread_should_stop())
+			break;
+		schedule();
+	}
+	__set_current_state(TASK_RUNNING);
+}
+EXPORT_SYMBOL(fki_thread_wait);
+
+void fki_thread_wake(void *thread)
+{
+	if (thread)
+		wake_up_process(thread);
+}
+EXPORT_SYMBOL(fki_thread_wake);
+
 void fki_msleep(unsigned int ms)
 {
 	msleep(ms);
@@ -314,6 +334,8 @@ void fki_regs_set_pc(void *regs, unsigned long pc) { instruction_pointer_set((st
 EXPORT_SYMBOL(fki_regs_set_pc);
 void fki_regs_set_reg(void *regs, unsigned int n, unsigned long v) { if (n < 31) ((struct pt_regs *)regs)->regs[n] = v; }
 EXPORT_SYMBOL(fki_regs_set_reg);
+unsigned long fki_regs_reg(void *regs, unsigned int n) { return n < 31 ? ((struct pt_regs *)regs)->regs[n] : 0; }
+EXPORT_SYMBOL(fki_regs_reg);
 
 static struct kprobe fki_fault_kp = { .symbol_name = "__do_kernel_fault", .pre_handler = fki_fault_pre };
 static int fki_fault_registered;
@@ -538,7 +560,8 @@ EXPORT_SYMBOL(fki_window_set);
  * from a stack that is not this task's, the work runs on a stack of our own laid out like Linux's (the lower half of a
  * 2 * THREAD_SIZE aligned block, which the linear map gives an order-aligned page block).
  */
-static void *fki_alt_stack[NR_CPUS];
+static void *fki_alt_stack[NR_CPUS];	/* allocated at load: an order-3 atomic allocation can fail once memory is fragmented */
+#define FKI_ALT_STACK_ORDER get_order(2 * THREAD_SIZE)
 
 asm(
 "	.pushsection .text\n"
@@ -606,20 +629,12 @@ static void fki_linux_runs_body(void (*fn)(void *), void *arg)
 		fn(arg);
 		return;
 	}
-	if (!fki_alt_stack[cpu]) {
-		struct page *pg = alloc_pages(GFP_ATOMIC, get_order(2 * THREAD_SIZE));
-		if (!pg) {
-			fn(arg);	/* no memory: take the chance */
-			return;
-		}
-		fki_alt_stack[cpu] = page_address(pg);
-	}
 	fki_run_on_stack(fn, arg, (char *)fki_alt_stack[cpu] + THREAD_SIZE);
 }
 
-struct fki_idle_args { fki_u64 ns; };
+struct fki_idle_args { fki_u64 ns; const volatile unsigned int *wake; };
 
-static struct task_struct *fki_idle_task;	/* the task sleeping in fki_idle_until, for fki_net's receive wakeup */
+static struct task_struct *fki_idle_task[NR_CPUS];	/* the task sleeping in fki_idle_until on each CPU, for wakeups */
 
 static void fki_idle_body(void *p)
 {
@@ -629,9 +644,12 @@ static void fki_idle_body(void *p)
 	local_irq_enable();
 	preempt_enable();
 	set_current_state(TASK_UNINTERRUPTIBLE);
-	WRITE_ONCE(fki_idle_task, current);
-	schedule_hrtimeout_range(&t, 50000, HRTIMER_MODE_REL);
-	WRITE_ONCE(fki_idle_task, NULL);
+	WRITE_ONCE(fki_idle_task[smp_processor_id()], current);
+	smp_mb();	/* pairs with fki_kick_cpu: it sees this task, or this sees the word it set first */
+	if (!a->wake || !READ_ONCE(*a->wake))
+		schedule_hrtimeout_range(&t, 50000, HRTIMER_MODE_REL);
+	__set_current_state(TASK_RUNNING);
+	WRITE_ONCE(fki_idle_task[smp_processor_id()], NULL);
 	preempt_disable();
 	local_irq_disable();
 }
@@ -645,7 +663,7 @@ static void fki_yield_body(void *p)
 	local_irq_disable();
 }
 
-void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns)
+void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns, const volatile unsigned int *wake)
 {
 	u64 now = __arch_counter_get_cntvct(), freq = arch_timer_get_cntfrq(), ns;
 	struct fki_idle_args a;
@@ -659,6 +677,7 @@ void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns)
 	if (ns > max_ns)
 		ns = max_ns;
 	a.ns = ns;
+	a.wake = wake;
 	fki_linux_runs(fki_idle_body, &a);
 }
 EXPORT_SYMBOL(fki_idle_until);
@@ -668,6 +687,51 @@ void fki_yield(void)
 	fki_linux_runs(fki_yield_body, NULL);
 }
 EXPORT_SYMBOL(fki_yield);
+
+/*
+ * Make the foreign kernel on a CPU look at what another CPU left for it: wake it if it sleeps in fki_idle_until,
+ * otherwise interrupt that CPU (its user code runs with interrupts on; its kernel looks where it enables its own).
+ * Callable with interrupts off.
+ */
+static void fki_kick_fn(void *unused) { }
+static DEFINE_PER_CPU(call_single_data_t, fki_kick_csd);
+
+void fki_kick_cpu(int cpu)
+{
+	struct task_struct *t;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids)
+		return;
+	smp_mb();	/* the caller's pending word before the idle task: pairs with fki_idle_body */
+	t = READ_ONCE(fki_idle_task[cpu]);
+	if (t)
+		wake_up_process(t);
+	else if (cpu != smp_processor_id())
+		/* irq_work_queue_on is not exported; an IPI already on its way (-EBUSY) is just as good */
+		smp_call_function_single_async(cpu, per_cpu_ptr(&fki_kick_csd, cpu));
+}
+EXPORT_SYMBOL(fki_kick_cpu);
+
+static void fki_read_mpidr(void *p) { *(u64 *)p = read_cpuid_mpidr(); }
+
+int fki_cpu_mpidr(int cpu, fki_u64 *mpidr)
+{
+	u64 v = 0;
+	int err;
+
+	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
+		return -EINVAL;
+	err = smp_call_function_single(cpu, fki_read_mpidr, &v, 1);
+	*mpidr = v;
+	return err;
+}
+EXPORT_SYMBOL(fki_cpu_mpidr);
+
+int fki_num_cpus(void)
+{
+	return num_online_cpus();
+}
+EXPORT_SYMBOL(fki_num_cpus);
 
 void fki_realtime(fki_u64 *sec, fki_u64 *nsec)
 {
@@ -699,9 +763,9 @@ static netdev_tx_t fki_net_xmit(struct sk_buff *skb, struct net_device *dev)
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += skb->len;
 	skb_queue_tail(&fki_net_rxq, skb);
-	t = READ_ONCE(fki_idle_task);
+	t = READ_ONCE(fki_idle_task[0]);
 	if (t)
-		wake_up_process(t);	/* the foreign kernel is idle: let it see the frame now */
+		wake_up_process(t);	/* the foreign kernel's first CPU is idle: let it see the frame now */
 	return NETDEV_TX_OK;
 }
 
@@ -788,11 +852,32 @@ long fki_net_pending(void)
 }
 EXPORT_SYMBOL(fki_net_pending);
 
+static void fki_free_alt_stacks(void)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		if (fki_alt_stack[cpu])
+			free_pages((unsigned long)fki_alt_stack[cpu], FKI_ALT_STACK_ORDER);
+		fki_alt_stack[cpu] = NULL;
+	}
+}
+
 static int __init fki_init(void)
 {
 	struct net_device *dev;
-	int err;
+	int err, cpu;
 
+	for_each_possible_cpu(cpu) {
+		struct page *pg = alloc_pages(GFP_KERNEL, FKI_ALT_STACK_ORDER);
+
+		if (!pg) {
+			fki_free_alt_stacks();
+			return -ENOMEM;
+		}
+		fki_alt_stack[cpu] = page_address(pg);
+		INIT_CSD(per_cpu_ptr(&fki_kick_csd, cpu), fki_kick_fn, NULL);
+	}
 	skb_queue_head_init(&fki_net_rxq);
 	fki_reserve();
 	err = fki_hostcall_init();
@@ -827,6 +912,7 @@ static void __exit fki_exit(void)
 		fki_netdev = NULL;
 	}
 	skb_queue_purge(&fki_net_rxq);
+	fki_free_alt_stacks();
 }
 module_init(fki_init);
 module_exit(fki_exit);
