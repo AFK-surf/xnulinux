@@ -3191,9 +3191,53 @@ static void fillBaseLimits(id device) {
     }
 }
 
-extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json, const char *cache_dir, unsigned port) {
+static void *xcmLoadDirectDriver(const std::string &dylibPath) {
+    if (dylibPath.empty()) return nullptr;
+    void *handle = dlopen(dylibPath.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        const char *err = dlerror();
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: dlopen(%{public}s) failed: %{public}s",
+                     dylibPath.c_str(), err ?: "?");
+        return nullptr;
+    }
+    // VK_LUNARG_direct_driver_loading requires ICD loader interface version >= 7
+    // (Mesa lavapipe and Venus support v7; older ICDs like MoltenVK 1.4.2 report v5
+    // and fall back to manifest-based loading).
+    uint32_t ver = 7;
+    auto negotiate = (int32_t (*)(uint32_t *))dlsym(handle, "vk_icdNegotiateLoaderICDInterfaceVersion");
+    if (!negotiate || negotiate(&ver) != 0 || ver < 7) {
+        return nullptr;
+    }
+    void *pfn = dlsym(handle, "vk_icdGetInstanceProcAddr");
+    if (!pfn) {
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: dlsym(vk_icdGetInstanceProcAddr) in %{public}s failed",
+                     dylibPath.c_str());
+        return nullptr;
+    }
+    return pfn;
+}
+
+static std::string xcmResolveIcdLibraryPath(const std::string &icdJsonPath) {
+    if (icdJsonPath.empty() || icdJsonPath.find(':') != std::string::npos) return {};
+    NSData *data = [NSData dataWithContentsOfFile:@(icdJsonPath.c_str())];
+    if (!data) return {};
+    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![obj isKindOfClass:[NSDictionary class]]) return {};
+    id icd = ((NSDictionary *)obj)[@"ICD"];
+    if (![icd isKindOfClass:[NSDictionary class]]) return {};
+    id libPath = ((NSDictionary *)icd)[@"library_path"];
+    if (![libPath isKindOfClass:[NSString class]] || [(NSString *)libPath length] == 0) return {};
+    NSString *lp = (NSString *)libPath;
+    if ([lp hasPrefix:@"/"]) return lp.fileSystemRepresentation;
+    NSString *dir = [@(icdJsonPath.c_str()) stringByDeletingLastPathComponent];
+    NSString *full = [[dir stringByAppendingPathComponent:lp] stringByStandardizingPath];
+    return full.fileSystemRepresentation;
+}
+
+extern "C" id xnu_cpu_metal_open_device_direct(const char *loader, void *direct_driver_pfn,
+                                               const char *icd_json, const char *cache_dir, unsigned port) {
     if (gSingletonDevice) return gSingletonDevice;
-    gXm2vDevice = xm2v_device_open(loader, icd_json, cache_dir);
+    gXm2vDevice = xm2v_device_open_direct(loader, direct_driver_pfn, icd_json, cache_dir);
     if (!gXm2vDevice) {
         const char *err = xm2v_last_error();
         fprintf(stderr, "XnuCpuMetal: xm2v_device_open failed (cache=%s): %s\n", cache_dir ?: "(null)", err ?: "?");
@@ -3212,6 +3256,10 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
     xcm_iogpu::install(dev, port);
     gSingletonDevice = dev;
     return dev;
+}
+
+extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json, const char *cache_dir, unsigned port) {
+    return xnu_cpu_metal_open_device_direct(loader, nullptr, icd_json, cache_dir, port);
 }
 
 /* ======================== Bundle Principal Class ======================== */
@@ -3245,16 +3293,28 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
     std::string loader = contentsDir.empty() ? "libvulkan.1.dylib" : (contentsDir + "/Frameworks/libvulkan.1.dylib");
     std::string lvpIcd = contentsDir.empty() ? "" : (contentsDir + "/Resources/lvp_icd.aarch64.json");
     std::string venusIcd = contentsDir.empty() ? "" : (contentsDir + "/Resources/virtio_icd.aarch64.json");
+    std::string lvpDylib = contentsDir.empty() ? "" : (contentsDir + "/Frameworks/libvulkan_lvp.dylib");
+    std::string venusDylib = contentsDir.empty() ? "" : (contentsDir + "/Frameworks/libvulkan_virtio.dylib");
 
     const char *envLoader = getenv("XNU_CPU_METAL_LOADER");
     if (envLoader && envLoader[0]) loader = envLoader;
+    const char *envDriver = getenv("XNU_CPU_METAL_DRIVER");
     const char *envIcd = getenv("XNU_CPU_METAL_ICD");
     const char *envBackend = getenv("XNU_CPU_METAL_BACKEND");
 
     bool useVenus = false;
     bool forcedBackend = false;
-    bool customIcd = (envIcd && envIcd[0]);
-    if (!customIcd) {
+    bool customDriver = (envDriver && envDriver[0]) || (envIcd && envIcd[0]);
+    std::string directDylib;
+    std::string icdJson;
+    if (envDriver && envDriver[0]) {
+        directDylib = envDriver;
+    } else if (envIcd && envIcd[0]) {
+        icdJson = envIcd;
+        // Single-ICD JSON: resolve library_path and load via VK_LUNARG_direct_driver_loading
+        // (works in secure mode and avoids scanning icd.d). Multi-ICD colon lists fall back to env.
+        directDylib = xcmResolveIcdLibraryPath(icdJson);
+    } else {
         if (envBackend && strcasecmp(envBackend, "venus") == 0) {
             useVenus = true;
             forcedBackend = true;
@@ -3266,11 +3326,12 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
             if (drmSvc) {
                 IOObjectRelease(drmSvc);
                 struct stat st = {};
-                if (!venusIcd.empty() && stat(venusIcd.c_str(), &st) == 0) useVenus = true;
+                if (!venusDylib.empty() && stat(venusDylib.c_str(), &st) == 0) useVenus = true;
             }
         }
+        directDylib = useVenus ? venusDylib : lvpDylib;
+        icdJson = useVenus ? venusIcd : lvpIcd;
     }
-    std::string icdJson = customIcd ? std::string(envIcd) : (useVenus ? venusIcd : lvpIcd);
 
     // IOSurfaces read/written by this Metal device must be linear uncompressed rows (WindowServer/QuartzCore).
     // Use in-memory NSRegistrationDomain (never persisted to any app's plist on disk).
@@ -3347,13 +3408,19 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
         }
     };
 
-    if (!customIcd && !useVenus) configureLavapipeEnv();
+    if (!customDriver && !useVenus) configureLavapipeEnv();
 
-    id dev = xnu_cpu_metal_open_device(loader.c_str(), icdJson.c_str(), cacheDir, port);
-    if (!dev && useVenus && !forcedBackend && !customIcd && !lvpIcd.empty()) {
-        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: Venus backend open failed, falling back to lavapipe");
+    void *directPfn = directDylib.empty() ? nullptr : xcmLoadDirectDriver(directDylib);
+    id dev = nil;
+    if (directPfn || !icdJson.empty()) {
+        dev = xnu_cpu_metal_open_device_direct(loader.c_str(), directPfn, icdJson.c_str(), cacheDir, port);
+    }
+    if (!dev && useVenus && !forcedBackend && !customDriver && !lvpDylib.empty()) {
+        os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: Venus backend open failed (%{public}s), falling back to lavapipe",
+                     xm2v_last_error() ?: "?");
         configureLavapipeEnv();
-        dev = xnu_cpu_metal_open_device(loader.c_str(), lvpIcd.c_str(), cacheDir, port);
+        void *lvpPfn = xcmLoadDirectDriver(lvpDylib);
+        dev = xnu_cpu_metal_open_device_direct(loader.c_str(), lvpPfn, lvpIcd.c_str(), cacheDir, port);
     }
     return dev;
 }

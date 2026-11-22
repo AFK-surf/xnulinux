@@ -540,3 +540,32 @@ dist/XnuCpuMetal.bundle/
 | `2560×1440` (14.06 MB) | `1.12 ms` (12530 MB/s) | `0.66 ms` | `2.77 ms` (5078 MB/s) | `4.26 ms` (est upload `1.49 ms`) |
 
 结论：在真 GPU（MoltenVK）上，1080p 单帧 `syncToIOSurface` 约 `1.59 ms`、双向约 `2.37 ms`；1440p 单帧回写约 `2.77 ms`、双向约 `4.26 ms`。托管 VM 中经 Venus（virtio-gpu 共享内存）预计在 `2–5 ms/帧` 量级，首版接入可直接复用现有 IOSurface 同步路径满足 60fps 交互基线，后续如出现高分辨率合成瓶颈再评估基于共享内存 / `VK_EXT_external_memory_host` 的零拷贝优化。
+
+---
+
+## Round 17: 通过 `VK_LUNARG_direct_driver_loading` (`EXCLUSIVE`) 实现无环境变量、确定性单 ICD 加载（解决 `WindowServer` secure-mode 回落 lavapipe）
+
+### 根因核实
+- 核实 `metal2vulkan-runtime` 源码：`DeviceKind::preference()` 确实按 `Discrete (0) < Integrated (1) < Virtual (2) < Cpu (3) < Other (4)` 排序；但 `Device::system_default_with` 在循环尝试 `ranked()` 设备时，若首位设备失败会静默尝试下一个设备并成功返回 lavapipe，不向上层报错。
+- 在 `WindowServer`（secure mode，Vulkan-Loader 忽略 `VK_ICD_FILENAMES` / `VK_DRIVER_FILES`）下，此前 `ListedExtensions::of(&entry)` 调用 `vkEnumerateInstanceExtensionProperties(NULL)` 以及 `keeper.rs` 创建 `bare_instance` 时，Loader 仍会扫描 `Resources/vulkan/icd.d/*.json` 并同时 `dlopen` `libvulkan_virtio.dylib` 与 `libvulkan_lvp.dylib`（额外占 ~196 MB 内存并初始化 llvmpipe）。
+
+### 修复方案（`VK_LUNARG_direct_driver_loading` `EXCLUSIVE` 模式）
+1. **`patches/metal2vulkan/0003-direct-driver-loading.patch`**（改 `device/{adopt,create,keeper,mod}.rs`）：
+   - `DeviceOptions` 新增 `direct_driver_pfn: Option<usize>`（以 `usize` 透传 ObjC++ 侧 `dlsym` 获得的 `PFN_vkGetInstanceProcAddr`，完整保留 `arm64e` PAC 签名且不经 Rust 侧解引用）。
+   - 启用 `direct_driver_pfn` 时：`instance_of` 跳过 `ListedExtensions::of(&entry)`（不再触发 `icd.d` 扫描），直接启用 Loader 内置扩展 `VK_KHR_portability_enumeration`、`VK_EXT_debug_utils`、`VK_LUNARG_direct_driver_loading`，并将 `VkDirectDriverLoadingListLUNARG { mode: EXCLUSIVE }` 链入 `VkInstanceCreateInfo.pNext`；`keeper.rs` 在 `direct_driver == true` 时跳过额外 `bare_instance`（驱动由插件 `dlopen` 常驻，同时省去每进程多开一个 Venus DRM 上下文）。
+2. **`src/xnu-m2v-bridge/`（`include/xnu_m2v.h`、`src/lib.rs`）**：
+   - 新增 `xm2v_device_open_direct(loader_path, direct_driver_pfn, icd_json_path, cache_dir)`，当 `direct_driver_pfn != NULL` 时完全不读写 `VK_ICD_FILENAMES` / `VK_DRIVER_FILES`。
+3. **`src/xnu-cpu-metal-bundle/XnuCpuMetalPlugin.mm`**：
+   - 新增 `xcmLoadDirectDriver`：在 Clang `arm64`/`arm64e` 侧 `dlopen(..., RTLD_NOW | RTLD_LOCAL)` 并先调用 `vk_icdNegotiateLoaderICDInterfaceVersion` 校验接口版本 `>= 7`（Mesa Venus 与 lavapipe 均支持 v7；旧版如 MoltenVK 1.4.2 报 v5 自动退回 manifest 路径），再 `dlsym("vk_icdGetInstanceProcAddr")` 传给 `xm2v_device_open_direct`。
+   - 选 Venus 时完全不 `dlopen` `libvulkan_lvp.dylib`；若 Venus 打开失败，先通过 `os_log_error` 打出具体 `xm2v_last_error()`，仅在非强制模式下再显式打开 `libvulkan_lvp.dylib` 回退。
+   - 新增 `XNU_CPU_METAL_DRIVER` 支持直接指定驱动 dylib；重新打包基于 `main` `4e908b8` 的新版 universal `libvulkan_virtio.dylib`。
+
+### 宿主机验证结果（`test/test_round17_direct_driver.mm` + 全套回归）
+- **`VK_LOADER_DEBUG=all` 实测（`arm64e`）**：`libvulkan_virtio.dylib` 与 `libvulkan_lvp.dylib` 均以 PAC 签名函数指针走 `VK_DIRECT_DRIVER_LOADING_MODE_EXCLUSIVE_LUNARG`，Loader 明确日志 `skipping system and environment variable driver search mechanisms`。
+- **双 ICD / 恶意环境变量 / secure-mode 模拟（6 项全 PASS）**：
+  1. 设恶意 `VK_ICD_FILENAMES=lvp` + `XNU_CPU_METAL_ICD=MoltenVK` → 选中 `Apple M5 Max`，`libvulkan_lvp` 未加载（`_dyld_image_count` 校验 `loaded=0`），blit fill PASS。
+  2. 双 ICD 同时可见 `lvp:MoltenVK` 与 `MoltenVK:lvp` 两种顺序 → 均选中 `Apple M5 Max`，blit fill PASS。
+  3. 设恶意 `VK_ICD_FILENAMES=MoltenVK` 下默认 lavapipe（`arm64` + `arm64e`）→ 走 `EXCLUSIVE` 选中 `llvmpipe`，`libvulkan_virtio` 与 `libMoltenVK` 均 `loaded=0`，blit fill PASS。
+  4. 设恶意 `VK_ICD_FILENAMES=lvp` + `XNU_CPU_METAL_BACKEND=venus`（宿主机无 `XnuDrm`）→ 干净返回 `nil` (`VkResult(-3)`)，`libvulkan_lvp` `loaded=0`。
+  5. 模拟 secure-mode 双 ICD bundle（`Resources/vulkan/icd.d/` 同时放 `lvp` + `MoltenVK` 且 `unset VK_ICD_FILENAMES VK_DRIVER_FILES`）→ 默认选中 `llvmpipe`（`libMoltenVK` `loaded=0`），强选 `venus` 返回 `nil`（`libvulkan_lvp` `loaded=0`）。
+- **全套回归全通过**：`lavapipe (arm64e)` 与 `MoltenVK (arm64)` 的 `test-bundle.sh`、`test-render-ci.sh`、`test_round10`、`test_carenderer`、`test_round13`、`test_round14_vfx` 全部 PASS。

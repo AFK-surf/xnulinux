@@ -297,10 +297,25 @@ pub extern "C" fn xm2v_device_open(
     icd_json_path: *const c_char,
     cache_dir: *const c_char,
 ) -> *mut Device {
+    xm2v_device_open_direct(loader_path, std::ptr::null_mut(), icd_json_path, cache_dir)
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_device_open_direct(
+    loader_path: *const c_char,
+    direct_driver_pfn: *mut c_void,
+    icd_json_path: *const c_char,
+    cache_dir: *const c_char,
+) -> *mut Device {
     guard(std::ptr::null_mut(), || {
+        let use_direct = !direct_driver_pfn.is_null();
         let prev_icd = std::env::var_os("VK_ICD_FILENAMES");
         let prev_drv = std::env::var_os("VK_DRIVER_FILES");
-        let icd_opt = cstr_opt(icd_json_path);
+        let icd_opt = if use_direct {
+            None
+        } else {
+            cstr_opt(icd_json_path)
+        };
         if let Some(ref icd) = icd_opt {
             unsafe {
                 std::env::set_var("VK_ICD_FILENAMES", icd);
@@ -310,6 +325,9 @@ pub extern "C" fn xm2v_device_open(
         let mut opts = DeviceOptions::default();
         if let Some(loader) = cstr_opt(loader_path) {
             opts.loader = Some(PathBuf::from(loader));
+        }
+        if use_direct {
+            opts.direct_driver_pfn = Some(direct_driver_pfn as usize);
         }
         if let Some(cache) = cstr_opt(cache_dir) {
             let mut sc = ShaderCacheOptions::in_directory(cache);
