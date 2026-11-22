@@ -65,3 +65,15 @@ spinning lets the host take the spinning CPU's interrupts (`linux64_spin_relax`,
    the desktop comes up; minutes of running with a hundred cross-CPU fault resumes and no fault. Kernel fault counts
    are of one CPU's order (7.6 and 5.6 million in the first 8 minutes).
 3. N CPUs (`cpus=` defaults to the Linux CPUs less one for Linux), then the workloads: build a project, 4K playback.
+   Done for `cpus=` up to 6 (2026-11-22): 1, 2, 4 and 6 CPUs each boot to the desktop (Dock 48, 42, 38, 39 s from
+   `kern.boottime`) with no panic, silent CPU or soft lockup. What 3 and more needed:
+   - fki's kick: one csd per target CPU shared by every sender; `smp_call_function_single_async`'s busy check is not
+     atomic, so two CPUs kicking a third queued it twice and the target looped in its IPI handler with interrupts off.
+     A sender now claims the csd first (an atomic per target), the handler releases it.
+   - XNU must not let Linux reschedule it while a spinlock is held: the 2 ms yield where XNU re-enables interrupts is
+     skipped with preemption off, or the other CPUs spin until the ticket-lock timeout panics.
+   - Paravirtual ticket locks (`xnu-patches/0005`): waiters sleep in the host and are kicked; a spinning CPU takes a
+     pending IPI as its FIQ would.
+   - Linux's device interrupts are kept off XNU's CPUs (`xnulinux-boot.sh`).
+   Open: the default for `cpus=`; cross-CPU costs (pipe round trip 11.9 µs on 2 CPUs against 3.3 µs on one,
+   fork 2.2 ms against 0.97 ms).
