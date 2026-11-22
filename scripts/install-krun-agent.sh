@@ -36,6 +36,9 @@ $(env_xml)
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <!-- launchd runs an agent as a background process by default: its vCPU threads get the low QoS, and on a busy Mac the
+       guest stalls (timers, its network) -->
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$S/agent.log</string>
   <key>StandardErrorPath</key><string>$S/agent.log</string>
 </dict>
