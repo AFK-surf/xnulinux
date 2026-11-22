@@ -20,8 +20,10 @@ if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced fi
   lsmod | grep -q '^xnu ' || { echo "no hosted system is running"; exit 0; }
   printf 'sync\n' >> "${CONSOLE_IN:-/var/tmp/console-in}"; sleep 3
   echo 1 | sudo tee /sys/module/xnu/parameters/stop_run >/dev/null
-  for _ in $(seq 1 50); do pgrep -x insmod >/dev/null || break; sleep 0.2; done
-  sudo rmmod xnu && echo "hosted system stopped"
+  # every XNU CPU sees the stop at its next host call; one in a long one (disk I/O while the VM shuts down) takes a while
+  for _ in $(seq 1 600); do pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null || break; sleep 0.2; done
+  if lsmod | grep -q '^xnu '; then sudo rmmod xnu; fi
+  echo "hosted system stopped"
   exit
 fi
 WAIT=0; [ "${1:-}" = --wait ] && WAIT=1
