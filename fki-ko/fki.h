@@ -44,7 +44,8 @@ void fki_region_free(struct fki_region *r);
 /* A named blob from the firmware search path. */
 int fki_blob_get(const char *name, const void **data, unsigned long *size, void **handle);
 void fki_blob_put(void *handle);
-/* Enter and leave a foreign context on this CPU: no preemption, no interrupts, foreign PAC keys. */
+/* Enter and leave a foreign context on this CPU: no preemption, no interrupts, foreign PAC keys; the FP/SIMD registers are
+ * the foreign kernel's to use (the current task's state saved first). */
 unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved);
 void fki_leave(unsigned long cookie, const struct fki_pac_keys *saved);
 /* Swap PAC keys only (caller already in a foreign context): save current into *save, load *load. */
