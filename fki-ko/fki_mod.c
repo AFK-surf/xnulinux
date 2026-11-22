@@ -23,6 +23,7 @@
 #include <linux/cpumask.h>
 #include <linux/vmalloc.h>
 #include <asm/arch_timer.h>
+#include <asm/neon.h>
 #include <asm/sysreg.h>
 #include <asm/tlbflush.h>
 #include <asm/barrier.h>
@@ -168,10 +169,28 @@ static __always_inline void keys_write(const struct fki_pac_keys *k)
 	isb();
 }
 
+/*
+ * The foreign kernel uses the FP/SIMD registers (its user threads' state, its own SIMD code) without Linux knowing.
+ * Linux skips reloading a task's FP/SIMD state when it believes this CPU's registers still hold it, so a task that ran
+ * here before would come back with the foreign kernel's register contents (random user-space crashes on the hosted
+ * kernel's CPU). Before the foreign kernel runs (on entry, and each time it resumes after Linux ran), save the current
+ * task's state and make Linux forget whose state the registers hold: an empty kernel-mode NEON section does both.
+ * Nothing of the foreign kernel's needs keeping across that: its kernel code does not keep FP/SIMD values across calls
+ * into the host, and it saves its user threads' registers on each exception.
+ */
+static void fki_fpsimd_forget(void)
+{
+	struct user_fpsimd_state scratch;	/* where Linux would save a kernel-mode state over a context switch: none here */
+
+	kernel_neon_begin(&scratch);
+	kernel_neon_end(&scratch);
+}
+
 __attribute__((target("branch-protection=none"))) unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved)
 {
 	unsigned long flags;
 
+	fki_fpsimd_forget();
 	preempt_disable();
 	local_irq_save(flags);
 	keys_read(saved);
@@ -548,11 +567,28 @@ static void fki_linux_runs_body(void (*fn)(void *), void *arg);
  * Linux runs with SError (PSTATE.A) unmasked; the foreign kernel keeps D, A, I and F masked and asserts so in its
  * idle loop. Give it back exactly the exception mask it called with.
  */
+struct fki_runs {
+	void (*fn)(void *);
+	void *arg;
+};
+
+/* fn runs with interrupts on and turns them off again; then, before the foreign kernel resumes, fki_fpsimd_forget */
+static void fki_runs_then_forget(void *p)
+{
+	struct fki_runs *r = p;
+
+	r->fn(r->arg);
+	local_irq_enable();
+	fki_fpsimd_forget();
+	local_irq_disable();
+}
+
 static void fki_linux_runs(void (*fn)(void *), void *arg)
 {
 	unsigned long daif = read_sysreg(daif);
+	struct fki_runs r = { fn, arg };
 
-	fki_linux_runs_body(fn, arg);
+	fki_linux_runs_body(fki_runs_then_forget, &r);
 	write_sysreg(daif, daif);
 }
 
