@@ -607,3 +607,34 @@ dist/XnuCpuMetal.bundle/
 ### 验证结果
 - 新增 `test/test_round19.mm`（3/3 PASS）：16 字节对齐查询、`'x420'` `YCBCR10_420_2P (505)` 采样得 `(1.000, 1.000, 1.000, 1.000)`、`CIGaussianBlur` 18 组非 64 字节对齐宽度/半径组合全部 PASS。
 - 宿主机 `lavapipe (arm64e)` 与 `MoltenVK 1.4.2 (arm64)` 全套回归全部 PASS。
+
+---
+
+## Round 20: `newBufferWithBytesNoCopy:` 真物理页零拷贝别名（`mach_vm_remap`）、`lodMinClamp:lodMaxClamp:` 透传与 IOSurface 零拷贝边界
+
+### 设计与修改
+1. **以 `mach_vm_remap` 真物理页别名取代拷贝回退补丁（零拷贝、无阻塞、无死锁）**：
+   - `xnu-m2v-bridge`（`include/xnu_m2v.h`、`src/lib.rs`）新增 `xm2v_buffer_new_page_aligned`：通过独立 `HeapType::Placement` 堆并在偏移 `0` 处 `new_buffer_at_offset` 分配（回退 `dev.new_buffer`），确保任意页对齐尺寸（4 KB、16 KB、128 KB、33 MB 等）的 Venus/Vulkan blob 宿主映射地址均严格按 `vm_page_size` 对齐，无需修改 `metal2vulkan`。
+   - `XnuCpuMetalPlugin.mm` 的 `xcmDev_newBufferNoCopy` 在无 `VK_EXT_external_memory_host` 时：分配页对齐 GPU 缓冲并一次性拷入初始内容后，校验 `pointer` / `length` / `gpuPtr` 均为 `vm_page_size` 对齐且调用方整段可写（`xcmRangeIsFullyWritable` 排除 `PROT_READ` 只读映射），调用 `mach_vm_remap(mach_task_self(), &target, length, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (mach_vm_address_t)gpuPtr, FALSE, &curProt, &maxProt, VM_INHERIT_NONE)` 建立真物理页别名（`_fallbackAliased = YES`）。
+   - 彻底移除 Round 19 中引起争议的临时补丁：`-[XcmBuffer contents]` 绝不阻塞等待 `waitUntilCompleted`（别名缓冲直接返回 `_fallbackPtr`），无 compute 4 MB 快照/逐字节比对回写循环，无每缓冲 `vm_region_64` 绕过逻辑；`syncFromFallbackHostMemory` 对 `_fallbackAliased` 为 0 拷贝空操作。
+   - **安全解绑（兼容 `XnuDrm::doUnmap` 立即释页）**：`-[XcmBuffer dealloc]` 在调用 `xm2v_buffer_release(_handle)` 之前先将 `_fallbackPtr` 从 Venus/GPU 页解绑——有 `_fallbackDeallocator` 时若仍可写则以 `mach_vm_allocate(VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE)` 替换为零开销惰性匿名页后再释放 GPU 缓冲并调 deallocator；无 deallocator 时用 `mach_vm_read_overwrite` 拷入临时匿名页再 `mach_vm_remap(VM_FLAGS_OVERWRITE)` 覆盖回原地址，既为调用方保留最终 GPU 写入字节，又能在调用方早于 autorelease 池释放前已 `munmap` 时安全退出不崩溃。
+   - 对非页对齐指针/长度或 `PROT_READ` 只读映射，干净退回原有单向初始拷贝/只读路径并记录限流 `os_log_info` 与原子统计（`-[XcmBackendDevice xcmNoCopyStats]`）。
+2. **`lodMinClamp:lodMaxClamp:` SPI 完整接入 `metal2vulkan`**：
+   - `xnu-m2v-bridge` 新增 `xm2v_render_encoder_set_vertex_sampler_lod` 与 `xm2v_render_encoder_set_fragment_sampler_lod`，调用 `metal2vulkan` 的 `set_{vertex,fragment}_sampler_states(&[s], Some((&[lod_min], &[lod_max])), index)`，不再静默丢弃 LOD 夹取范围。
+3. **IOSurface 零拷贝边界说明（同进程 vs 跨进程）**：
+   - `mach_vm_remap(VM_FLAGS_OVERWRITE)` 仅修改当前进程任务内的虚拟地址映射。对于**跨进程** `IOSurface`（如 `VTDecoderXPCService` 写入 → `WindowServer` 采样的 4K 壁纸、`WebContent` 写入 → `WindowServer` 合成的页面），消费端若用 `VM_FLAGS_OVERWRITE` 覆写 `IOSurfaceGetBaseAddress` 会断开与内核共享 IOSurface 物理页的连接，导致生产端后续写入对消费端不可见。
+   - 因此跨进程 `IOSurface` 保持当前基于 `IOSurfaceGetSeed` 变更触发的同步路径（仅在 seed 变化时刷新）；零拷贝页别名仅用于同进程、可证明安全且满足页对齐与可写前提的 `newBufferWithBytesNoCopy:` 缓冲。
+
+### 验证结果（`test/test_round20.mm` 7/7 全通过）
+- **宿主机 `lavapipe (arm64e)`**（`XNU_CPU_METAL_FORCE_NOCOPY_FALLBACK=1`）：`test_round20` **7/7 PASS**，`test_round10` / `test_carenderer` PASS。
+- **宿主机 `MoltenVK 1.4.2 (arm64)`**（`XNU_CPU_METAL_FORCE_NOCOPY_FALLBACK=1`）：`test_round20` **7/7 PASS**，`WKWebView`（`800×600 darkPx=6285`）与 `Maps.app` `NaturalStack`（`256×256 nz=164186`）PASS。
+- **托管 macOS 实机 Venus（`Virtio-GPU Venus (Apple M5 Max)`, `vm_page_size=4096`）**：
+  - `test_round20_arm64e default` **7/7 PASS（`EXIT=0`）**：
+    - `[1/7]` 16 字节对齐查询 PASS
+    - `[2/7]` `'x420'` 2-plane YCbCr 采样 PASS
+    - `[3/7]` `CIGaussianBlur` 18 组非 64B 对齐 PASS
+    - `[4/7]` `mach_vm_remap` 别名（2 次）、`PROT_READ` 回退（1 次）、非页对齐回退（1 次）、0 次提交拷贝、`dealloc`（有/无 deallocator）生命周期 PASS
+    - `[5/7]` 8-slice 环形缓冲并发 CPU 写（slice N+1）+ GPU compute（slice N）PASS
+    - `[6/7]` `-[XcmBuffer contents]` 在 commit 前及 `completedHandler` 内调用均不阻塞、不死锁 PASS
+    - `[7/7]` 33 MB 壁纸缓冲成功别名（1 次），10 次 commit 累计 `commitSyncCopies=0, commitSyncBytes=0` PASS
+  - `Safari` 加载 `https://example.com` 实机渲染清晰完整（6 语种正文、工具栏、4K 金门大桥壁纸、右上角时钟、Liquid Glass Dock 均正常）。
