@@ -48,6 +48,9 @@ The host is an arm64 Linux VM with PAC on an Apple Silicon Mac (`scripts/krun-vm
    GPU bridge (`xnudrmd`), and boots the hosted system from the disk and its `/var/tmp/mac.conf`; its console is
    `scripts/xnu-console.sh`, its screen `tools/hosted/fb2png.py`.
 5. `gpu/venus/build-darwin.sh` (on the Mac) builds the hosted Vulkan driver that the Metal plugin uses on a real GPU.
+6. `scripts/install-service.sh` (in the VM, once) runs it as a service: `xnulinux.service` starts it at boot, stops it
+   cleanly (the disk synced) when the VM shuts down and starts it again after a panic; settings in `/etc/xnulinux.conf`
+   (CPUs, memory, disk, GPU, xnu.ko parameters), each run's kernel log in `/var/log/xnulinux/`.
 
 Debugging: the VM console is captured on the host (`scripts/serial-pty.py`), a monitor thread on another CPU prints XNU's
 counters every 2 s, and XNU dumps its threads with their saved frames after 20000 idle rounds.
