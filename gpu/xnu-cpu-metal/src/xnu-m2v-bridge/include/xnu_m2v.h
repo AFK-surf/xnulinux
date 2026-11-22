@@ -162,6 +162,7 @@ bool xm2v_device_supports_family(const Xm2vDevice *dev, int64_t family);
 
 /* Buffers */
 Xm2vBuffer *xm2v_buffer_new(Xm2vDevice *dev, uint64_t length, uint64_t resource_options, const void *bytes);
+Xm2vBuffer *xm2v_buffer_new_page_aligned(Xm2vDevice *dev, uint64_t length, uint64_t resource_options, const void *bytes);
 Xm2vBuffer *xm2v_buffer_new_no_copy(Xm2vDevice *dev, void *ptr, uint64_t length, uint64_t resource_options);
 Xm2vBuffer *xm2v_buffer_new_no_copy_dealloc(Xm2vDevice *dev, void *ptr, uint64_t length, uint64_t resource_options,
                                             Xm2vDeallocatorFn dealloc_fn, void *dealloc_ctx);
@@ -319,10 +320,12 @@ bool xm2v_render_encoder_set_vertex_buffer(Xm2vRenderEncoder *enc, Xm2vBuffer *b
 bool xm2v_render_encoder_set_vertex_bytes(Xm2vRenderEncoder *enc, const void *bytes, size_t len, uint32_t index);
 bool xm2v_render_encoder_set_vertex_texture(Xm2vRenderEncoder *enc, Xm2vTexture *tex, uint32_t index);
 bool xm2v_render_encoder_set_vertex_sampler(Xm2vRenderEncoder *enc, Xm2vSampler *samp, uint32_t index);
+bool xm2v_render_encoder_set_vertex_sampler_lod(Xm2vRenderEncoder *enc, Xm2vSampler *samp, float lod_min, float lod_max, uint32_t index);
 bool xm2v_render_encoder_set_fragment_buffer(Xm2vRenderEncoder *enc, Xm2vBuffer *buf, uint64_t offset, uint32_t index);
 bool xm2v_render_encoder_set_fragment_bytes(Xm2vRenderEncoder *enc, const void *bytes, size_t len, uint32_t index);
 bool xm2v_render_encoder_set_fragment_texture(Xm2vRenderEncoder *enc, Xm2vTexture *tex, uint32_t index);
 bool xm2v_render_encoder_set_fragment_sampler(Xm2vRenderEncoder *enc, Xm2vSampler *samp, uint32_t index);
+bool xm2v_render_encoder_set_fragment_sampler_lod(Xm2vRenderEncoder *enc, Xm2vSampler *samp, float lod_min, float lod_max, uint32_t index);
 bool xm2v_render_encoder_use_buffer(Xm2vRenderEncoder *enc, Xm2vBuffer *buf, uint64_t usage, uint64_t stages);
 bool xm2v_render_encoder_use_texture(Xm2vRenderEncoder *enc, Xm2vTexture *tex, uint64_t usage, uint64_t stages);
 bool xm2v_render_encoder_draw_primitives(Xm2vRenderEncoder *enc, uint64_t prim, uint64_t vertex_start, uint64_t vertex_count,

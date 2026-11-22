@@ -18,7 +18,8 @@ use metal2vulkan_runtime::{
     ArgumentEncoder, BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer,
     CommandBufferStatus, CommandQueue, ComputeCommandEncoder, ComputePipelineState, Deallocator,
     DepthStencilState, Device, DeviceOptions, Event, EventRef, Fence, Function,
-    FunctionDescriptor, HostMemory, IoSurfacePlane, IoSurfaceYCbCr, Library, LoadAction, Origin,
+    FunctionDescriptor, HeapDescriptor, HeapType, HostMemory, IoSurfacePlane, IoSurfaceYCbCr,
+    Library, LoadAction, Origin,
     PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState,
     ResourceOptions, ResourceRef, SamplerState, ScissorRect, ShaderCacheOptions, SharedEvent,
     SharedEventHandle, SharedEventListener, Size, StoreAction, SurfaceYCbCrMatrix, Texture,
@@ -425,6 +426,41 @@ pub extern "C" fn xm2v_buffer_new(
             dev.new_buffer_with_bytes(slice, opts)
         }
         .map_err(|e| format!("new_buffer: {e:?}"))?;
+        Ok(boxed(buf))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_buffer_new_page_aligned(
+    dev: *mut Device,
+    length: u64,
+    resource_options: u64,
+    bytes: *const c_void,
+) -> *mut Buffer {
+    guard(std::ptr::null_mut(), || {
+        let dev = get(dev)?;
+        let opts = raw_opts(resource_options)?;
+        // A dedicated Placement heap allocates its own VkDeviceMemory at offset 0,
+        // guaranteeing a page-aligned host mapping for mach_vm_remap physical-page aliasing.
+        let mut hd = HeapDescriptor::default();
+        hd.heap_type = HeapType::Placement;
+        hd.size = length;
+        hd.resource_options = opts;
+        let buf = dev
+            .new_heap(&hd)
+            .and_then(|h| h.new_buffer_at_offset(length, opts, 0))
+            .or_else(|_| dev.new_buffer(length, opts))
+            .map_err(|e| format!("new_buffer_page_aligned: {e:?}"))?;
+        if !bytes.is_null() && length > 0 {
+            if let Some(dst) = buf.contents() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.cast::<u8>(), dst.as_ptr(), length as usize);
+                }
+                if (resource_options & 0xF0) == 0x10 {
+                    let _ = buf.did_modify_range(0..length);
+                }
+            }
+        }
         Ok(boxed(buf))
     })
 }
@@ -2097,6 +2133,25 @@ pub extern "C" fn xm2v_render_encoder_set_fragment_texture(
 }
 
 #[no_mangle]
+pub extern "C" fn xm2v_render_encoder_set_vertex_sampler_lod(
+    enc: *mut RenderCommandEncoder,
+    samp: *mut SamplerState,
+    lod_min: f32,
+    lod_max: f32,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        let s = if samp.is_null() { None } else { Some(get(samp)?) };
+        let mins = [lod_min];
+        let maxs = [lod_max];
+        get_mut(enc)?
+            .set_vertex_sampler_states(&[s], Some((&mins, &maxs)), index)
+            .map_err(|e| format!("set_vertex_sampler_states(lod): {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn xm2v_render_encoder_set_fragment_sampler(
     enc: *mut RenderCommandEncoder,
     samp: *mut SamplerState,
@@ -2107,6 +2162,25 @@ pub extern "C" fn xm2v_render_encoder_set_fragment_sampler(
         get_mut(enc)?
             .set_fragment_sampler_state(s, index)
             .map_err(|e| format!("set_fragment_sampler_state: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_set_fragment_sampler_lod(
+    enc: *mut RenderCommandEncoder,
+    samp: *mut SamplerState,
+    lod_min: f32,
+    lod_max: f32,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        let s = if samp.is_null() { None } else { Some(get(samp)?) };
+        let mins = [lod_min];
+        let maxs = [lod_max];
+        get_mut(enc)?
+            .set_fragment_sampler_states(&[s], Some((&mins, &maxs)), index)
+            .map_err(|e| format!("set_fragment_sampler_states(lod): {e:?}"))?;
         Ok(true)
     })
 }
