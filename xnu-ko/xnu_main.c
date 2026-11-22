@@ -188,7 +188,21 @@ struct boot_args_v2 {			/* pexpert/arm64/boot.h layout */
 	u64_t bootFlags, memSizeActual;
 };
 
-static const char *cmdline = "debug=0x8 -v -noprogress serial=0 startup_debug=1 vm_compression_limit=1572864";
+/*
+ * The machine's model (the device tree root's "model", hw.model): user space takes the product type from it
+ * (MobileGestalt ProductType), and apsd aborts without one, which holds up login (loginwindow's MDM pre-login check-in
+ * waits on apsd). It must have the form of a Mac model identifier.
+ */
+static char *model = "VirtualMac2,1";	/* Apple's own virtual Mac's model identifier */
+module_param(model, charp, 0444);
+
+/* the compressor's limit is in VM pages: 6 GB either way */
+static const char *cmdline = "debug=0x8 -v -noprogress serial=0 startup_debug=1";
+static const char *cmdline_4k = " vm_compression_limit=1572864";
+static const char *cmdline_16k = " vm_compression_limit=393216 linux64_vm16k=1";
+/* vm16k=1: XNU's VM pages are 16 KB over the host's 4 KB translation granule (XNU's PAGE_RATIO 4) */
+static int vm16k;
+module_param(vm16k, int, 0444);
 
 
 /* Walk XNU's kernel tables (inside its contiguous DRAM) for va and log the descriptors. */
@@ -402,6 +416,23 @@ static int cpu_fn(void *arg)
 	return 0;
 }
 
+/*
+ * Where the time goes: host-counter ticks spent in each kind of call into the host (the rest of a CPU's time is XNU
+ * running, user or kernel). The monitor prints the share of each over its last interval (perf=1).
+ */
+#define ACCT_N 64
+static unsigned long acct_ticks_slot[LINUX64_CPU_SLOTS][ACCT_N], acct_calls_slot[LINUX64_CPU_SLOTS][ACCT_N], acct_disk_slot[LINUX64_CPU_SLOTS];
+static int perf;
+module_param(perf, int, 0644);
+static volatile const unsigned long *xnu_el0_stat;	/* XNU's linux64_el0_stat[cpu][count, ticks][class] */
+static inline unsigned acct_bucket(unsigned long call) { return call >= 800 && call < 800 + ACCT_N - 1 ? call - 800 : ACCT_N - 1; }
+static inline void acct_add(unsigned long call, u64_t ticks)
+{
+	unsigned b = acct_bucket(call), s = this_slot();	/* per CPU: no atomics (and none of the compiler's out-of-line ones) */
+	acct_ticks_slot[s][b] += ticks;
+	acct_calls_slot[s][b]++;
+}
+
 /* XNU calls into the host: enum linux64_call (linux64_abi.h); a non-zero return ends the run */
 static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2);
 long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
@@ -422,7 +453,9 @@ long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 		logs("xnu: run stopped by the host (stop_run)");
 		return 1;
 	}
+	u64_t t0 = fki_counter();
 	long r = xnu_hook_body(call, a1, a2);
+	acct_add(call, fki_counter() - t0);
 	if (!r) in_xnu = 1;
 	return r;
 }
@@ -475,6 +508,7 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 	if (call == LINUX64_CALL_DISK_RW) {		/* block disk I/O: q->result = bytes moved or -errno */
 		struct linux64_rw_req *q = (struct linux64_rw_req *)a1;
 		if (q) q->result = dk_file ? fki_file_rw(dk_file, (int)q->write, q->buf, (unsigned long)q->len, q->off) : -6;
+		if (q && q->result > 0) acct_disk_slot[this_slot()] += (unsigned long)q->result;
 		return 0;
 	}
 	if (call == LINUX64_CALL_KEYSTORE_RW) {		/* the keystore file: q->result = bytes moved or -errno */
@@ -679,8 +713,18 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_init(&a, base_va + off_dt, 0x40000);
 	adt_node(&a, 3, 6);				/* / */
 	adt_prop_str(&a, "name", "device-tree");
-	adt_prop_str(&a, "compatible", "xnulinux,linux64");
-	adt_prop_str(&a, "model", "xnulinux");
+	{	/* the platform's own name, then the model: user space's product type (MobileGestalt) comes from this list */
+		static char compat[96];
+		static const char own[] = "xnulinux,linux64";
+		unsigned n = sizeof(own), m = (unsigned)x_strlen(model);
+		x_memcpy(compat, own, n);
+		if (m && n + m + 1 <= sizeof(compat) && x_strcmp(model, "xnulinux")) {
+			x_memcpy(compat + n, model, m + 1);
+			n += m + 1;
+		}
+		adt_prop(&a, "compatible", compat, n);
+	}
+	adt_prop_str(&a, "model", model);
 	if (root_uuid && x_strlen(root_uuid) == 36) {
 		static const char pre[] = "<dict><key>IOProviderClass</key><string>IOMedia</string><key>IOPropertyMatch</key>"
 		    "<dict><key>UUID</key><string>", post[] = "</string></dict></dict>";
@@ -765,8 +809,15 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	}
 	adt_node(&a, 1, 0);				/* /defaults: XNU looks these up without checking */
 	adt_prop_str(&a, "name", "defaults");
-	adt_node(&a, 1, 0);				/* /product */
+	adt_node(&a, 4, 0);				/* /product */
 	adt_prop_str(&a, "name", "product");
+	/*
+	 * MobileGestalt's product type in sandboxed processes: their profiles let them read only these two /product
+	 * properties (apsd's: "sub-product-type", "unique-model"), and apsd aborts without a product type
+	 */
+	adt_prop_str(&a, "sub-product-type", model);
+	adt_prop_str(&a, "unique-model", model);
+	adt_prop_str(&a, "product-name", "xnulinux");
 	adt_node(&a, 1, 0);				/* /options: NVRAM's node (AppleImage4 keeps its nonce seeds there) */
 	adt_prop_str(&a, "name", "options");
 	adt_node(&a, 3, FB_SIZE ? 1 : 0);		/* /arm-io: XNU needs a nonzero SoC base */
@@ -822,6 +873,10 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	ba->deviceTreeP = base_va + off_dt;
 	ba->deviceTreeLength = (unsigned)dt_len;
 	x_memcpy(ba->CommandLine, cmdline, x_strlen(cmdline) + 1);
+	{
+		const char *pg = vm16k ? cmdline_16k : cmdline_4k;
+		x_memcpy(ba->CommandLine + x_strlen(ba->CommandLine), pg, x_strlen(pg) + 1);
+	}
 	if (rd_size || hd_file) {
 		const char *rd = " rd=md0";
 		x_memcpy(ba->CommandLine + x_strlen(ba->CommandLine), rd, x_strlen(rd) + 1);
@@ -863,6 +918,48 @@ static void put_hex(char **p, unsigned long v) { for (int i = 44; i >= 0; i -= 4
 static int dump_threads;
 module_param(dump_threads, int, 0644);
 
+/* perf=1: per 2 s, each call kind's share of the interval in permille of one CPU, its count, and disk bytes */
+static void acct_report(void)
+{
+	static unsigned long last_t, last_ticks[ACCT_N], last_calls[ACCT_N], last_disk;
+	unsigned long now = fki_counter(), dt = now - last_t, total = 0;
+	char buf[800]; char *p = buf;
+	if (!last_t) { last_t = now; return; }
+	last_t = now;
+	put_str(&p, "xnu: perf ms="); p = put_dec(p, dt * 1000 / fki_counter_frequency());
+	for (unsigned b = 0; b < ACCT_N && p < buf + sizeof(buf) - 48; b++) {
+		unsigned long t = 0, c = 0, d, n;
+		for (unsigned s = 0; s < LINUX64_CPU_SLOTS; s++) { t += READ_ONCE(acct_ticks_slot[s][b]); c += READ_ONCE(acct_calls_slot[s][b]); }
+		d = t - last_ticks[b]; n = c - last_calls[b];
+		last_ticks[b] = t; last_calls[b] = c;
+		if (!n) continue;
+		total += d;
+		put_str(&p, b == ACCT_N - 1 ? " other" : " c"); if (b != ACCT_N - 1) p = put_dec(p, 800 + b);
+		put_str(&p, "="); p = put_dec(p, d * 1000 / dt);
+		put_str(&p, "%o/"); p = put_dec(p, n);
+	}
+	put_str(&p, " host="); p = put_dec(p, total * 1000 / dt);
+	if (xnu_el0_stat) {	/* XNU's user-space exceptions by class: count and permille of the interval until back in user space */
+		static const char *cls[LINUX64_EL0_CLASSES] = { " svc=", " dabt=", " iabt=", " irq=", " other=" };
+		static unsigned long last_n[LINUX64_EL0_CLASSES], last_t[LINUX64_EL0_CLASSES];
+		for (unsigned c = 0; c < LINUX64_EL0_CLASSES; c++) {
+			unsigned long n = 0, t = 0;
+			for (unsigned s = 0; s < LINUX64_EL0_CPUS; s++) {
+				n += READ_ONCE(xnu_el0_stat[(s * 2 + 0) * LINUX64_EL0_CLASSES + c]);
+				t += READ_ONCE(xnu_el0_stat[(s * 2 + 1) * LINUX64_EL0_CLASSES + c]);
+			}
+			put_str(&p, cls[c]); p = put_dec(p, n - last_n[c]); put_str(&p, "/"); p = put_dec(p, (t - last_t[c]) * 1000 / dt); put_str(&p, "%o");
+			last_n[c] = n; last_t[c] = t;
+		}
+	}
+	unsigned long disk = 0;
+	for (unsigned s = 0; s < LINUX64_CPU_SLOTS; s++) disk += READ_ONCE(acct_disk_slot[s]);
+	put_str(&p, "%o diskKB="); p = put_dec(p, (disk - last_disk) >> 10);
+	last_disk = disk;
+	*p = 0;
+	logs(buf);
+}
+
 static int monitor_fn(void *arg)
 {
 	static const struct { int i; const char *name; } dec[] = {
@@ -882,6 +979,8 @@ static int monitor_fn(void *arg)
 			((volatile unsigned long *)xnu_dbg)[LINUX64_CTR_DUMP_REQ] = 1;
 			dump_threads = 0;
 		}
+		if (perf)
+			acct_report();
 		if (!xnu_dbg || (lines >= 90 && (++ticks % 10) != 0))
 			continue;
 		char buf[420]; char *p = buf;
@@ -940,6 +1039,7 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	diag_va[4] = macho_sym(&img, "_port_crumb");
 	diag_va[5] = macho_sym(&img, "_strlen");
 	xnu_dbg = (const unsigned long *)macho_sym(&img, "_linux64_dbg");
+	xnu_el0_stat = (const unsigned long *)macho_sym(&img, "_linux64_el0_stat");
 	{	/* the helpers run where XNU does not: a CPU running XNU lets Linux in only at XNU's calls into the host */
 		int host_cpu = cpus < fki_num_cpus() ? cpus : fki_num_cpus() - 1;
 		if (monitor_cpu == -2)
