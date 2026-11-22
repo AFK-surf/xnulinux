@@ -60,5 +60,7 @@ Venus → MoltenVK → Metal on the host GPU); on a Linux machine with its own G
   shared memory reads back correct results (6.7 ms). Pieces: `fki-ko/fki_hostcall.c` (`/dev/xnu-hostcall`), xnu.ko
   upcall 830, `kexts/XnuDrm` (user client; maps Linux's pages into the task), `gpu/xnu-drm/xnudrmd.c` (Linux service on
   the render node), `gpu/xnu-drm/darwin` (libxnudrm, compiled into Mesa by `gpu/venus/patches/0002`).
-- Next: the Metal plugin on this driver instead of lavapipe (arm64e build, IOSurface sharing), so WindowServer and apps
-  render on the host GPU.
+- Metal on it: the plugin (`gpu/xnu-cpu-metal`) carries both drivers and takes Venus when `XnuDrm` is there; a Metal
+  program in the hosted macOS gets `Virtio-GPU Venus (Apple M5 Max)` (textures, IOSurface textures, buffers, blits).
+  Open: WindowServer still ends on lavapipe (the loader runs in secure mode there and sees both drivers); IOSurfaces
+  are still copied to and from GPU memory each frame (2-5 ms at 1080p-1440p, measured on the host).
