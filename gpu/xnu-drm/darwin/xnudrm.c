@@ -37,27 +37,34 @@
 #define NODE_PRIMARY "/dev/dri/card0"
 
 static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
-static io_connect_t conn;		/* one user client per process */
-static int node_fd = -1;		/* the descriptor handed out for the render node (a /dev/null) */
-static int node_refs;
-static struct xmap { void *va; size_t len; uint64_t id; } *maps;
+static io_connect_t conn;		/* the user client of the call in progress (under lk) */
+static struct xnode { int fd; io_connect_t conn; } nodes[64];	/* open render nodes: a /dev/null fd each */
+static unsigned nnodes;
+static struct xmap { void *va; size_t len; uint64_t id; io_connect_t conn; } *maps;
 static unsigned nmaps;
-static struct xfence { dev_t dev; ino_t ino; int wfd; uint64_t id; } *fences;
+static struct xfence { dev_t dev; ino_t ino; int wfd; uint64_t id; io_connect_t conn; } *fences;
 static unsigned nfences;
 static uint8_t *buf;			/* message, then reply */
 
 static int debug(void) { static int d = -1; if (d < 0) d = getenv("XNUDRM_DEBUG") != NULL; return d; }
 
-static int connect_kext(void)
+static int open_conn(io_connect_t *c)
 {
-	if (conn) return 0;
-	io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("XnuDrm"));
-	if (!s) { if (debug()) fprintf(stderr, "xnudrm: no XnuDrm service\n"); return -ENODEV; }
-	kern_return_t kr = IOServiceOpen(s, mach_task_self(), 0, &conn);
-	IOObjectRelease(s);
-	if (kr != KERN_SUCCESS) { if (debug()) fprintf(stderr, "xnudrm: IOServiceOpen %#x\n", kr); conn = 0; return -EIO; }
+	io_service_t sv = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("XnuDrm"));
+	if (!sv) { if (debug()) fprintf(stderr, "xnudrm: no XnuDrm service\n"); return -ENODEV; }
+	kern_return_t kr = IOServiceOpen(sv, mach_task_self(), 0, c);
+	IOObjectRelease(sv);
+	if (kr != KERN_SUCCESS) { if (debug()) fprintf(stderr, "xnudrm: IOServiceOpen %#x\n", kr); return -EIO; }
 	if (!buf) buf = malloc(sizeof(struct xnudrm_hdr) + XNUDRM_MAX_MSG);
-	return buf ? 0 : -ENOMEM;
+	if (!buf) { IOServiceClose(*c); return -ENOMEM; }
+	return 0;
+}
+
+/* The user client behind a render node descriptor (0: not one). Called with lk held. */
+static io_connect_t node_conn(int fd)
+{
+	for (unsigned i = 0; i < nnodes; i++) if (nodes[i].fd == fd) return nodes[i].conn;
+	return 0;
 }
 
 /* buf holds a header and plen bytes of payload; the reply replaces it. Returns the reply's status or -errno. */
@@ -83,12 +90,14 @@ static struct xnudrm_hdr *hdr(uint32_t op, uint64_t a0, uint64_t a1)
 int xnudrm_open(const char *path, int flags, ...)
 {
 	if (path && !strcmp(path, NODE_RENDER)) {
+		io_connect_t c = 0;
 		pthread_mutex_lock(&lk);
-		int r = connect_kext();
-		if (!r && node_fd < 0) node_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
-		if (!r && node_fd >= 0) node_refs++;
-		int fd = r ? (errno = -r, -1) : node_fd;
+		int r = nnodes < sizeof(nodes) / sizeof(nodes[0]) ? open_conn(&c) : -EMFILE;
+		int fd = r ? -1 : open("/dev/null", O_RDWR | O_CLOEXEC);
+		if (!r && fd < 0) { IOServiceClose(c); r = -errno; }
+		if (!r) nodes[nnodes++] = (struct xnode){ fd, c };
 		pthread_mutex_unlock(&lk);
+		if (r) { errno = -r; return -1; }
 		return fd;
 	}
 	if (flags & O_CREAT) {
@@ -101,12 +110,16 @@ int xnudrm_open(const char *path, int flags, ...)
 int xnudrm_close(int fd)
 {
 	pthread_mutex_lock(&lk);
-	if (fd >= 0 && fd == node_fd) {
-		if (--node_refs == 0) {
-			/* the user client stays open: closing it drops every mapping the process still has */
+	for (unsigned i = 0; i < nnodes; i++) {
+		if (nodes[i].fd == fd) {
+			/* closing the user client drops what is still mapped from it and its DRM file on Linux */
+			io_connect_t c = nodes[i].conn;
+			nodes[i] = nodes[--nnodes];
+			for (unsigned j = 0; j < nmaps; ) { if (maps[j].conn == c) maps[j] = maps[--nmaps]; else j++; }
+			for (unsigned j = 0; j < nfences; j++) if (fences[j].conn == c && fences[j].id) fences[j].id = 0;
+			IOServiceClose(c);
+			break;
 		}
-		pthread_mutex_unlock(&lk);
-		return 0;
 	}
 	pthread_mutex_unlock(&lk);
 	return close(fd);
@@ -138,16 +151,26 @@ static int put(uint32_t *plen, uint64_t *field, const void *p, uint64_t len)
 	return 0;
 }
 
-static int new_fence(uint64_t id)
+static int new_fence(uint64_t id)	/* for conn */
 {
 	int p[2];
 	if (pipe(p)) return -1;
 	fcntl(p[0], F_SETFD, FD_CLOEXEC); fcntl(p[1], F_SETFD, FD_CLOEXEC);
 	struct stat st; fstat(p[0], &st);
+	/* a pipe's inode number is reused once every descriptor of an earlier pipe is closed: an entry for that dead pipe
+	 * would answer for this one */
+	for (unsigned i = 0; i < nfences; ) {
+		if (fences[i].ino == st.st_ino && fences[i].dev == st.st_dev) {
+			/* (an unsignalled one's fence stays with xnudrmd until the node closes: no host call here, buf holds the
+			 * reply being copied out) */
+			if (fences[i].wfd >= 0) close(fences[i].wfd);
+			fences[i] = fences[--nfences];
+		} else i++;
+	}
 	struct xfence *nf = realloc(fences, (nfences + 1) * sizeof(*fences));
 	if (!nf) { close(p[0]); close(p[1]); return -1; }
 	fences = nf;
-	fences[nfences++] = (struct xfence){ st.st_dev, st.st_ino, p[1], id };
+	fences[nfences++] = (struct xfence){ st.st_dev, st.st_ino, p[1], id, conn };
 	return p[0];
 }
 
@@ -242,9 +265,9 @@ static int do_ioctl(unsigned long request, void *arg)
 
 int drmIoctl(int fd, unsigned long request, void *arg)
 {
-	if (fd != node_fd || fd < 0) { errno = EBADF; return -1; }
 	pthread_mutex_lock(&lk);
-	int r = do_ioctl(request, arg);
+	conn = node_conn(fd);
+	int r = conn ? do_ioctl(request, arg) : -EBADF;
 	pthread_mutex_unlock(&lk);
 	if (r) { errno = -r; return -1; }
 	return 0;
@@ -258,14 +281,15 @@ int drmIoctl(int fd, unsigned long request, void *arg)
  */
 void *xnudrm_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
 {
-	if (fd < 0 || fd != node_fd) return mmap(addr, len, prot, flags, fd, off);
+	pthread_mutex_lock(&lk);
+	io_connect_t c = fd >= 0 ? node_conn(fd) : 0;
+	if (!c) { pthread_mutex_unlock(&lk); return mmap(addr, len, prot, flags, fd, off); }
 	uint64_t in[2] = { (uint64_t)off >> 12, len }, out[2] = { 0, 0 };
 	uint32_t nout = 2;
-	pthread_mutex_lock(&lk);
-	kern_return_t kr = IOConnectCallScalarMethod(conn, 1, in, 2, out, &nout);
+	kern_return_t kr = IOConnectCallScalarMethod(c, 1, in, 2, out, &nout);
 	if (kr == KERN_SUCCESS) {
 		struct xmap *nm = realloc(maps, (nmaps + 1) * sizeof(*maps));
-		if (nm) { maps = nm; maps[nmaps++] = (struct xmap){ (void *)(uintptr_t)out[0], len, out[1] }; }
+		if (nm) { maps = nm; maps[nmaps++] = (struct xmap){ (void *)(uintptr_t)out[0], len, out[1], c }; }
 	}
 	pthread_mutex_unlock(&lk);
 	if (kr != KERN_SUCCESS) { if (debug()) fprintf(stderr, "xnudrm: map handle %llu: %#x\n", (unsigned long long)in[0], kr); errno = ENOMEM; return MAP_FAILED; }
@@ -284,8 +308,9 @@ int xnudrm_munmap(void *addr, size_t len)
 	for (unsigned i = 0; i < nmaps; i++) {
 		if (maps[i].va == addr) {
 			uint64_t id = maps[i].id;
+			io_connect_t c = maps[i].conn;
 			maps[i] = maps[--nmaps];
-			IOConnectCallScalarMethod(conn, 2, &id, 1, NULL, NULL);
+			IOConnectCallScalarMethod(c, 2, &id, 1, NULL, NULL);
 			pthread_mutex_unlock(&lk);
 			return 0;
 		}
@@ -309,9 +334,11 @@ static struct xfence *fence_of(int fd)
 static int fence_check(struct xfence *f)
 {
 	if (!f->id) return 1;
+	conn = f->conn;
 	hdr(XNUDRM_FENCE_WAIT, f->id, 0);
 	int r = call(0);
 	if (r == -XNUDRM_ETIME) return 0;
+	if (debug() && r) fprintf(stderr, "xnudrm: fence %llu wait: %d\n", (unsigned long long)f->id, r);
 	hdr(XNUDRM_FENCE_CLOSE, f->id, 0);
 	call(0);
 	f->id = 0;
@@ -333,7 +360,11 @@ int xnudrm_poll(struct pollfd *fds, nfds_t n, int timeout)
 			if (f && f->id && fence_check(f) == 0) pending = 1;
 		}
 		pthread_mutex_unlock(&lk);
-		if (debug()) fprintf(stderr, "xnudrm: poll %u fds, timeout %d: %s\n", (unsigned)n, timeout, pending ? "pending" : "ready");
+		if (debug()) {
+			fprintf(stderr, "xnudrm: poll %u fds, timeout %d: %s;", (unsigned)n, timeout, pending ? "pending" : "ready");
+			for (nfds_t i = 0; i < n; i++) { struct xfence *f = nfences ? fence_of(fds[i].fd) : NULL; fprintf(stderr, " fd %d -> %s id %llu", fds[i].fd, f ? "fence" : "other", f ? (unsigned long long)f->id : 0ull); }
+			fprintf(stderr, "\n");
+		}
 		if (!pending) return poll(fds, n, timeout);	/* signalled fences are readable pipes now */
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
@@ -372,7 +403,10 @@ void drmFreeDevices(drmDevicePtr devices[], int count)
 
 drmVersionPtr drmGetVersion(int fd)
 {
-	if (fd != node_fd) return NULL;
+	pthread_mutex_lock(&lk);
+	io_connect_t c = node_conn(fd);
+	pthread_mutex_unlock(&lk);
+	if (!c) return NULL;
 	drmVersionPtr v = calloc(1, sizeof(*v));
 	if (!v) return NULL;
 	v->name = "virtio_gpu";
