@@ -43,10 +43,10 @@ The host is an arm64 Linux VM with PAC on an Apple Silicon Mac (`scripts/krun-vm
 1. `scripts/vm-xnu-build.sh` (once) sets up the macOS-DroidVM Linux toolchain and builds XNU natively on arm64.
 2. `scripts/vm-xnu-rebuild.sh` applies `xnu-patches/`, rebuilds the kernel, builds `kexts/` and links the kernel collection.
 3. `scripts/mk-macvm-disk.sh` (on the Mac) makes the system disk with Apple's installer and puts it in the VM.
-4. `scripts/vm-m2-kbisect.sh` builds `fki.ko` and `xnu.ko` and boots the hosted system; its console is
+4. `scripts/xnulinux-boot.sh` (in the VM) builds `fki.ko` and `xnu.ko`, brings up the network and, with a render node, the
+   GPU bridge (`xnudrmd`), and boots the hosted system from the disk and its `/var/tmp/mac.conf`; its console is
    `scripts/xnu-console.sh`, its screen `tools/hosted/fb2png.py`.
-5. For the GPU: `gpu/xnu-drm/xnudrmd` runs as root once `/dev/xnu-hostcall` is there; `gpu/venus/build-darwin.sh` builds
-   the hosted Vulkan driver.
+5. `gpu/venus/build-darwin.sh` (on the Mac) builds the hosted Vulkan driver that the Metal plugin uses on a real GPU.
 
 Debugging: the VM console is captured on the host (`scripts/serial-pty.py`), a monitor thread on another CPU prints XNU's
 counters every 2 s, and XNU dumps its threads with their saved frames after 20000 idle rounds.

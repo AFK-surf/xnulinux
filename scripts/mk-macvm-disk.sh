@@ -129,10 +129,17 @@ if [ "${MERGE_OS_CRYPTEX:-1}" = 1 ]; then
   diskutil mount readOnly -mountPoint "$W/sys" "$SYS" >/dev/null
 fi
 sudo -n python3 scripts/extract-trustcache.py "$W/trustcache.bin" "$W/preboot"
+# what the boot needs to know of this disk (scripts/xnulinux-boot.sh): the system volume's APFS UUID (/chosen
+# root-matching) and its volume group's (boot-uuid; Preboot/<group> holds the boot files)
+{ echo "ROOT_UUID=$(diskutil info "$SYS" | awk -F': *' '/Volume UUID/{print $2; exit}')"
+  echo "BOOT_UUID=$(basename "$(dirname "$(dirname "$CX")")")"
+  grep -h -A1 ProductVersion "$W/sys/System/Library/CoreServices/SystemVersion.plist" | tr -d '\t\n' | sed 's/.*<string>\(.*\)<\/string>.*/MACOS=\1\n/'
+} > "$W/mac.conf"; cat "$W/mac.conf"
 grep -h -A1 ProductVersion "$W/sys/System/Library/CoreServices/SystemVersion.plist" | tr -d '\t\n'; echo
 cleanup; trap - EXIT
 t0=$(date +%s)
 $V "rm -f /var/tmp/apfs.img /var/tmp/apfs.cow"
 tar -C "$W" -cSf - mac.img | $V "rm -f /var/tmp/mac.img; tar -C /var/tmp -xSf -; ls -ls /var/tmp/mac.img; df -h /var/tmp | tail -1"
+$V -put "$W/mac.conf" /var/tmp/mac.conf
 $V -put "$W/trustcache.bin" /var/tmp/trustcache-mac.bin; $V "sudo mv /var/tmp/trustcache-mac.bin /lib/firmware/xnu/trustcache-mac.bin; ls -la /lib/firmware/xnu/trustcache-mac.bin"
 echo "sent in $(( $(date +%s) - t0 ))s"
