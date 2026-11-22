@@ -19,7 +19,7 @@ build-time renderers (`ictool`/Icon Composer, `actool`, CoreImage).
     scripts/build-m2v.sh && scripts/build-m2v-arm64e.sh
     scripts/build-vkloader-arm64e.sh
     scripts/build-bundle-universal.sh                               # -> dist/XnuCpuMetal.bundle
-Install: `scripts/vm-gpu-prep.sh` (repo root) puts the bundle on the system disk; the hosted kernel needs the boot-arg `lp-sip0=2`.
+Install: `scripts/mk-macvm-disk.sh` (repo root) puts the bundle on the system disk; the hosted kernel needs the boot-arg `lp-sip0=2`.
 
 ## Hosted-system findings (what Metal requires of a plugin, beyond the host tests)
 - The accelerator service must not carry `Removable` / `SafeEjectRequested` at all (Metal skips a service on which either exists).
