@@ -52,6 +52,8 @@ The host is an arm64 Linux VM with PAC on an Apple Silicon Mac (`scripts/krun-vm
 6. `scripts/install-service.sh` (in the VM, once) runs it as a service: `xnulinux.service` starts it at boot, stops it
    cleanly (the disk synced) when the VM shuts down and starts it again after a panic; settings in `/etc/xnulinux.conf`
    (CPUs, memory, disk, GPU, xnu.ko parameters), each run's kernel log in `/var/log/xnulinux/`.
+   On the Mac, `scripts/install-krun-agent.sh` keeps the VM itself running (launchd: started again after the guest
+   reboots or powers off, and at login); `scripts/install-krun-agent.sh remove` shuts the guest down and removes it.
 
 Debugging: the VM console is captured on the host (`scripts/serial-pty.py`), a monitor thread on another CPU prints XNU's
 counters every 2 s, and XNU dumps its threads with their saved frames after 20000 idle rounds.
