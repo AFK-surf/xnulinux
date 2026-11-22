@@ -7,6 +7,7 @@
  * re-exported.
  */
 #include "fki.h"
+#include "fki_internal.h"
 #include <linux/firmware.h>
 #include <linux/gfp.h>
 #include <linux/irqflags.h>
@@ -492,6 +493,11 @@ static void fki_linux_runs(void (*fn)(void *), void *arg)
 	write_sysreg(daif, daif);
 }
 
+void fki_linux_runs_ext(void (*fn)(void *), void *arg)
+{
+	fki_linux_runs(fn, arg);
+}
+
 static void fki_linux_runs_body(void (*fn)(void *), void *arg)
 {
 	unsigned long sp = current_stack_pointer;
@@ -689,6 +695,9 @@ static int __init fki_init(void)
 	int err;
 
 	skb_queue_head_init(&fki_net_rxq);
+	err = fki_hostcall_init();
+	if (err)
+		pr_warn("fki: no /dev/xnu-hostcall (%d)\n", err);
 	dev = alloc_etherdev(0);
 	if (!dev)
 		return 0;	/* no link; the rest of fki still works */
@@ -709,6 +718,7 @@ static int __init fki_init(void)
 
 static void __exit fki_exit(void)
 {
+	fki_hostcall_exit();
 	if (fki_netdev) {
 		unregister_netdev(fki_netdev);
 		free_netdev(fki_netdev);
