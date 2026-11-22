@@ -508,7 +508,7 @@ index 84deb3f..767b8f8 100644
  
  .macro BRANCH_EXTERN
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..956867d 100644
+index d10d7a1..5124822 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -32,6 +32,7 @@
@@ -539,7 +539,7 @@ index d10d7a1..956867d 100644
  	if (unmask) {
  		/* Latch SW IRQ+FIQ counter prior to unmasking
  		 * interrupts.
-@@ -494,6 +501,35 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
+@@ -494,6 +501,39 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
  	return ipending || (nirqc != irqc);
  }
  
@@ -553,10 +553,14 @@ index d10d7a1..956867d 100644
 +{
 +	uint64_t now = mach_absolute_time();
 +	uint64_t deadline = cpu_data_ptr->rtcPop;
++	uint64_t ns = 0;	/* a timer already due: no sleep, only let Linux take its interrupts */
 +
 +	linux64_count(LINUX64_CTR_CPU_IDLE);
-+	if (deadline == 0 || deadline == EndOfAllTime || deadline < now) {
-+		deadline = now + 24000;	/* about 1 ms: check the run queue again */
++	if (deadline == 0 || deadline == EndOfAllTime) {
++		ns = NSEC_PER_MSEC;	/* no timer armed: check the run queue again in 1 ms */
++	} else if (deadline > now) {
++		/* relative: XNU's timebase (mach_absolute_time) is offset from the host's counter */
++		absolutetime_to_nanoseconds(deadline - now, &ns);
 +	}
 +#if LINUX64_DEBUG
 +	if (++linux64_dbg[LINUX64_CTR_HOST_IDLE] % 150000 == 0) {	/* every two to three minutes of idle */
@@ -565,7 +569,7 @@ index d10d7a1..956867d 100644
 +#else
 +	linux64_count(LINUX64_CTR_HOST_IDLE);
 +#endif
-+	linux64_call2(LINUX64_CALL_IDLE, (unsigned long)deadline, 0);
++	linux64_call2(LINUX64_CALL_IDLE, ns, 0);
 +	cpu_data_ptr->cpu_decrementer = -1;
 +	rtclock_intr(FALSE);
 +	ClearIdlePop(TRUE);
@@ -575,7 +579,7 @@ index d10d7a1..956867d 100644
  /*
   *	Routine:	cpu_idle
   *	Function:
-@@ -506,6 +542,9 @@ cpu_idle(void)
+@@ -506,6 +546,9 @@ cpu_idle(void)
  	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
  	bool idle_disallowed = false;
  

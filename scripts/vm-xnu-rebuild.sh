@@ -6,16 +6,22 @@ set -e -o pipefail	# a failed kernel build stops here: never repackage the previ
 cd ~/w/dvm
 export PATH=$PATH:/usr/lib/llvm-21/bin
 T=out/k27/xnu
-# back to the tree's own sources: every file the patches touched last time (.linux64-patched) or touch now
+# back to the tree's own sources: every file the patches touched last time (.linux64-patched) or touch now, then the
+# patches again. A file that comes out as it was keeps its old time, so the build recompiles only what changed (assert.h
+# and cpu_data.h are included everywhere: touching them rebuilds the whole kernel)
 P=~/w/poc/xnu-patches
-for f in $(cat $T/.linux64-patched 2>/dev/null; grep -h '^+++ b/' $P/*.patch | sed 's|^+++ b/||'); do
-  git -C $T checkout -q -- $f 2>/dev/null || rm -f $T/$f
-done
+FILES=$(cat $T/.linux64-patched 2>/dev/null; grep -h '^+++ b/' $P/*.patch | sed 's|^+++ b/||')
+SNAP=$(mktemp -d)
+for f in $FILES; do [ -e $T/$f ] && mkdir -p $SNAP/$(dirname $f) && cp -p $T/$f $SNAP/$f; done
+for f in $FILES; do git -C $T checkout -q -- $f 2>/dev/null || rm -f $T/$f; done
 for p in $P/*.patch; do git -C $T apply $p; echo "applied $(basename $p)"; done
+for f in $FILES; do [ -e $SNAP/$f ] && cmp -s $SNAP/$f $T/$f && touch -r $SNAP/$f $T/$f; done
+rm -rf $SNAP
 grep -h '^+++ b/' $P/*.patch | sed 's|^+++ b/||' > $T/.linux64-patched
 # the machine layer's headers (shared with xnu.ko), where every component's sources find them
-mkdir -p $T/EXTERNAL_HEADERS/linux64 && cp $P/include/*.h $T/EXTERNAL_HEADERS/linux64/
-JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -15
+mkdir -p $T/EXTERNAL_HEADERS/linux64
+for h in $P/include/*.h; do cmp -s $h $T/EXTERNAL_HEADERS/linux64/$(basename $h) || cp $h $T/EXTERNAL_HEADERS/linux64/; done
+t=$SECONDS; JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -15; echo "kernel: $((SECONDS - t)) s"
 if [ -e out/kc/kc27.bin ]; then
   # the hosted system's extra Apple kexts (in kc27, not kept by default): IOSurface for actool, CoreImage and friends
   for id in $(grep -v '^#' ~/w/poc/xnu-patches/kc-keep-extra.txt); do grep -qx "$id" configs/kc-keep.txt || echo "$id" >> configs/kc-keep.txt; done
@@ -47,7 +53,7 @@ if [ -e out/kc/kc27.bin ]; then
     python3 scripts/build-native-kext.py $n $(dirname $j)/$n.cpp -I $NETINC --obj ${KEXT_OBJ:-k27-obj} || { echo "kext $n failed to build: left out"; continue; }
     NATIVE="$NATIVE $j"
   done
-  K27_NO_BOOT=1 NATIVE="$NATIVE" bash k27/try.sh 0 2>&1 | tail -3
+  t=$SECONDS; K27_NO_BOOT=1 NATIVE="$NATIVE" bash k27/try.sh 0 2>&1 | tail -3; echo "collection: $((SECONDS - t)) s"
   grep -iE 'error|unresolved|XnuCpuMetal' out/k27/kc-build.log | tail -8 || true
   # AMFI of the collection's macOS expects the code-signature platform version of that build; the system disk's binaries
   # carry their own (macOS 27.0.1: 26 where 27.2's AMFI expects 27)

@@ -2,7 +2,7 @@
 # In the VM: boot the hosted macOS. Builds fki.ko and xnu.ko against the running kernel (stops on a compile error, never
 # boots stale modules), brings up the hosted system's network (xnu0) and GPU bridge (xnudrmd, when there is a render node),
 # and loads xnu.ko on the disk mk-macvm-disk.sh made. Returns once XNU is running; xnu.ko stays loaded until the hosted
-# system halts (or `sudo rmmod xnu`).
+# system halts or `xnulinux-boot.sh stop` ends it.
 #
 # Configuration: /var/tmp/mac.conf (written by mk-macvm-disk.sh: ROOT_UUID, BOOT_UUID), then the environment:
 #   DISK (/var/tmp/mac.img)  RAM_MB (7900)  BOOTARGS  CONSOLE_IN (/var/tmp/console-in)  INPUT_IN (/var/tmp/xnu-input)
@@ -10,6 +10,14 @@
 #   IMAGE (xnu/kc.bin: the kernel collection under /lib/firmware)  GPU (auto|off)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced first) and remove xnu.ko
+  lsmod | grep -q '^xnu ' || { echo "no hosted system is running"; exit 0; }
+  printf 'sync\n' >> "${CONSOLE_IN:-/var/tmp/console-in}"; sleep 3
+  echo 1 | sudo tee /sys/module/xnu/parameters/stop_run >/dev/null
+  for _ in $(seq 1 50); do pgrep -x insmod >/dev/null || break; sleep 0.2; done
+  sudo rmmod xnu && echo "hosted system stopped"
+  exit
+fi
 [ -f /var/tmp/mac.conf ] && . /var/tmp/mac.conf
 DISK=${DISK:-/var/tmp/mac.img}; RAM_MB=${RAM_MB:-7900}; GPU=${GPU:-auto}
 CONSOLE_IN=${CONSOLE_IN:-/var/tmp/console-in}; INPUT_IN=${INPUT_IN:-/var/tmp/xnu-input}; FB_DUMP=${FB_DUMP:-/var/tmp/xnu-fb.raw}
