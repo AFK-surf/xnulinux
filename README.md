@@ -10,6 +10,17 @@ memory, timers, files, network and GPU through a small interface module (`fki.ko
 With a stock Ubuntu kernel, `insmod xnu.ko` boots a macOS 27 system disk made by Apple's own installer to the
 desktop: loginwindow, WindowServer, Dock, Finder, Safari and Chrome.
 
+![macOS and Linux userspace side by side](docs/images/macos-and-linux.jpg)
+
+*One system, two userspaces. Left: a Terminal in the hosted macOS 27.2.1 (`sw_vers`, the Darwin kernel, launchd,
+WindowServer, Dock and Finder running). Right: from that macOS, an SSH session into the Linux it runs inside (Ubuntu,
+Linux 7.0, the `xnu` and `fki` modules loaded, and the `insmod xnu.ko` process the macOS kernel runs in).
+Straight from the hosted framebuffer, 1280×800.*
+
+![The hosted macOS desktop](docs/images/desktop.jpg)
+
+*The hosted desktop at the end of a 30-minute stress run, rendered on the CPU (no GPU bridge).*
+
 ## How it works
 
 ```
