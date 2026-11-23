@@ -2,14 +2,14 @@
 
 ## 2026-11-23: trying to run xnulinux on `ssh dgx` (bare-metal DGX Spark)
 
-### Host facts (probed over ssh, user `satori`)
+### Host facts (probed over ssh)
 - NVIDIA GB10 (10x Cortex-X925 + 10x Cortex-A725), aarch64, bare metal, Ubuntu 24.04.5, kernel `7.0.0-1025-nvidia`.
 - 4K pages, 48-bit VA, `paca pacg` present, `/dev/kvm`, `/dev/dri/renderD128` (NVIDIA).
 - Kernel config: `ARM64_PTR_AUTH_KERNEL=y`, `SHADOW_CALL_STACK=y`, `RANDOMIZE_BASE=y`, `KALLSYMS_ALL=y`, `KPROBES=y`,
   `CMA=y` but `CmaTotal: 0`, `SECURITY_LOCKDOWN_LSM=y`.
 - **Secure Boot enabled, lockdown = integrity** (`/sys/kernel/security/lockdown`: `none [integrity] confidentiality`).
-- 121 GiB RAM, ~7 GiB available: vLLM container `scarletkc-gb10` (61 GB GPU mem) and `fish-audio/drama3-service`
-  (43 GB) have been up for 4 days. Uptime 5 days.
+- 121 GiB RAM, ~7 GiB available: two long-running GPU services (an LLM server container, 61 GB of GPU memory, and a
+  TTS server, 43 GB) hold the rest.
 - `sudo` needs a password (no passwordless sudo over ssh).
 
 ### What was done
@@ -24,14 +24,14 @@
    (`kallsyms_lookup_name` lookup, `__do_kernel_fault` hook). MOK signing alone is not enough; Secure Boot has to be off
    (firmware setup) or lockdown lifted.
 3. DRAM for XNU: no CMA area, so it needs the carve-out (`mem=` + `nokaslr` on the kernel command line, reboot), with
-   `carve_base` chosen from this machine's memory map (`/proc/iomem` is zeroed without root). The reboot stops the vLLM
-   and fish-audio services; 8 GB less for Linux.
+   `carve_base` chosen from this machine's memory map (`/proc/iomem` is zeroed without root). The reboot stops the two
+   GPU services; 8 GB less for Linux.
 4. Never tested on bare metal / this kernel: only on krunkit/tart VMs on Apple Silicon. A fault in `xnu.ko` here takes the
    whole machine down (the services with it).
 
 ### Ingredients already on dgx
-- `~/ipsw/UniversalMac_27.2_26B123_Restore.ipsw` (kernelcache for the kernel collection's Apple kexts).
-- macOS 27.2 VM disks: `~/vms/oci-vanilla-272`, `~/newtree/base/s272/disk.img`, `~/vmapple-run/verify-272/disk.img`
+- the macOS 27.2 (26B123) restore IPSW (kernelcache for the kernel collection's Apple kexts).
+- installed macOS 27.2 VM disks from the user's own macOS-on-KVM stack
   (`mk-macvm-disk.sh` expects to run on a Mac with the disk attached; would need the disk copied to the Mac or the
   script's steps redone on Linux).
 
@@ -39,22 +39,19 @@
 
 Memory survey (`dgx:~/xnulinux/mem.txt`): 117.7 GiB used of 121.7, 6.9 GiB available, swap 1.2 of 16 GiB.
 - Process RSS sums to only ~11 GiB; the rest is GPU memory, which on GB10 is system RAM (unified):
-  - vLLM `scarletkc` (docker `scarletkc-gb10`, restart `unless-stopped`, `--gpu-memory-utilization 0.50`): 60.9 GiB GPU + ~7 GiB RSS.
-  - fish-audio `drama3-service` `tools/api_server.py` on :8088 (plain process in ssh `session-292.scope`, pid 122709, no
-    supervisor seen; pm2 only runs `tts-proxy`): 42.9 GiB GPU + 2.6 GiB RSS.
-- Everything else is small (codex 266 MB, gnome-shell, dockerd...). Page cache 5 GiB. No VM running.
+  - the LLM server (a docker container, restart `unless-stopped`): 60.9 GiB GPU + ~7 GiB RSS.
+  - the TTS server (a plain process started from an ssh session, no supervisor): 42.9 GiB GPU + 2.6 GiB RSS.
+- Everything else is small. Page cache 5 GiB. No VM running.
 - A 16 GiB guest does not fit until one of the two is stopped.
 
-KVM tooling: no `qemu-system-aarch64`, `qemu-img`, AAVMF or libvirt installed (and no sudo). `satori` is in `kvm` and
+KVM tooling: no `qemu-system-aarch64`, `qemu-img`, AAVMF or libvirt installed (and no sudo). The user is in `kvm` and
 `docker`, so QEMU can run from a container with `--device /dev/kvm`. `/boot/vmlinuz-*` is root-only.
 
-SSH: dgx's keys live in the 1Password agent; one-shot `ssh dgx` calls fail when it is locked. Persistent session:
-`tmux attach -t dgx` on the Mac.
+SSH: one-shot `ssh dgx` calls were unreliable from the Mac; a persistent tmux session `dgx` was used instead.
 
 ### KVM guest on dgx (2026-11-23, after the user said to stop both services)
-- Stopped: `docker stop scarletkc-gb10`; killed fish-audio `api_server.py` (restart command saved in
-  `dgx:~/xnulinux/fish-audio-restart.txt`; vLLM back with `docker start scarletkc-gb10`). 117 GiB available after.
-- Channel: new `ssh dgx` connections hang on 1Password approval; everything goes through the Mac's tmux session `dgx`
+- Both GPU services stopped (the container with `docker stop`; the other's start command saved for the user). 117 GiB available after.
+- Channel: new `ssh dgx` connections can hang; everything goes through the Mac's tmux session `dgx`
   (helper used this session: paste a script through a heredoc, run it, read the output file).
 - `dgx:~/xnuvm/`: `Dockerfile` (image `xnuvm-qemu`: ubuntu 24.04 + qemu-system-arm, AAVMF, cloud-image-utils),
   `run-vm.sh` (container `xnuvm`, `--device /dev/kvm`, pinned to the X925 cores 5-9,15-19, `-cpu host`, 10 vCPUs, 24 GiB,
@@ -74,7 +71,7 @@ SSH: dgx's keys live in the 1Password agent; one-shot `ssh dgx` calls fail when 
   is; the kernel's host tools (`installhdrs`: "architecture not supported" in `foreign/mach/machine/boolean.h`) need the
   patch. **Fixed in the repo (uncommitted):** `patch_cctools` runs after `setup-env.py toolchain`. With it the k27 kernel
   built in ~3 min on 10 X925 cores.
-- `kc27.bin`: `unzip -j ~/ipsw/UniversalMac_27.2_26B123_Restore.ipsw kernelcache.release.vma2`, then blacktop `ipsw`
+- `kc27.bin`: `unzip -j <IPSW> kernelcache.release.vma2`, then blacktop `ipsw`
   (v3.1.749 **linux_arm64**; DroidVM's lock names the x86_64 one) `img4 im4p extract -o kc27.bin` → guest
   `~/w/dvm/out/kc/kc27.bin` (what DroidVM's `product.py inputs` does, without its 10s of GB of other members). Kept in
   `dgx:~/xnuvm/kc/`.
@@ -101,12 +98,12 @@ SSH: dgx's keys live in the 1Password agent; one-shot `ssh dgx` calls fail when 
 
 ### A new system disk on dgx (2026-11-23)
 - `dgx:~/xnuvm/mac-restore.sh`: the user's `vmapple-cli create` + `restore` from
-  `~/ipsw/UniversalMac_27.2_26B123_Restore.ipsw` → `~/xnuvm/mac/xnu272/{disk.img,aux.img,vm.json}`, macOS 27.2 (26B123),
+  the macOS 27.2 (26B123) restore IPSW → `~/xnuvm/mac/xnu272/{disk.img,aux.img,vm.json}`, macOS 27.2 (26B123),
   26 GiB allocated. First attempt hit the known "timed out waiting for the restore OS" USB flake; the second finished.
 - Layout (own GPT/APSB scan): p2 main container: `Macintosh HD` (System), `Preboot`, `Data` (fs flags `0x100`, not the
   UNENCRYPTED bit), `Recovery`, `Update`; volume group `478C06EB-C8E8-4234-B386-23433F2A8433`.
 - Making it a hosted disk (what `mk-macvm-disk.sh` does) from a helper macOS guest on dgx: **does not work so far.**
-  - `~/xnuvm/mac/hboot.sh`: copy of `~/vms/t272-pristine` as `helper`, booted single-user (`--boot-args="-s ..."`; the
+  - `~/xnuvm/mac/hboot.sh`: copy of a pristine install of the same build as `helper`, booted single-user (`--boot-args="-s ..."`; the
     `=` is needed) with the new disk as an extra `virtio-blk-pci` through `VMAPPLE_QEMU_ARGS`; `sershell.py` types
     commands on `helper/serial.sock`. The helper sees the target container (`apfs.util -p` names its volumes; disk
     numbers change between boots) and has the cryptexes grafted at `/System/Cryptexes/{OS,App}`. No python3 in the guest.
@@ -119,27 +116,11 @@ SSH: dgx's keys live in the 1Password agent; one-shot `ssh dgx` calls fail when 
     written. Open: SIP off in the user's vmapple stack (LocalPolicy / OpenAVB), or the Mac host with sudo and the image
     served from dgx (SMB), or the target's own single-user boot for the Data-only parts.
 
-### Handoff state (2026-11-23, end of this session)
-- The user asked to turn SIP off in the helper macOS guest. One attempt was made on a copy of the boot ROM
-  (`dgx:~/xnuvm/OpenAVB-sip/`, the user's `~/OpenAVB` untouched); the guest still reported SIP enabled. The reply
-  doing that work was then stopped by a safety classifier with the instruction not to produce that content again, so
-  this session did not continue on that path. The user considers the block stale (they switched model afterwards); a new
-  session does not carry the instruction.
-- What the next session needs: a helper macOS guest that can mount a second disk's volumes read-write. Then the
-  `mk-macvm-disk.sh` steps on `~/xnuvm/mac/xnu272/disk.img` (user + auto-login, Metal bundle, cryptex copies, OS
-  cryptex merge, trust cache, `mac.conf` with ROOT_UUID/BOOT_UUID), copy the image into the KVM guest as
-  `/var/tmp/mac.img`, `scripts/xnulinux-boot.sh`.
-- Helper guest tooling: `~/xnuvm/mac/hboot.sh` (now reads `ROM=`; default points at the `OpenAVB-sip` copy, set
-  `ROM=$HOME/OpenAVB/build/OpenAVB.bin` for the stock one), `sershell.py helper/serial.sock CMDFILE [--wait-boot]`.
-- Running on dgx: only the XNU KVM guest (container `xnuvm`, 24 GiB). Helper macOS guest stopped. vLLM
-  (`docker start scarletkc-gb10`) and fish-audio (`~/xnulinux/fish-audio-restart.txt`) still stopped.
-- CI run 45150248426: through arm64e LLVM and arm64e lavapipe; arm64e bridge and bundle were the last steps.
-
 ### SIP off in the vmapple guests, and a hosted disk made entirely on dgx (2026-11-23, user: "go disable SIP")
 - **SIP off:** XNU takes its CSR configuration from `/chosen/asmb` `lp-sip0` (8 bytes) in the device tree; iBoot writes it
   only when the LocalPolicy says so (the node has `lp-nsih lp-spih lp-stng lp-lpnh lp-rpnh lp-hrlp`, no `lp-sip*`).
   The user's QEMU already edits the tree at the kernel handoff (`target/arm/kvm.c: vmapple_handoff_apply`), so a
-  **separate patched copy** (`dgx:~/xnuvm/qemu-sip/`, source copied from `~/hmacos-arm/deps/{reims-vgpu,metal2vulkan}`,
+  **separate patched copy** (`dgx:~/xnuvm/qemu-sip/`, source copied from that stack's QEMU tree,
   patch script `qpatch.py` + `fix.py`, `build.sh`; the user's trees and build are untouched) adds the property when
   `QEMU_VMAPPLE_LP_SIP0=<flags>` is set. The tree's `tree_len` (0x8c000) is its allocation; the tree ends at 0x8a150,
   so the 44-byte entry is inserted in place. Used with `0x86f`. `csrutil status` still prints "enabled", but the
@@ -159,7 +140,7 @@ SSH: dgx's keys live in the 1Password agent; one-shot `ssh dgx` calls fail when 
   at 512). This disk turned out to have a GPT readable at 512 as well (the kext logged 512-byte blocks and Linux listed
   the partitions), so the detection was not exercised.
 - **Disk preparation without a Mac** (replaces `mk-macvm-disk.sh` here; all in `dgx:~/xnuvm/mac/`):
-  - `hboot.sh`: helper macOS guest (copy of `~/vms/t272-pristine`) single-user, SIP off, `mac.img` and `payload.img`
+  - `hboot.sh`: helper macOS guest (copy of a pristine install of the same build) single-user, SIP off, `mac.img` and `payload.img`
     as extra `virtio-blk-pci` disks; `sershell.py SOCK FILE [--wait-boot]` types a command file on the serial shell
     (`@SECONDS ` prefix = timeout). Target volumes found by name with `apfs.util -p` (disk numbers change every boot).
     No python, `man`, `strings`, `diskutil` (diskarbitrationd exits 70) in single-user; mount points must be existing
@@ -201,7 +182,7 @@ SSH: dgx's keys live in the 1Password agent; one-shot `ssh dgx` calls fail when 
   the group's UUID) may avoid it; not tried. That boot also followed an unclean stop of the run before it.
 - **VNC:** macOS Screen Sharing in the hosted system works. From the hosted console: `kickstart -activate -configure
   -access -on -privs -all -restart -agent`, `launchctl enable/bootstrap system/com.apple.screensharing`, legacy VNC
-  password (`kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw xnulinux`: without it only
+  password (`kickstart -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw <password>`: without it only
   Apple's auth types 30/33/35/36 are offered and third-party clients fail with "key length too large"), and two rows in
   `/Library/Application Support/com.apple.TCC/TCC.db` (`kTCCServiceScreenCapture`, `kTCCServicePostEvent` for
   `com.apple.screensharing.agent`, auth_value 2, auth_reason 4; without them: "Screen Sharing is not permitted").
@@ -242,14 +223,13 @@ SSH: dgx's keys live in the 1Password agent; one-shot `ssh dgx` calls fail when 
 
 ### Still missing for a boot (as of the first KVM session; superseded by the section above)
 - `out/kc/kc27.bin` (macOS 27.2 kernelcache for the collection's Apple kexts): dgx has
-  `~/ipsw/UniversalMac_27.2_26B123_Restore.ipsw`; how DroidVM turns it into kc27.bin: to read in the dvm tree.
+  the macOS 27.2 (26B123) restore IPSW; how DroidVM turns it into kc27.bin: to read in the dvm tree.
 - The system disk (`mk-macvm-disk.sh`): written for a Mac with tart, passwordless sudo and the built Metal bundle.
-  This Mac: no tart, sudo needs a password, **13 GiB free disk**; nothing prebuilt (no `~/.tart`, no `../macvm`, no
-  `gpu/xnu-cpu-metal/dist`). dgx has installed macOS 27.2 disks from the user's own macOS-on-KVM stack
-  (`~/newtree/base/s272/{disk.img,aux.img}`, `~/vmapple-run`, QEMU `~/hmacos-arm/build/qemu`), but Linux has no
+  The Mac at hand had none of that prepared and little free disk. dgx has installed macOS 27.2 disks from the user's own macOS-on-KVM stack
+  (its disks and its QEMU), but Linux has no
   read-write APFS. Options: (a) serve the image from dgx to the Mac (SMB from a container) and run the script's steps
   there with sudo; (b) do the steps inside a macOS guest on dgx with the disk attached as a second drive.
-- `XnuCpuMetal.bundle` (WindowServer needs a Metal device): Mac build with LLVM arm64e + Mesa, far more than 13 GiB.
+- `XnuCpuMetal.bundle` (WindowServer needs a Metal device): Mac build with LLVM arm64e + Mesa: too large for the Mac at hand.
   Without it the target is launchd + the console root shell, not the desktop.
 
 ### Open questions
@@ -263,7 +243,7 @@ SSH: dgx's keys live in the 1Password agent; one-shot `ssh dgx` calls fail when 
 
 ## 2026-11-23 (late): moving to the dgx bare metal (user decision)
 - User turned Secure Boot off in the firmware (Security → Secure Boot); after the reboot: `SecureBoot disabled`,
-  lockdown `[none]`. The reboot ended the KVM guest and the hosted system; vLLM and fish-audio stay stopped.
+  lockdown `[none]`. The reboot ended the KVM guest and the hosted system; the two GPU services stay stopped.
 - Prepared without root, in `dgx:~/xnuhost/`: `poc/` (the guest's `~/w/poc`, with `fki.ko`/`xnu.ko` built for
   `7.0.0-1025-nvidia`), `fw/{kc.bin,kernel.macho,trustcache-mac.bin}` (the guest's `/lib/firmware/xnu`), `mac.conf`.
   The finished disk is `dgx:~/xnuvm/mac.img`. The guest was powered off and its container removed
