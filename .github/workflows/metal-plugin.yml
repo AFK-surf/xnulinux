@@ -28,6 +28,9 @@ jobs:
           export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
           brew install meson ninja cmake pkgconf bison flex glslang zstd
           brew install llvm@22 || brew install llvm
+          # glslang brings SPIRV-Tools: Mesa must not find it, or lavapipe links Homebrew's dylib (arm64) and is left with
+          # undefined spv* symbols (arm64e), and the bundle does not load in the hosted system
+          brew unlink spirv-tools
           # the scripts name Homebrew's LLVM as llvm@22 (llvm-config for the arm64 lavapipe, llvm-objcopy)
           [ -e /opt/homebrew/opt/llvm@22 ] || ln -s "$(brew --prefix llvm)" /opt/homebrew/opt/llvm@22
           /opt/homebrew/opt/llvm@22/bin/llvm-config --version
@@ -72,6 +75,13 @@ jobs:
       - name: Bundle
         run: |
           scripts/build-bundle-universal.sh
+          # self-contained: system libraries only, no symbol left for a library that is not in the bundle
+          for f in dist/XnuCpuMetal.bundle/Contents/Frameworks/*.dylib dist/XnuCpuMetal.bundle/Contents/MacOS/XnuCpuMetal; do
+            for a in arm64 arm64e; do
+              if otool -arch $a -L "$f" | tail -n +2 | grep -v -E '^\s*(/usr/lib/|/System/Library/|@rpath/)' | grep -v "$(basename "$f")"; then echo "$f ($a): a dependency outside the system"; exit 1; fi
+              if nm -arch $a -u "$f" | grep -E '^_spv'; then echo "$f ($a): undefined SPIRV-Tools symbols"; exit 1; fi
+            done
+          done
           tar -C dist -czf "$RUNNER_TEMP/XnuCpuMetal.bundle.tar.gz" XnuCpuMetal.bundle
           shasum -a 256 "$RUNNER_TEMP/XnuCpuMetal.bundle.tar.gz"
       - uses: actions/upload-artifact@v4
