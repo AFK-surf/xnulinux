@@ -210,11 +210,38 @@ static NSData *xcmCodeGenRequest(uint32_t type, const std::vector<uint8_t> &requ
 /* ======================== Buffer ======================== */
 
 static std::atomic<uint64_t> gNoCopyAliased{0};
+static std::atomic<uint64_t> gNoCopyFallbackNoDeallocator{0};
 static std::atomic<uint64_t> gNoCopyFallbackUnaligned{0};
 static std::atomic<uint64_t> gNoCopyFallbackReadOnly{0};
 static std::atomic<uint64_t> gNoCopyFallbackRemapErr{0};
 static std::atomic<uint64_t> gNoCopyCommitSyncCopies{0};
 static std::atomic<uint64_t> gNoCopyCommitSyncBytes{0};
+static std::atomic<uint64_t> gNoCopyMaxAliasedLen{0};
+static std::atomic<uint64_t> gNoCopyMaxNoDeallocLen{0};
+static std::atomic<uint64_t> gNoCopyLastLogNs{0};
+
+static void xcmAtomicMax(std::atomic<uint64_t> &slot, uint64_t val) {
+    uint64_t cur = slot.load(std::memory_order_relaxed);
+    while (val > cur && !slot.compare_exchange_weak(cur, val, std::memory_order_relaxed)) {}
+}
+
+static void xcmMaybeLogNoCopyStats(void) {
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    uint64_t prev = gNoCopyLastLogNs.load(std::memory_order_relaxed);
+    if (prev != 0 && now - prev < 15ULL * 1000000000ULL) return;
+    if (!gNoCopyLastLogNs.compare_exchange_strong(prev, now, std::memory_order_relaxed)) return;
+    os_log_info(OS_LOG_DEFAULT,
+                "XnuCpuMetal: NoCopy stats aliased=%llu(max=%llu) noDealloc=%llu(max=%llu) ro=%llu unal=%llu remapErr=%llu commitSyncCopies=%llu commitSyncBytes=%llu",
+                (unsigned long long)gNoCopyAliased.load(std::memory_order_relaxed),
+                (unsigned long long)gNoCopyMaxAliasedLen.load(std::memory_order_relaxed),
+                (unsigned long long)gNoCopyFallbackNoDeallocator.load(std::memory_order_relaxed),
+                (unsigned long long)gNoCopyMaxNoDeallocLen.load(std::memory_order_relaxed),
+                (unsigned long long)gNoCopyFallbackReadOnly.load(std::memory_order_relaxed),
+                (unsigned long long)gNoCopyFallbackUnaligned.load(std::memory_order_relaxed),
+                (unsigned long long)gNoCopyFallbackRemapErr.load(std::memory_order_relaxed),
+                (unsigned long long)gNoCopyCommitSyncCopies.load(std::memory_order_relaxed),
+                (unsigned long long)gNoCopyCommitSyncBytes.load(std::memory_order_relaxed));
+}
 
 static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
     if (!ptr || len == 0) return NO;
@@ -270,36 +297,16 @@ static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
     return self;
 }
 - (void)dealloc {
-    if (_fallbackAliased && _fallbackPtr && _fallbackLen) {
+    if (_fallbackAliased && _fallbackDeallocator && _fallbackPtr && _fallbackLen) {
         // Detach caller's VA from the GPU blob's physical pages BEFORE releasing _handle
         // (XnuDrm::doUnmap releases the Linux physical pages immediately on XNUDRM_UNMAP).
-        // Precondition (Metal NoCopy contract): the caller must keep `_fallbackPtr`
-        // mapped and owned until this MTLBuffer is deallocated (or deallocator runs).
-        // If a caller violates that contract by `munmap`-ing early and the VA is reused
-        // by an unrelated mapping before `dealloc`, `VM_FLAGS_OVERWRITE` would overwrite
-        // that reused mapping. Guarding with `mach_vm_read_overwrite` /
-        // `xcmRangeIsFullyWritable` only avoids faulting when the VA remains unmapped.
+        // Aliasing is only enabled when `_fallbackDeallocator != nil`, so the Metal NoCopy
+        // contract guarantees `_fallbackPtr` remains mapped and exclusively owned by this
+        // buffer until `_fallbackDeallocator` is invoked below.
         mach_vm_address_t addr = (mach_vm_address_t)_fallbackPtr;
-        if (_fallbackDeallocator) {
-            if (xcmRangeIsFullyWritable(_fallbackPtr, _fallbackLen)) {
-                mach_vm_allocate(mach_task_self(), &addr, (mach_vm_size_t)_fallbackLen,
-                                 VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
-            }
-        } else {
-            mach_vm_address_t tmp = 0;
-            mach_vm_size_t readSz = 0;
-            if (mach_vm_allocate(mach_task_self(), &tmp, (mach_vm_size_t)_fallbackLen,
-                                 VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
-                kern_return_t rkr = mach_vm_read_overwrite(
-                    mach_task_self(), addr, (mach_vm_size_t)_fallbackLen, tmp, &readSz);
-                if (rkr == KERN_SUCCESS && readSz == (mach_vm_size_t)_fallbackLen) {
-                    vm_prot_t curProt = 0, maxProt = 0;
-                    mach_vm_remap(mach_task_self(), &addr, (mach_vm_size_t)_fallbackLen, 0,
-                                  VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-                                  mach_task_self(), tmp, FALSE, &curProt, &maxProt, VM_INHERIT_NONE);
-                }
-                mach_vm_deallocate(mach_task_self(), tmp, (mach_vm_size_t)_fallbackLen);
-            }
+        if (xcmRangeIsFullyWritable(_fallbackPtr, _fallbackLen)) {
+            mach_vm_allocate(mach_task_self(), &addr, (mach_vm_size_t)_fallbackLen,
+                             VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
         }
         _fallbackAliased = NO;
     }
@@ -318,6 +325,7 @@ static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
         memcpy(dst, _fallbackPtr, _fallbackLen);
         gNoCopyCommitSyncCopies.fetch_add(1, std::memory_order_relaxed);
         gNoCopyCommitSyncBytes.fetch_add((uint64_t)_fallbackLen, std::memory_order_relaxed);
+        xcmMaybeLogNoCopyStats();
         if (self.storageMode == MTLStorageModeManaged) {
             xm2v_buffer_did_modify_range(_handle, 0, _fallbackLen);
         }
@@ -2453,11 +2461,14 @@ static void xcmBufferDeallocCallback(void *ptr, uint64_t length, void *ctx) {
 static NSDictionary *xcmDev_noCopyStats(id, SEL) {
     return @{
         @"aliased": @(gNoCopyAliased.load(std::memory_order_relaxed)),
+        @"fallbackNoDeallocator": @(gNoCopyFallbackNoDeallocator.load(std::memory_order_relaxed)),
         @"fallbackUnaligned": @(gNoCopyFallbackUnaligned.load(std::memory_order_relaxed)),
         @"fallbackReadOnly": @(gNoCopyFallbackReadOnly.load(std::memory_order_relaxed)),
         @"fallbackRemapErr": @(gNoCopyFallbackRemapErr.load(std::memory_order_relaxed)),
         @"commitSyncCopies": @(gNoCopyCommitSyncCopies.load(std::memory_order_relaxed)),
         @"commitSyncBytes": @(gNoCopyCommitSyncBytes.load(std::memory_order_relaxed)),
+        @"maxAliasedLen": @(gNoCopyMaxAliasedLen.load(std::memory_order_relaxed)),
+        @"maxNoDeallocLen": @(gNoCopyMaxNoDeallocLen.load(std::memory_order_relaxed)),
     };
 }
 static id xcmDev_newBufferNoCopy(id self, SEL, void *pointer, NSUInteger length, MTLResourceOptions opts, void (^deallocator)(void *, NSUInteger)) {
@@ -2488,13 +2499,24 @@ static id xcmDev_newBufferNoCopy(id self, SEL, void *pointer, NSUInteger length,
         buf->_fallbackLen = length;
         if (deallocator) buf->_fallbackDeallocator = [deallocator copy];
 
-        // True zero-copy physical-page aliasing: copy caller's initial bytes once (above),
-        // then remap the GPU blob's physical pages onto caller's VA (VM_FLAGS_OVERWRITE, copy=FALSE).
+        // True zero-copy physical-page aliasing: only when caller supplies a deallocator
+        // (transferring exclusive VA ownership until dealloc). With deallocator == nil,
+        // callers such as CoreAnimation can unmap `pointer` concurrently with async
+        // buffer release, which would cause VM_FLAGS_OVERWRITE in dealloc to hit
+        // EXC_GUARD / GUARD_TYPE_VIRT_MEMORY / DEALLOC_GAP or clobber a reused VA.
         void *gpuPtr = xm2v_buffer_contents(b);
         bool aligned = callerAligned &&
                        (gpuPtr != nullptr) &&
                        (((uintptr_t)gpuPtr & (pageSz - 1)) == 0);
-        if (!aligned) {
+        if (!deallocator) {
+            gNoCopyFallbackNoDeallocator.fetch_add(1, std::memory_order_relaxed);
+            xcmAtomicMax(gNoCopyMaxNoDeallocLen, (uint64_t)length);
+            if (aligned && !xcmRangeIsFullyWritable(pointer, length)) {
+                buf->_fallbackReadOnly = YES;
+                gNoCopyFallbackReadOnly.fetch_add(1, std::memory_order_relaxed);
+            }
+            xcmMaybeLogNoCopyStats();
+        } else if (!aligned) {
             uint64_t n = gNoCopyFallbackUnaligned.fetch_add(1, std::memory_order_relaxed) + 1;
             if (n <= 5 || (n % 256) == 0) {
                 os_log_info(OS_LOG_DEFAULT,
@@ -2526,12 +2548,14 @@ static id xcmDev_newBufferNoCopy(id self, SEL, void *pointer, NSUInteger length,
                 VM_INHERIT_NONE);
             if (kr == KERN_SUCCESS && target == (mach_vm_address_t)pointer && (curProt & VM_PROT_WRITE)) {
                 buf->_fallbackAliased = YES;
+                xcmAtomicMax(gNoCopyMaxAliasedLen, (uint64_t)length);
                 uint64_t n = gNoCopyAliased.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (n == 1) {
                     os_log_info(OS_LOG_DEFAULT,
                                 "XnuCpuMetal: newBufferWithBytesNoCopy using mach_vm_remap physical-page aliasing (page=%zu)",
                                 pageSz);
                 }
+                xcmMaybeLogNoCopyStats();
             } else {
                 uint64_t n = gNoCopyFallbackRemapErr.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (n <= 10 || (n % 256) == 0) {
