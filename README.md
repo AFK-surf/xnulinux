@@ -21,6 +21,14 @@ Straight from the hosted framebuffer, 1280×800.*
 
 *The hosted desktop at the end of a 30-minute stress run, rendered on the CPU (no GPU bridge).*
 
+| | |
+|---|---|
+| ![Safari on Wikipedia's XNU article](docs/images/safari-xnu.jpg) | ![Safari on kernel.org](docs/images/safari-kernel-org.jpg) |
+| ![Safari on GitHub](docs/images/safari-github.jpg) | |
+
+*Safari in the hosted macOS: Wikipedia's article on XNU, kernel.org and the Linux repository on GitHub, over the
+hosted system's network link through Linux, with the GPU bridge on (`GPU=auto`).*
+
 ## How it works
 
 ```
