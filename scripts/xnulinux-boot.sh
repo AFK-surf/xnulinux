@@ -104,6 +104,7 @@ if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
 fi
 # mode=3: the kernel collection; the run lasts until the hosted system halts.
 # insmod returns when the run ends: it runs detached, its output in /var/tmp/xnu-insmod.log.
+START=$(date +%s)	# the run's log (--wait) starts here, so a failure while xnu.ko loads is in it
 for try in 1 2 3 4 5 6 7 8 9; do
   sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
   sudo dmesg -C
@@ -130,7 +131,6 @@ echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB
 
 # --wait: until the run ends (insmod returns), then keep its kernel log and say how it ended: 0 a halt or a stop asked for,
 # 2 an XNU panic, 3 the run ended otherwise
-START=$(date +%s)
 collect() {	# the run's kernel log, kept; the status says how it ended
   local LOGDIR=/var/log/xnulinux LOG
   # insmod has returned but xnu.ko stays loaded after a run that ended by itself (a panic, a halt): unload it, or the

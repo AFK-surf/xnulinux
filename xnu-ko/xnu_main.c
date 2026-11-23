@@ -583,7 +583,14 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		return 0;
 	}
 	if (call == LINUX64_CALL_KERNEL_TABLES && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
-		const unsigned long long *tte = (const unsigned long long *)a1;
+		/*
+		 * XNU's L1 table (cpu_tte) is read through the bootstrap window, and installing XNU's entry for the window's
+		 * own slot replaces that window: XNU's tables need not map cpu_tte at this stage (L3 0 here), so the rest of
+		 * the table is read from a copy taken first, never through the slot being replaced (it faulted in Linux's
+		 * context, an oops, whenever the TLB no longer held the bootstrap entry).
+		 */
+		static unsigned long long tte[512];
+		x_memcpy(tte, (const void *)a1, sizeof(tte));
 		walk_log("xnu: XNU table walk for arm_init (text)", diag_va[0], tte);
 		walk_log("xnu: XNU table walk for the Mach-O header", diag_va[1], tte);
 		walk_log("xnu: XNU table walk for boot args", diag_va[2], tte);
