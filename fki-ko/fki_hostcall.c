@@ -5,8 +5,10 @@
  * /dev/xnu-hostcall, does the work with ordinary system calls and writes the reply back. fki only moves bytes: the
  * message format belongs to the two ends.
  *
- * One call at a time (the foreign kernel's single CPU is blocked in the call). The service also asks fki to translate
- * its own mappings into physical addresses (XNU_HOSTCALL_XLATE), so the foreign kernel can map the same pages.
+ * One call at a time. The calling foreign CPU is blocked in the call and deaf to the other foreign CPUs' interrupts, so
+ * a call with no service to answer it fails at once (-ENODEV), not after HC_TIMEOUT: the other CPUs would time out
+ * waiting on that one (an XNU panic). The service also asks fki to translate its own mappings into physical addresses
+ * (XNU_HOSTCALL_XLATE), so the foreign kernel can map the same pages.
  */
 #include "fki.h"
 #include "fki_internal.h"
@@ -39,6 +41,7 @@ static unsigned long hc_len;
 static u64 hc_seq;			/* the call in flight (0: none) */
 static int hc_state;			/* 0 idle, 1 request waiting, 2 read by the service, 3 replied */
 static long hc_result;
+static int hc_open;			/* the service's opens of /dev/xnu-hostcall (0: no service, calls fail at once) */
 
 struct hc_call { const void *req; unsigned long len; void *reply; unsigned long max; long result; };
 static DEFINE_MUTEX(hc_mutex);		/* one call at a time through the single slot (several CPUs may call) */
@@ -62,18 +65,26 @@ static void hc_call_body(void *p)
 	memcpy(hc_buf, c->req, c->len);		/* the foreign kernel's memory: read with interrupts off */
 	local_irq_enable(); preempt_enable();
 	spin_lock(&hc_lock);
+	if (!hc_open) {
+		spin_unlock(&hc_lock);
+		r = -ENODEV;
+		goto out;
+	}
 	hc_len = c->len;
 	hc_seq = ++seq;
 	hc_state = 1;
 	spin_unlock(&hc_lock);
 	wake_up_interruptible(&hc_req_wait);
-	if (!wait_event_timeout(hc_done_wait, READ_ONCE(hc_state) == 3, HC_TIMEOUT)) {
-		spin_lock(&hc_lock);
+	/* until the reply, or the service closing its device with the call unanswered */
+	wait_event_timeout(hc_done_wait, READ_ONCE(hc_state) == 3 || !READ_ONCE(hc_open), HC_TIMEOUT);
+	spin_lock(&hc_lock);
+	if (hc_state != 3) {
+		r = hc_open ? -ETIMEDOUT : -ENODEV;
 		hc_state = 0; hc_seq = 0;
 		spin_unlock(&hc_lock);
-		r = -ETIMEDOUT;
 		goto out;
 	}
+	spin_unlock(&hc_lock);
 	r = hc_result;
 	if (r >= 0) {
 		unsigned long n = min_t(unsigned long, hc_len, c->max);
@@ -208,8 +219,27 @@ static long hc_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	return -ENOTTY;
 }
 
+static int hc_dev_open(struct inode *i, struct file *f)
+{
+	spin_lock(&hc_lock);
+	hc_open++;
+	spin_unlock(&hc_lock);
+	return 0;
+}
+
+static int hc_dev_release(struct inode *i, struct file *f)
+{
+	spin_lock(&hc_lock);
+	hc_open--;
+	spin_unlock(&hc_lock);
+	wake_up(&hc_done_wait);		/* a call waiting on this service fails now */
+	return 0;
+}
+
 static const struct file_operations hc_fops = {
 	.owner = THIS_MODULE,
+	.open = hc_dev_open,
+	.release = hc_dev_release,
 	.read = hc_read,
 	.write = hc_write,
 	.unlocked_ioctl = hc_ioctl,
