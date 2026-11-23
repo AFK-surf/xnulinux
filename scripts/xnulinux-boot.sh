@@ -18,12 +18,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced first) and remove xnu.ko
-  lsmod | grep -q '^xnu ' || { echo "no hosted system is running"; exit 0; }
+  if ! lsmod | grep -q '^xnu '; then
+    sudo systemctl stop xnudrmd 2>/dev/null || true
+    echo "no hosted system is running"; exit 0
+  fi
   printf 'sync\n' >> "${CONSOLE_IN:-/var/tmp/console-in}"; sleep 3
   echo 1 | sudo tee /sys/module/xnu/parameters/stop_run >/dev/null
   # every XNU CPU sees the stop at its next host call; one in a long one (disk I/O while the VM shuts down) takes a while
   for _ in $(seq 1 600); do pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null || break; sleep 0.2; done
   if lsmod | grep -q '^xnu '; then sudo rmmod xnu; fi
+  sudo systemctl stop xnudrmd 2>/dev/null || true
   echo "hosted system stopped"
   exit
 fi
@@ -73,6 +77,31 @@ if [ "$NCPU" -gt "$CPUS" ]; then
   echo "$MASK" | sudo tee /proc/irq/default_smp_affinity >/dev/null 2>&1 || true
   for f in /proc/irq/*/smp_affinity; do echo "$MASK" | sudo tee "$f" >/dev/null 2>&1 || true; done
 fi
+# Start xnudrmd BEFORE insmod xnu.ko and wait until it has opened /dev/xnu-hostcall and is serving:
+# fast-booting guests (e.g. 16K pages) can open XnuDrm within ~4-5 s of insmod; restarting xnudrmd after
+# insmod kills live DRM/Venus clients out from under WindowServer. Never restart xnudrmd while XNU runs.
+sudo systemctl stop xnudrmd 2>/dev/null || true
+sudo systemctl reset-failed xnudrmd 2>/dev/null || true
+if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
+  make -s -C gpu/xnu-drm >/dev/null
+  sudo systemd-run -q --unit xnudrmd --collect "$PWD/gpu/xnu-drm/xnudrmd"
+  DRM_READY=0
+  DRM_INV=$(systemctl show -p InvocationID --value xnudrmd 2>/dev/null || true)
+  for _ in $(seq 1 100); do
+    if [ -n "$DRM_INV" ] && sudo journalctl _SYSTEMD_INVOCATION_ID="$DRM_INV" -q --no-pager 2>/dev/null | grep -q "xnudrmd: serving"; then
+      DRM_READY=1; break
+    fi
+    DRM_STATE=$(systemctl show -p ActiveState --value xnudrmd 2>/dev/null || true)
+    [ "$DRM_STATE" = active ] || [ "$DRM_STATE" = activating ] || break
+    sleep 0.1
+  done
+  if [ "$DRM_READY" = 1 ]; then
+    echo "gpu: xnudrmd ready on /dev/dri/renderD128 (journalctl -u xnudrmd)"
+  else
+    echo "gpu: xnudrmd did not become ready within 10 s (journalctl -u xnudrmd); continuing with GPU=off" >&2
+    sudo systemctl stop xnudrmd 2>/dev/null || true
+  fi
+fi
 # mode=3: the kernel collection; the run lasts until the hosted system halts.
 # insmod returns when the run ends: it runs detached, its output in /var/tmp/xnu-insmod.log.
 for try in 1 2 3 4 5 6 7 8 9; do
@@ -85,18 +114,17 @@ for try in 1 2 3 4 5 6 7 8 9; do
   sleep 5
   if sudo dmesg | grep -aqE "fki: carve-out .* (overlaps|is not all RAM)"; then	# a configuration error: no retry
     sudo dmesg | grep -aE "fki: carve-out .* (overlaps|is not all RAM)" >&2
+    sudo systemctl stop xnudrmd 2>/dev/null || true
     exit 1
   fi
   sudo dmesg | grep -aq "contiguous allocation failed" || break
-  [ $try = 9 ] && { echo "no contiguous memory for XNU (CMA: $(grep CmaFree /proc/meminfo))" >&2; exit 1; }
+  if [ $try = 9 ]; then
+    echo "no contiguous memory for XNU (CMA: $(grep CmaFree /proc/meminfo))" >&2
+    sudo systemctl stop xnudrmd 2>/dev/null || true
+    exit 1
+  fi
   echo "no contiguous memory for XNU yet: trying again in 20 s"; sleep 20
 done
-if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
-  make -s -C gpu/xnu-drm >/dev/null
-  sudo systemctl stop xnudrmd 2>/dev/null || true
-  sudo systemd-run -q --unit xnudrmd --collect "$PWD/gpu/xnu-drm/xnudrmd"
-  echo "gpu: xnudrmd on /dev/dri/renderD128 (journalctl -u xnudrmd)"
-fi
 echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB_DUMP"
 [ $WAIT = 1 ] || exit 0
 
@@ -108,6 +136,7 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   # insmod has returned but xnu.ko stays loaded after a run that ended by itself (a panic, a halt): unload it, or the
   # next start (systemd's restart after a panic) finds it and refuses
   if lsmod | grep -q '^xnu '; then sudo rmmod xnu || echo "xnu.ko did not unload" >&2; fi
+  sudo systemctl stop xnudrmd 2>/dev/null || true
   sudo mkdir -p "$LOGDIR"
   LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
   { cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:"; } |
