@@ -100,6 +100,9 @@ echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB
 START=$(date +%s)
 collect() {	# the run's kernel log, kept; the status says how it ended
   local LOGDIR=/var/log/xnulinux LOG
+  # insmod has returned but xnu.ko stays loaded after a run that ended by itself (a panic, a halt): unload it, or the
+  # next start (systemd's restart after a panic) finds it and refuses
+  if lsmod | grep -q '^xnu '; then sudo rmmod xnu || echo "xnu.ko did not unload" >&2; fi
   sudo mkdir -p "$LOGDIR"
   LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
   { cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:"; } |
