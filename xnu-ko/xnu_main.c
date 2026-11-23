@@ -201,8 +201,9 @@ module_param(model, charp, 0444);
 static const char *cmdline = "debug=0x8 -v -noprogress serial=0 startup_debug=1";
 static const char *cmdline_4k = " vm_compression_limit=1572864";
 static const char *cmdline_16k = " vm_compression_limit=393216 linux64_vm16k=1";
-/* vm16k=1: XNU's VM pages are 16 KB over the host's 4 KB translation granule (XNU's PAGE_RATIO 4) */
-static int vm16k;
+/* vm16k=1 (the default): XNU's VM pages are 16 KB, as on a Mac, over the host's 4 KB translation granule (XNU's
+ * PAGE_RATIO 4): a quarter of the page faults of 4 KB pages; vm16k=0 gives 4 KB VM pages */
+static int vm16k = 1;
 module_param(vm16k, int, 0444);
 
 
