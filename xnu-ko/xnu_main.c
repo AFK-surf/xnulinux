@@ -138,6 +138,7 @@ static void *in_file; static fki_u64 in_off;
 struct xnu_world xnu_W;
 
 static void logs(const char *s) { fki_log(s, x_strlen(s)); }
+static void logs_alert(const char *s) { fki_log_alert(s, x_strlen(s)); }
 static void logkv(const char *k, u64_t v)
 {
 	char buf[96]; char *p = buf;
@@ -641,8 +642,8 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		char m[500]; const char *f = (const char *)a1; unsigned i = 0;
 		while (f && f[i] && i < sizeof(m) - 1) { m[i] = f[i]; i++; }
 		m[i] = 0;
-		logs("xnu: XNU panic:");
-		logs(m);
+		logs_alert("xnu: XNU panic:");
+		logs_alert(m);
 		logkv("xnu: panic caller", a2);
 		{	/* the frame-pointer chain from here through XNU's frames (the hook runs on XNU's stack); return addresses
 			 * with their pointer-authentication bits replaced by the kernel's all-ones top */
@@ -998,6 +999,14 @@ static int monitor_fn(void *arg)
 				if (++still[c] == 1) {
 					struct xnu_world *w = xnu_worlds[s];
 					unsigned long fp = w->xnu_regs[10];
+					{
+						char ab[160]; char *q = ab;
+						put_str(&q, "xnu: XNU CPU "); q = put_dec(q, (unsigned long)c);
+						put_str(&q, " made no host call for 2 s (its Linux CPU held, interrupts masked); last call ");
+						q = put_dec(q, last_call_slot[s]); put_str(&q, in_call_slot[s] ? " (inside it)" : " (back in XNU)");
+						*q = 0;
+						logs_alert(ab);
+					}
 					logkv("xnu: XNU CPU silent for 2 s (no host call), cpu", (u64_t)c);
 					logkv("xnu:   its last host call", last_call_slot[s]);
 					logkv("xnu:   still inside it (1) or back in XNU (0)", in_call_slot[s]);
