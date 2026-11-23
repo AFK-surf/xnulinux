@@ -13,6 +13,7 @@
 #include <linux/irqflags.h>
 #include <linux/mm.h>
 #include <linux/io.h>
+#include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
@@ -73,6 +74,8 @@ static struct cma **p_cma_area;	/* the default CMA area (cma= on the command lin
 static struct page *(*p_cma_alloc)(struct cma *, unsigned long, unsigned int, bool);	/* not exported on every kernel */
 static bool (*p_cma_release)(struct cma *, const struct page *, unsigned long);
 static set_memory_fn p_set_memory_x, p_set_memory_nx;
+static unsigned long p_stext, p_end;
+static u64 *p_kimage_voffset;
 
 static int fki_resolve(void)
 {
@@ -96,6 +99,9 @@ static int fki_resolve(void)
 	p_cma_alloc = (void *)lookup("cma_alloc");
 	p_cma_release = (void *)lookup("cma_release");
 	p_set_memory_nx = (set_memory_fn)lookup("set_memory_nx");
+	p_stext = lookup("_stext");
+	p_end = lookup("_end");
+	p_kimage_voffset = (u64 *)lookup("kimage_voffset");
 	return p_set_memory_x && p_set_memory_nx ? 0 : -ENOENT;
 }
 
@@ -453,6 +459,37 @@ static void fki_reserve(void)
 	pr_info("fki: %lu MiB for the foreign kernel's DRAM %s\n", reserve_mb, resv_pg ? "reserved" : "NOT reserved (CMA)");
 }
 
+static int fki_carve_check(unsigned long base, unsigned long len)
+{
+	unsigned long end = base + len;
+
+	if (end < base) {
+		pr_err("fki: carve-out [%#lx, %#lx) overflows physical address space\n", base, end);
+		return -EINVAL;
+	}
+	if (p_stext && p_end && p_kimage_voffset) {
+		unsigned long k_start = p_stext - *p_kimage_voffset;
+		unsigned long k_end = p_end - *p_kimage_voffset;
+
+		if (base < k_end && k_start < end) {
+			pr_err("fki: carve-out [%#lx, %#lx) overlaps Linux kernel image [%#lx, %#lx); refusing to map (boot with nokaslr or adjust carve_base)\n",
+			       base, end, k_start, k_end);
+			return -EBUSY;
+		}
+	}
+	if (region_intersects(base, len, IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) != REGION_DISJOINT) {
+		pr_err("fki: carve-out [%#lx, %#lx) overlaps IORESOURCE_SYSTEM_RAM; refusing to map (check mem= and carve_base)\n",
+		       base, end);
+		return -EBUSY;
+	}
+	if (region_intersects(base, len, IORESOURCE_MEM, IORES_DESC_NONE) != REGION_DISJOINT) {
+		pr_err("fki: carve-out [%#lx, %#lx) overlaps busy/reserved IORESOURCE_MEM; refusing to map (check /proc/iomem and carve_base)\n",
+		       base, end);
+		return -EBUSY;
+	}
+	return 0;
+}
+
 int fki_contig_alloc(unsigned long size, struct fki_region *r)
 {
 	unsigned long n = 1;
@@ -462,11 +499,17 @@ int fki_contig_alloc(unsigned long size, struct fki_region *r)
 	if (err)
 		return err;
 	if (carve_mb && !carve_used && ALIGN(size, SZ_2M) <= carve_mb << 20 && !(carve_base & (SZ_2M - 1))) {
-		void *va = memremap(carve_base, ALIGN(size, SZ_2M), MEMREMAP_WB);
+		unsigned long clen = ALIGN(size, SZ_2M);
+		void *va;
+
+		err = fki_carve_check(carve_base, clen);
+		if (err)
+			return err;
+		va = memremap(carve_base, clen, MEMREMAP_WB);
 		if (va) {
 			carve_used = true;
 			r->va = va;
-			r->size = ALIGN(size, SZ_2M);
+			r->size = clen;
 			memset(r->va, 0, r->size);
 			r->pa = carve_base;
 			r->handle = (void *)4UL;	/* bit 2: the carve-out */

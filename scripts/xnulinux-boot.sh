@@ -83,6 +83,10 @@ for try in 1 2 3 4 5 6 7 8 9; do
     console_in="$CONSOLE_IN" input_in="$INPUT_IN" fb_dump="$FB_DUMP" keystore="$KEYSTORE" bootargs="\"$BOOTARGS\"" ${XNU_ARGS:-} \
     > /var/tmp/xnu-insmod.log 2>&1 < /dev/null &
   sleep 5
+  if sudo dmesg | grep -aq "fki: carve-out .* overlaps"; then
+    sudo dmesg | grep -a "fki: carve-out .* overlaps" >&2
+    exit 1
+  fi
   sudo dmesg | grep -aq "contiguous allocation failed" || break
   [ $try = 9 ] && { echo "no contiguous memory for XNU (CMA: $(grep CmaFree /proc/meminfo))" >&2; exit 1; }
   echo "no contiguous memory for XNU yet: trying again in 20 s"; sleep 20
