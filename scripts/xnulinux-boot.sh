@@ -73,7 +73,13 @@ rm -f "$KEYSTORE"; truncate -s 1M "$KEYSTORE"	# fresh each boot, as the disk was
 # for another's I/O can wait for good (as a hypervisor keeps device interrupts off its vCPUs' cores).
 NCPU=$(nproc --all)
 if [ "$NCPU" -gt "$CPUS" ]; then
-  MASK=$(python3 -c "print(format(((1 << $NCPU) - 1) & ~((1 << $CPUS) - 1), 'x'))")
+  # XNU's CPUs: Linux CPUs 0..CPUS-1, or the first CPUS of fki's cpu_list
+  XCPUS=$(cat /sys/module/fki/parameters/cpu_list 2>/dev/null | tr -d '\n')
+  MASK=$(python3 -c "
+l = [int(c) for c in '$XCPUS'.split(',') if c][:$CPUS] or list(range($CPUS))
+m = (1 << $NCPU) - 1
+for c in l: m &= ~(1 << c)
+print(format(m, 'x'))")
   echo "$MASK" | sudo tee /proc/irq/default_smp_affinity >/dev/null 2>&1 || true
   for f in /proc/irq/*/smp_affinity; do echo "$MASK" | sudo tee "$f" >/dev/null 2>&1 || true; done
 fi

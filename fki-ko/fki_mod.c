@@ -248,8 +248,24 @@ void fki_random(void *buf, unsigned long len)
 }
 EXPORT_SYMBOL(fki_random);
 
+/*
+ * cpu_list: the Linux CPUs of the foreign kernel's CPUs 0 .. n-1 (default: the same numbers). For machines where two
+ * CPUs share a block-device interrupt (an NVMe with fewer queues than CPUs), which deadlocks two foreign CPUs on them.
+ */
+static int cpu_list[NR_CPUS];
+static int cpu_list_n;
+module_param_array(cpu_list, int, &cpu_list_n, 0444);
+
+static int fki_cpu_map(int cpu)
+{
+	if (!cpu_list_n)
+		return cpu;
+	return cpu >= 0 && cpu < cpu_list_n ? cpu_list[cpu] : -1;
+}
+
 int fki_bind_cpu(int cpu)
 {
+	cpu = fki_cpu_map(cpu);
 	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return -EINVAL;
 	return set_cpus_allowed_ptr(current, cpumask_of(cpu));
@@ -260,6 +276,7 @@ void *fki_thread_start(int (*fn)(void *), void *arg, int cpu, const char *name)
 {
 	struct task_struct *t;
 
+	cpu = fki_cpu_map(cpu);
 	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return NULL;
 	t = kthread_create(fn, arg, "%s", name);
@@ -776,6 +793,7 @@ void fki_kick_cpu(int cpu)
 {
 	struct task_struct *t;
 
+	cpu = fki_cpu_map(cpu);
 	if (cpu < 0 || cpu >= nr_cpu_ids)
 		return;
 	smp_mb();	/* the caller's pending word before the idle task: pairs with fki_idle_body */
@@ -797,6 +815,7 @@ int fki_cpu_mpidr(int cpu, fki_u64 *mpidr)
 	u64 v = 0;
 	int err;
 
+	cpu = fki_cpu_map(cpu);
 	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return -EINVAL;
 	err = smp_call_function_single(cpu, fki_read_mpidr, &v, 1);
@@ -807,7 +826,7 @@ EXPORT_SYMBOL(fki_cpu_mpidr);
 
 int fki_num_cpus(void)
 {
-	return num_online_cpus();
+	return cpu_list_n ? cpu_list_n : num_online_cpus();
 }
 EXPORT_SYMBOL(fki_num_cpus);
 
