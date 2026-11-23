@@ -267,6 +267,30 @@ static int do_ioctl(unsigned long request, void *arg)
 
 int drmIoctl(int fd, unsigned long request, void *arg)
 {
+	/* A blocking VIRTGPU_WAIT would hold the calling XNU CPU inside fki_hostcall (deaf to IPIs):
+	 * poll with VIRTGPU_WAIT_NOWAIT and sleep in macOS userspace with exponential backoff up to 2 ms. */
+	if ((request & 0xff) == DRM_COMMAND_BASE + DRM_VIRTGPU_WAIT && arg &&
+	    !(((struct drm_virtgpu_3d_wait *)arg)->flags & VIRTGPU_WAIT_NOWAIT)) {
+		long delay_ns = 100000;	/* 100 us -> 2 ms */
+		for (;;) {
+			struct drm_virtgpu_3d_wait nw = *(struct drm_virtgpu_3d_wait *)arg;
+			nw.flags |= VIRTGPU_WAIT_NOWAIT;
+			pthread_mutex_lock(&lk);
+			conn = node_conn(fd);
+			int r = conn ? do_ioctl(request, &nw) : -EBADF;
+			pthread_mutex_unlock(&lk);
+			if (r != -EBUSY) {
+				if (r) { errno = -r; return -1; }
+				return 0;
+			}
+			struct timespec d = { 0, delay_ns };
+			nanosleep(&d, NULL);
+			if (delay_ns < 2000000) {
+				delay_ns <<= 1;
+				if (delay_ns > 2000000) delay_ns = 2000000;
+			}
+		}
+	}
 	pthread_mutex_lock(&lk);
 	conn = node_conn(fd);
 	int r = conn ? do_ioctl(request, arg) : -EBADF;
@@ -353,6 +377,7 @@ static int fence_check(struct xfence *f)
 int xnudrm_poll(struct pollfd *fds, nfds_t n, int timeout)
 {
 	struct timespec t0, now;
+	long delay_ns = 100000;	/* 100 us -> 2 ms */
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (;;) {
 		int pending = 0;
@@ -371,9 +396,13 @@ int xnudrm_poll(struct pollfd *fds, nfds_t n, int timeout)
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
 		if (timeout >= 0 && ms >= timeout) return poll(fds, n, 0);
-		/* each check stops the hosted CPU for one host call: back off a little */
-		struct timespec d = { 0, 200000 };
+		/* each check stops the hosted CPU for one host call: back off exponentially up to 2 ms */
+		struct timespec d = { 0, delay_ns };
 		nanosleep(&d, NULL);
+		if (delay_ns < 2000000) {
+			delay_ns <<= 1;
+			if (delay_ns > 2000000) delay_ns = 2000000;
+		}
 	}
 }
 

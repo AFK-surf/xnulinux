@@ -229,7 +229,7 @@ static void serve(uint8_t *in, size_t inlen, uint8_t *out, size_t *outlen)
 		if (h->op == XNUDRM_FENCE_CLOSE) { close(f->fd - 1); f->fd = 0; break; }
 		struct pollfd p = { .fd = f->fd - 1, .events = POLLIN };
 		int ms = h->arg1 ? (int)((h->arg1 + 999999) / 1000000) : 0;
-		int r = poll(&p, 1, ms > 60000 ? 60000 : ms);	/* the hosted CPU waits in the call: never longer than a minute */
+		int r = poll(&p, 1, ms > 50 ? 50 : ms);	/* never hold the hosted CPU in a host call longer than 50 ms */
 		st = r < 0 ? -errno : r == 0 ? -XNUDRM_ETIME : 0;
 		break;
 	}
