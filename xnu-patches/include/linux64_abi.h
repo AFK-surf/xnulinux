@@ -27,6 +27,15 @@
 
 enum linux64_call {
 	LINUX64_CALL_KERNEL_TABLES  = 210,	/* boot: a1 = XNU's kernel L1 table; the host installs its kernel-range entries */
+	LINUX64_CALL_KMAP           = 211,	/* EL0 host: a1 = struct linux64_map_req: map [va, va+size) -> pa in high window */
+	LINUX64_CALL_KUNMAP         = 212,	/* EL0 host: a1 = struct linux64_map_req: unmap [va, va+size) from high window */
+	LINUX64_CALL_KFLUSH         = 213,	/* EL0 host: flush high window TLB */
+	LINUX64_CALL_AS_CREATE      = 220,	/* EL0 host: create user address space */
+	LINUX64_CALL_AS_DESTROY     = 221,	/* EL0 host: destroy user address space */
+	LINUX64_CALL_AS_MAP         = 222,	/* EL0 host: map pages in user address space */
+	LINUX64_CALL_AS_UNMAP       = 223,	/* EL0 host: unmap pages in user address space */
+	LINUX64_CALL_AS_FLUSH       = 224,	/* EL0 host: flush user address space TLB */
+	LINUX64_CALL_UTCB_RUN       = 225,	/* EL0 host: run user context */
 	LINUX64_CALL_IDLE           = 810,	/* a1 = nanoseconds to XNU's next timer (0: one is due), a2 = this CPU's pending-IPI word
 					 * (the host does not sleep while it is set); the host runs Linux meanwhile */
 	LINUX64_CALL_PREEMPTED      = 811,	/* a host interrupt is pending: let Linux handle it; a1 = 1 from the kernel, 0 from EL0 */
@@ -49,6 +58,21 @@ enum linux64_call {
 	LINUX64_CALL_KPRINTF        = 998,	/* a1 = a NUL-terminated line of kprintf/printf output */
 	LINUX64_CALL_PANIC          = 999,	/* a1 = the panic message, a2 = the caller; the run ends */
 	LINUX64_CALL_USER_ENTER     = 9100,	/* a1 = user pc: the first entry into user space */
+};
+
+/* Page mapping protection bits (match FKI_PROT_*). */
+#define LINUX64_PROT_READ  (1 << 0)
+#define LINUX64_PROT_WRITE (1 << 1)
+#define LINUX64_PROT_EXEC  (1 << 2)
+
+/* Kernel/user page mapping request for EL0 hosts (LINUX64_CALL_KMAP/KUNMAP/AS_*). */
+struct linux64_map_req {
+	__UINT64_TYPE__ as_handle;
+	__UINT64_TYPE__ va;
+	__UINT64_TYPE__ pa;
+	__UINT64_TYPE__ size;
+	__UINT64_TYPE__ prot;
+	__INT64_TYPE__ result;
 };
 
 /* A buffer: bytes to send or room to receive into. */

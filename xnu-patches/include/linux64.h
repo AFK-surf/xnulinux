@@ -30,15 +30,23 @@ extern "C" {
 #endif
 
 /*
- * xnu.ko's entry point (0: not hosted) and the slide it applied. TPIDR_EL1 is Linux's per-CPU base: XNU's kernel keeps
- * its thread pointer in TPIDRRO_EL0 (per CPU), and user space gets its TSD there on each return to EL0.
+ * xnu.ko's entry point (0: not hosted), EL0-host flag (1: hosted kernel runs at EL0) and the slide it applied.
+ * TPIDR_EL1 is Linux's per-CPU base (or inaccessible at EL0): XNU's kernel keeps its thread pointer in TPIDR_EL0
+ * (per CPU), and user space gets its own TLS registers on each return to EL0.
  */
 extern unsigned long linux64_hook;
 extern unsigned long linux64_slide;
-/* This CPU's slot in the per-CPU arrays (LINUX64_CPU_SLOT of its MPIDR): valid before XNU knows its cpu number */
+extern unsigned int linux64_el0;
+/* This CPU's slot in the per-CPU arrays: valid before XNU knows its cpu number */
 static inline unsigned
 linux64_cpu_slot(void)
 {
+	if (linux64_el0) {
+		unsigned long id;
+
+		__asm__ volatile ("mrs %0, TPIDRRO_EL0" : "=r"(id));
+		return (unsigned)(id & (LINUX64_CPU_SLOTS - 1));
+	}
 	unsigned long mpidr;
 
 	__asm__ volatile ("mrs %0, MPIDR_EL1" : "=r"(mpidr));

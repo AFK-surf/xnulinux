@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */
 /*
- * Foreign kernel interface (FKI), version 0.
+ * Foreign kernel interface (FKI), version 1.
  *
  * The only interface between Linux and a foreign-kernel module. It is
  * semantic and shaped like a hypervisor interface: plain integer types and
@@ -10,7 +10,7 @@
 #ifndef _LINUX_FKI_H
 #define _LINUX_FKI_H
 
-#define FKI_VERSION 0
+#define FKI_VERSION 1
 
 #ifndef __KERNEL__
 #include <stdint.h>
@@ -19,6 +19,16 @@ typedef uint64_t fki_u64;
 #include <linux/types.h>
 typedef u64 fki_u64;
 #endif
+
+/* Host capability bits returned by fki_caps(). */
+#define FKI_CAP_EL0         (1UL << 0)	/* hosted kernel runs at EL0 */
+#define FKI_CAP_HIGH_WINDOW (1UL << 1)	/* host manages TTBR1 high window */
+#define FKI_CAP_PAC         (1UL << 2)	/* per-context PAC keys supported */
+
+/* Page mapping protection bits for fki_high_map() and fki_as_map(). */
+#define FKI_PROT_READ       (1 << 0)
+#define FKI_PROT_WRITE      (1 << 1)
+#define FKI_PROT_EXEC       (1 << 2)
 
 /* Physically contiguous memory, mapped contiguously and executable. */
 struct fki_region {
@@ -34,10 +44,30 @@ struct fki_pac_keys {
 	fki_u64 sctlr_en;	/* SCTLR_EL1 EnIA|EnIB|EnDA|EnDB bits */
 };
 
+/* User-context register state and stop info (FKI_CAP_EL0 hosts). */
+struct fki_utcb_regs {
+	fki_u64 x[31];
+	fki_u64 sp, pc, pstate, tpidr, tpidrro;
+};
+
+enum {
+	FKI_STOP_SYSCALL   = 1,
+	FKI_STOP_PAGEFAULT = 2,
+	FKI_STOP_EXCEPTION = 3,
+	FKI_STOP_INTERRUPT = 4,
+};
+
+struct fki_utcb_stop {
+	int kind;
+	fki_u64 fault_addr, fault_ip, esr;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 int fki_version(void);
+unsigned long fki_caps(void);
+int fki_cpu_id(void);
 void fki_log(const char *s, unsigned long len);
 void fki_log_alert(const char *s, unsigned long len);	/* KERN_ALERT: on the console even when it is quiet */
 int fki_region_alloc(unsigned long size, struct fki_region *r);
@@ -66,6 +96,32 @@ void fki_contig_free(struct fki_region *r);
  */
 int fki_window_l1(unsigned long va, unsigned long long **l1_va, fki_u64 *l1_pa);
 void fki_window_set(unsigned long long *slot, fki_u64 desc);
+/*
+ * Host-managed foreign kernel memory and high-window mappings (FKI_CAP_HIGH_WINDOW):
+ * fki_kmem_alloc allocates backing memory (no multi-GB physical contiguity required), maps it at high_va
+ * as RWX, associates synthetic physical addresses starting at pa_base, and binds the high window on all CPUs.
+ * fki_high_map/unmap/flush mirror additional kernel-VA mappings backed by xpa in [pa_base, pa_base + size).
+ */
+int fki_kmem_alloc(unsigned long size, unsigned long high_va, fki_u64 pa_base, struct fki_region *r);
+void fki_kmem_free(struct fki_region *r);
+int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot);
+void fki_high_unmap(unsigned long va, unsigned long size);
+void fki_high_flush(void);
+/*
+ * Host-managed user address spaces and user execution contexts (FKI_CAP_EL0).
+ */
+void *fki_as_create(void);
+void fki_as_destroy(void *as);
+int fki_as_map(void *as, unsigned long va, fki_u64 xpa, unsigned long size, int prot);
+void fki_as_unmap(void *as, unsigned long va, unsigned long size);
+void fki_as_flush(void *as);
+void *fki_utcb_create(void *as);
+void fki_utcb_destroy(void *utcb);
+int fki_utcb_set_as(void *utcb, void *as);
+int fki_utcb_set_pac(void *utcb, const struct fki_pac_keys *keys);
+int fki_utcb_run(void *utcb, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop);
+int fki_utcb_fpu_read(void *utcb, void *buf, unsigned long len);
+int fki_utcb_fpu_write(void *utcb, const void *buf, unsigned long len);
 /*
  * Called from inside fki_enter() (preemption and IRQs off): let Linux run (IRQs and preemption on)
  * until the counter reaches deadline or max_ns pass, or fki_kick_cpu() is called for this CPU, then return with them off

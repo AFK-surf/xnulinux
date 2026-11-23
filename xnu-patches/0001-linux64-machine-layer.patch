@@ -1,14 +1,3 @@
-The LINUX64 machine layer: XNU hosted inside a Linux kernel by xnu.ko.
-
-The CPU, MMU and exceptions are Linux's: XNU runs at EL1 on Linux's page tables (its kernel L1 entries installed by the
-host), with hardware interrupts masked and a virtual interrupt flag; exceptions are taken in Linux's vectors and handed
-back (kernel faults to linux64_kernel_fault, user space through linux64_el0_run/linux64_el0_exception). Idle, timers,
-the console, printf/kprintf, panics and failed asserts go to the host; entropy comes from the host until corecrypto
-registers. Every hosted path is behind `if (linux64_hook)`: the same kernel still boots on hardware.
-
-The interface to the host is linux64/linux64_abi.h (shared with xnu.ko) and linux64/linux64.h, copied into
-EXTERNAL_HEADERS/linux64 from xnu-patches/include by scripts/vm-xnu-rebuild.sh.
-
 diff --git a/bsd/dev/arm64/sysctl.c b/bsd/dev/arm64/sysctl.c
 index f380ae5..7db22a8 100644
 --- a/bsd/dev/arm64/sysctl.c
@@ -22,6 +11,19 @@ index f380ae5..7db22a8 100644
  	return SYSCTL_OUT(req, &return_value, sizeof(return_value));
  }
  
+diff --git a/bsd/kern/mach_loader.c b/bsd/kern/mach_loader.c
+index 6ce6141..8fb290b 100644
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -801,7 +801,7 @@ load_machfile(
+ #if defined(__arm64__)
+ 	if (result->is_64bit_addr) {
+ #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+-		vm_map_pageshift = FOURK_PAGE_SHIFT;
++		vm_map_pageshift = PAGE_SHIFT;	/* LINUX64: the kernel's VM page (16 KB over a 4 KB granule with linux64_vm16k) */
+ #else
+ 		/* enforce 16KB alignment of VM map entries */
+ 		vm_map_pageshift = SIXTEENK_PAGE_SHIFT;
 diff --git a/config/MASTER.arm64.bcm2837 b/config/MASTER.arm64.bcm2837
 index 0c52cc6..87d19c7 100644
 --- a/config/MASTER.arm64.bcm2837
@@ -111,7 +113,7 @@ index d46815b..acea296 100644
  	g_crypto_funcs->random_kmem_init_fn(ctx);
  }
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index ac1713e..8486021 100644
+index ac1713e..a89e8d6 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -1,4 +1,5 @@
@@ -120,13 +122,14 @@ index ac1713e..8486021 100644
  /*
   * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
   *
-@@ -228,6 +229,13 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
+@@ -228,6 +229,14 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
  extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
  extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
  
 +/* LINUX64 (xnulinux): the hosted machine layer's state (linux64/linux64.h), set by xnu.ko before arm_init */
 +uintptr_t linux64_hook;
 +uintptr_t linux64_slide;
++unsigned int linux64_el0;
 +unsigned int linux64_vint[LINUX64_CPU_SLOTS];
 +unsigned int linux64_ipi_pending[LINUX64_CPU_SLOTS];
 +unsigned long linux64_dbg[LINUX64_NCOUNTERS];
@@ -134,7 +137,7 @@ index ac1713e..8486021 100644
  static void
  arm_slide_rebase_and_sign_image(void)
  {
-@@ -285,10 +293,14 @@ arm_slide_rebase_and_sign_image(void)
+@@ -285,10 +294,14 @@ arm_slide_rebase_and_sign_image(void)
  		 * using hardcoded kernel link address
  		 */
  		slide = (uintptr_t)k_mh - VM_KERNEL_LINK_ADDRESS;
@@ -150,7 +153,7 @@ index ac1713e..8486021 100644
  			rebase_threaded_starts( &__thread_starts_sect_start[0],
  			    &__thread_starts_sect_end[0],
  			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
-@@ -341,6 +353,28 @@ arm_auxkc_init(void *mh, void *base)
+@@ -341,6 +354,28 @@ arm_auxkc_init(void *mh, void *base)
  #endif /* defined(HAS_APPLE_PAC) */
  }
  
@@ -179,7 +182,7 @@ index ac1713e..8486021 100644
  /*
   *		Routine:		arm_init
   *		Function:		Runs on the boot CPU, once, on entry from iBoot.
-@@ -431,6 +465,17 @@ arm_init(
+@@ -431,6 +466,17 @@ arm_init(
  		/* Native non-Apple 4K builds expose the hardware page size at any RAM size. */
  #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
  		PAGE_SHIFT_CONST = ARM_PGSHIFT;
@@ -197,18 +200,79 @@ index ac1713e..8486021 100644
  #else
  		/*
  		 * Select the advertised kernel page size.
+@@ -554,7 +600,9 @@ arm_init(
+ 	PE_parse_boot_argn("immediate_NMI", &force_immediate_debug_halt, sizeof(force_immediate_debug_halt));
+ 
+ #if __ARM_PAN_AVAILABLE__
+-	__builtin_arm_wsr("pan", 1);
++	if (!linux64_el0) {
++		__builtin_arm_wsr("pan", 1);
++	}
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
+ #if HAS_MTE
+@@ -732,7 +780,9 @@ arm_init_cpu(
+ 	uint64_t __unused hib_header_phys)
+ {
+ #if __ARM_PAN_AVAILABLE__
+-	__builtin_arm_wsr("pan", 1);
++	if (!linux64_el0) {
++		__builtin_arm_wsr("pan", 1);
++	}
+ #endif
+ 
+ #ifdef __arm64__
+@@ -876,7 +926,9 @@ arm_init_idle_cpu(
+ 	cpu_data_t      *cpu_data_ptr)
+ {
+ #if __ARM_PAN_AVAILABLE__
+-	__builtin_arm_wsr("pan", 1);
++	if (!linux64_el0) {
++		__builtin_arm_wsr("pan", 1);
++	}
+ #endif
+ 
+ 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+diff --git a/osfmk/arm/commpage/commpage.c b/osfmk/arm/commpage/commpage.c
+index 1f672e9..49d6024 100644
+--- a/osfmk/arm/commpage/commpage.c
++++ b/osfmk/arm/commpage/commpage.c
+@@ -155,8 +155,9 @@ commpage_populate(void)
+ 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift_user32;
+ 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) page_shift_user32;
+ #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) FOURK_PAGE_SHIFT;
+-	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) FOURK_PAGE_SHIFT;
++	/* LINUX64: user maps take the kernel's VM page (mach_loader.c) */
++	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) PAGE_SHIFT;
++	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) PAGE_SHIFT;
+ #else
+ 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
+ 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
+@@ -846,6 +847,11 @@ commpage_init_arm_optional_features_misc(__unused uint64_t *commpage_bits)
+ static void
+ commpage_init_arm_optional_features(uint64_t *commpage_bits)
+ {
++	extern unsigned int linux64_el0;
++	if (linux64_el0) {
++		commpage_init_arm_optional_features_fpcr(commpage_bits);
++		return;
++	}
+ 	commpage_init_arm_optional_features_isar0(commpage_bits);
+ 	commpage_init_arm_optional_features_isar1(commpage_bits);
+ 	commpage_init_arm_optional_features_isar2();
 diff --git a/osfmk/arm/cpu_data.h b/osfmk/arm/cpu_data.h
-index 743117b..753d128 100644
+index 743117b..62a5a9a 100644
 --- a/osfmk/arm/cpu_data.h
 +++ b/osfmk/arm/cpu_data.h
 @@ -61,8 +61,9 @@ current_thread_fast(void)
  	 *
  	 * and ignores the "attribute const", so do it the "dumb" way.
  	 */
-+	/* LINUX64 (xnulinux): TPIDR_EL1 belongs to Linux; XNU's kernel keeps its thread pointer in TPIDRRO_EL0 */
++	/* LINUX64 (xnulinux): TPIDR_EL1 belongs to Linux (or is EL1-only); XNU's kernel keeps its thread pointer in TPIDR_EL0 */
  	unsigned long result;
 -	__asm__ ("mrs %0, TPIDR_EL1" : "=r" (result));
-+	__asm__ ("mrs %0, TPIDRRO_EL0" : "=r" (result));
++	__asm__ ("mrs %0, TPIDR_EL0" : "=r" (result));
  	return __unsafe_forge_single(thread_t, result);
  #else
  	// TPIDRPRW
@@ -217,16 +281,21 @@ index 743117b..753d128 100644
  #if defined(__arm64__)
  	unsigned long result;
 -	__asm__ volatile ("mrs %0, TPIDR_EL1" : "=r" (result));
-+	__asm__ volatile ("mrs %0, TPIDRRO_EL0" : "=r" (result));	/* LINUX64: see current_thread_fast */
++	__asm__ volatile ("mrs %0, TPIDR_EL0" : "=r" (result));	/* LINUX64: see current_thread_fast */
  	return __unsafe_forge_single(thread_t, result);
  #else
  	// TPIDRPRW
-@@ -114,7 +115,16 @@ current_thread_volatile(void)
+@@ -114,7 +115,21 @@ current_thread_volatile(void)
  static inline vm_offset_t
  exception_stack_pointer(void)
  {
 -	vm_offset_t result = 0;
++	extern unsigned int linux64_el0;
 +	vm_offset_t result = 0, spsel;
++	if (linux64_el0) {
++		__asm__ volatile ("mov %0, sp" : "=r" (result));
++		return result;
++	}
 +	/*
 +	 * LINUX64 (xnulinux): hosted XNU runs on Linux's SP_EL1 stack, and SP_EL0 is
 +	 * Linux's `current`; never flip SPSel. When already on SP_EL1, sp is the answer.
@@ -292,8 +361,70 @@ index 7dc0e57..349d015 100644
  	__asm__ volatile ("msr TPIDRRO_EL0, %0" : : "r" (uthread));
  }
  
+diff --git a/osfmk/arm/machine_cpuid.c b/osfmk/arm/machine_cpuid.c
+index 128d5f6..b655090 100644
+--- a/osfmk/arm/machine_cpuid.c
++++ b/osfmk/arm/machine_cpuid.c
+@@ -30,6 +30,7 @@
+ #include <machine/atomic.h>
+ #include <machine/machine_cpuid.h>
+ #include <arm/cpu_data_internal.h>
++#include <linux64/linux64.h>
+ 
+ static arm_mvfp_info_t cpuid_mvfp_info;
+ static arm_debug_info_t cpuid_debug_info;
+@@ -38,6 +39,9 @@ MARK_AS_FIXUP_TEXT uint32_t
+ machine_read_midr(void)
+ {
+ 	uint64_t midr;
++	if (linux64_el0) {
++		return 0x410fd034U;
++	}
+ 	__asm__ volatile ("mrs	%0, MIDR_EL1"  : "=r" (midr));
+ 
+ 	return (uint32_t)midr;
+@@ -47,6 +51,9 @@ uint32_t
+ machine_read_clidr(void)
+ {
+ 	uint64_t clidr;
++	if (linux64_el0) {
++		return 0x09200023U;
++	}
+ 	__asm__ volatile ("mrs	%0, CLIDR_EL1"  : "=r" (clidr));
+ 
+ 	return (uint32_t)clidr;
+@@ -56,6 +63,9 @@ uint32_t
+ machine_read_ccsidr(void)
+ {
+ 	uint64_t ccsidr;
++	if (linux64_el0) {
++		return 0x700fe01aU;
++	}
+ 	__asm__ volatile ("mrs	%0, CCSIDR_EL1"  : "=r" (ccsidr));
+ 
+ 	return (uint32_t)ccsidr;
+@@ -64,6 +74,9 @@ machine_read_ccsidr(void)
+ void
+ machine_write_csselr(csselr_cache_level level, csselr_cache_type type)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ 	uint64_t csselr = (uint64_t)level | (uint64_t)type;
+ 	__asm__ volatile ("msr	CSSELR_EL1, %0"  : : "r" (csselr));
+ 
+@@ -73,6 +86,9 @@ machine_write_csselr(csselr_cache_level level, csselr_cache_type type)
+ void
+ machine_do_debugid(void)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ 	arm_cpuid_id_aa64dfr0_el1 id_dfr0;
+ 
+ 	/* read ID_AA64DFR0_EL1 */
 diff --git a/osfmk/arm/machine_routines_common.c b/osfmk/arm/machine_routines_common.c
-index b65f76c..eac911b 100644
+index b65f76c..2d18613 100644
 --- a/osfmk/arm/machine_routines_common.c
 +++ b/osfmk/arm/machine_routines_common.c
 @@ -27,6 +27,7 @@
@@ -447,10 +578,18 @@ index b65f76c..eac911b 100644
  		max_cpus_initialized = MAX_CPUS_WAIT;
  		lck_mtx_sleep(&max_cpus_lock, LCK_SLEEP_DEFAULT, &max_cpus_initialized, THREAD_UNINT);
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 79d0bc1..fc50363 100644
+index 79d0bc1..97efcfe 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
-@@ -327,6 +327,32 @@ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_16k;
+@@ -51,6 +51,7 @@
+ #include <os/overflow.h>
+ 
+ #include <vm/pmap.h>
++#include <linux64/linux64.h>
+ #include <vm/pmap_cs.h>
+ #include <vm/vm_map_xnu.h>
+ #include <vm/vm_kern.h>
+@@ -327,6 +328,32 @@ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_16k;
  const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_4k;
  #endif /* !__ARM_16K_PG__ */
  
@@ -483,7 +622,7 @@ index 79d0bc1..fc50363 100644
  
  #if DEVELOPMENT || DEBUG
  int vm_footprint_suspend_allowed = 1;
-@@ -520,7 +546,7 @@ _Static_assert((ARM64_MAX_OFFSET_DEVICE_LARGE > ARM64_MIN_MAX_ADDRESS) && (ARM64
+@@ -520,7 +547,7 @@ _Static_assert((ARM64_MAX_OFFSET_DEVICE_LARGE > ARM64_MIN_MAX_ADDRESS) && (ARM64
  _Static_assert((ARM64_MAX_OFFSET_DEVICE_SMALL > ARM64_MIN_MAX_ADDRESS) && (ARM64_MAX_OFFSET_DEVICE_SMALL <= MACH_VM_MAX_ADDRESS),
      "Small device address space size outside allowable range");
  
@@ -492,7 +631,35 @@ index 79d0bc1..fc50363 100644
  SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = MACH_VM_MAX_ADDRESS;
  #  else
  SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = 0x0;
-@@ -2983,7 +3009,8 @@ pmap_root_alloc_size(pmap_t pmap)
+@@ -2014,6 +2041,13 @@ pmap_map_bd_with_options(
+ 
+ 		assert(!ARM_PTE_IS_COMPRESSED(*ptep, ptep));
+ 		write_pte_strong(ptep, pte);
++		if (linux64_el0 && pa_valid(paddr)) {
++			struct linux64_map_req req = {
++				.va = vaddr, .pa = paddr, .size = PAGE_SIZE,
++				.prot = LINUX64_PROT_READ | ((prot & VM_PROT_WRITE) ? LINUX64_PROT_WRITE : 0),
++			};
++			linux64_call(LINUX64_CALL_KMAP, &req);
++		}
+ 
+ 		pte_increment_pa(tmplate);
+ 		vaddr += PAGE_SIZE;
+@@ -2110,6 +2144,13 @@ scan:
+ 		pte |= ARM_PTE_NG;
+ #endif /* __ARM_KERNEL_PROTECT__ */
+ 		write_pte_strong(ptep, pte);
++		if (linux64_el0 && pa_valid(pa_start)) {
++			struct linux64_map_req req = {
++				.va = va, .pa = pa_start, .size = PAGE_SIZE,
++				.prot = LINUX64_PROT_READ | ((prot & VM_PROT_WRITE) ? LINUX64_PROT_WRITE : 0),
++			};
++			linux64_call(LINUX64_CALL_KMAP, &req);
++		}
+ 	}
+ 	PMAP_UPDATE_TLBS(kernel_pmap, va_start, va_start + len, false, true);
+ #if KASAN
+@@ -2983,7 +3024,8 @@ pmap_root_alloc_size(pmap_t pmap)
  	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
  	unsigned int root_level = pt_attr_root_level(pt_attr);
  	const uint64_t index = pt_attr_va_valid_mask(pt_attr);
@@ -502,7 +669,7 @@ index 79d0bc1..fc50363 100644
  }
  
  
-@@ -3108,6 +3135,16 @@ pmap_create_options_internal(
+@@ -3108,6 +3150,16 @@ pmap_create_options_internal(
  	}
  
  	p->ttep = ml_static_vtop((vm_offset_t)p->tte);
@@ -519,7 +686,7 @@ index 79d0bc1..fc50363 100644
  	p->hw_tte = pmap_tt1_allocate(p, pmap_root_alloc_size(p), 0);
  	if (!p->hw_tte) {
  		pmap_tt1_deallocate(p, p->tte, pmap_root_alloc_size(p), 0);
-@@ -3129,6 +3166,7 @@ pmap_create_options_internal(
+@@ -3129,6 +3181,7 @@ pmap_create_options_internal(
  	p->hw_tte[0] = (p->ttep & ARM_TTE_TABLE_MASK) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;
  
  	FLUSH_PTE();
@@ -527,7 +694,7 @@ index 79d0bc1..fc50363 100644
  
  	/*
  	 *  initialize the rest of the structure
-@@ -3406,6 +3444,10 @@ pmap_destroy_internal(
+@@ -3406,6 +3459,10 @@ pmap_destroy_internal(
  
  
  
@@ -538,7 +705,97 @@ index 79d0bc1..fc50363 100644
  	if (pmap->tte) {
  		pmap_tt1_deallocate(pmap, pmap->tte, pmap_root_alloc_size(pmap), 0);
  		pmap->tte = (tt_entry_t *) NULL;
-@@ -12980,6 +13022,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
+@@ -4126,8 +4183,12 @@ pmap_remove_range(
+ 	int num_changed = pmap_remove_range_options(pmap, va, bpte, epte, NULL,
+ 	    &need_strong_sync, PMAP_OPTIONS_REMOVE);
+ 	if (num_changed > 0) {
+-		PMAP_UPDATE_TLBS(pmap, va,
+-		    va + (pt_attr_page_size(pmap_get_pt_attr(pmap)) * (epte - bpte)), need_strong_sync, true);
++		uint64_t rlen = pt_attr_page_size(pmap_get_pt_attr(pmap)) * (epte - bpte);
++		if (linux64_el0 && pmap == kernel_pmap) {
++			struct linux64_map_req req = { .va = va, .size = rlen };
++			linux64_call(LINUX64_CALL_KUNMAP, &req);
++		}
++		PMAP_UPDATE_TLBS(pmap, va, va + rlen, need_strong_sync, true);
+ 	}
+ 	return num_changed;
+ }
+@@ -5955,6 +6016,26 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
+ 
+ 	if (success && *old_pte != new_pte) {
+ 		uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
++		if (linux64_el0 && pmap == kernel_pmap) {
++			struct linux64_map_req req = { .va = v, .size = amount };
++			if (pte_is_valid(new_pte)) {
++				pmap_paddr_t pa = pte_to_pa(new_pte);
++				if (pa_valid(pa)) {
++					req.pa = pa;
++					req.prot = LINUX64_PROT_READ;
++					if ((new_pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RWNA) ||
++					    (new_pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RWRW)) {
++						req.prot |= LINUX64_PROT_WRITE;
++					}
++					if (!(new_pte & ARM_PTE_PNX)) {
++						req.prot |= LINUX64_PROT_EXEC;
++					}
++					linux64_call(LINUX64_CALL_KMAP, &req);
++				}
++			} else {
++				linux64_call(LINUX64_CALL_KUNMAP, &req);
++			}
++		}
+ 
+ 		if (pte_is_valid(*old_pte)) {
+ 			bool need_strong_sync = false;
+@@ -6972,6 +7053,20 @@ pmap_find_phys(
+  * @return The physical address if the translation was successful, or zero if
+  *         no valid mappings were found for the given virtual address.
+  */
++extern pmap_paddr_t linux64_el0_ptov_vtop(vm_offset_t va);
++pmap_paddr_t linux64_el0_kvtop(vm_offset_t va);
++pmap_paddr_t
++linux64_el0_kvtop(vm_offset_t va)
++{
++	if (kernel_pmap && kernel_pmap->tte) {
++		pmap_paddr_t pa = pmap_vtophys(kernel_pmap, va);
++		if (pa) {
++			return pa;
++		}
++	}
++	return linux64_el0_ptov_vtop(va);
++}
++
+ pmap_paddr_t
+ kvtophys(vm_offset_t va)
+ {
+@@ -8935,6 +9030,15 @@ pmap_map_cpu_windows_copy_internal(
+ 	need_strong_sync = pte_is_xs(native_pt_attr, pte);
+ #endif
+ 	write_pte_fast(ptep, pte);
++	if (linux64_el0 && pa_valid(ptoa(pn))) {
++		struct linux64_map_req req = {
++			.va = cpu_copywindow_vaddr,
++			.pa = ptoa(pn),
++			.size = PAGE_SIZE,
++			.prot = LINUX64_PROT_READ | ((prot & VM_PROT_WRITE) ? LINUX64_PROT_WRITE : 0),
++		};
++		linux64_call(LINUX64_CALL_KMAP, &req);
++	}
+ 	/*
+ 	 * Invalidate tlb. Cover nested cpu_copywindow_vaddr usage with the interrupted context
+ 	 * in pmap_unmap_cpu_windows_copy() after clearing the pte and before tlb invalidate.
+@@ -8977,6 +9081,10 @@ pmap_unmap_cpu_windows_copy_internal(
+ 	__builtin_arm_dsb(DSB_SY);
+ 	ptep = pmap_pte(kernel_pmap, cpu_copywindow_vaddr);
+ 	write_pte_strong(ptep, ARM_PTE_EMPTY);
++	if (linux64_el0) {
++		struct linux64_map_req req = { .va = cpu_copywindow_vaddr, .size = PAGE_SIZE };
++		linux64_call(LINUX64_CALL_KUNMAP, &req);
++	}
+ 	PMAP_UPDATE_TLBS(kernel_pmap, cpu_copywindow_vaddr, cpu_copywindow_vaddr + PAGE_SIZE, pmap_cpu_data->copywindow_strong_sync[index], true);
+ }
+ 
+@@ -12980,6 +13088,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
  #if __ARM_MIXED_PAGE_SIZE__
  	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
  	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
@@ -547,6 +804,45 @@ index 79d0bc1..fc50363 100644
  #else
  	return 64 - T0SZ_BOOT;
  #endif
+diff --git a/osfmk/arm/pmap/pmap_internal.h b/osfmk/arm/pmap/pmap_internal.h
+index 2aa40c1..9a4fe53 100644
+--- a/osfmk/arm/pmap/pmap_internal.h
++++ b/osfmk/arm/pmap/pmap_internal.h
+@@ -433,9 +433,14 @@ pmap_unlock(pmap_t pmap, pmap_lock_mode_t mode)
+  * @return The previous interrupt state, to be restored with
+  *         pmap_interrupts_restore().
+  */
++extern unsigned int linux64_el0;
++
+ static inline uint64_t __attribute__((warn_unused_result)) __used
+ pmap_interrupts_disable(void)
+ {
++	if (linux64_el0) {
++		return DAIF_ALL;
++	}
+ 	uint64_t state = __builtin_arm_rsr64("DAIF");
+ 
+ 	/* Ensure that debug exceptions are masked. */
+@@ -456,6 +461,9 @@ pmap_interrupts_disable(void)
+ static inline void __used
+ pmap_interrupts_restore(uint64_t state)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ 	// no unknown bits?
+ 	assert((state & ~DAIF_ALL) == 0);
+ 
+@@ -481,6 +489,9 @@ pmap_interrupts_restore(uint64_t state)
+ static inline bool __attribute__((warn_unused_result)) __used
+ pmap_interrupts_enabled(void)
+ {
++	if (linux64_el0) {
++		return false;
++	}
+ 	return (__builtin_arm_rsr64("DAIF") & DAIF_ALL) != DAIF_ALL;
+ }
+ #endif /* __arm64__ */
 diff --git a/osfmk/arm/pmap/pmap_pt_geometry.h b/osfmk/arm/pmap/pmap_pt_geometry.h
 index fc64830..aaff3fb 100644
 --- a/osfmk/arm/pmap/pmap_pt_geometry.h
@@ -566,8 +862,39 @@ index fc64830..aaff3fb 100644
  #define pmap_get_pt_ops(pmap) (&native_pt_ops)
  
  #endif /* ARM_PARAMETERIZED_PMAP */
+diff --git a/osfmk/arm/preemption_disable.c b/osfmk/arm/preemption_disable.c
+index 93fe829..2e62b07 100644
+--- a/osfmk/arm/preemption_disable.c
++++ b/osfmk/arm/preemption_disable.c
+@@ -32,6 +32,7 @@
+  */
+ 
+ #include <arm/cpu_data.h>
++#include <linux64/linux64.h>
+ #include <arm/cpu_data_internal.h>
+ #include <arm/preemption_disable_internal.h>
+ #include <kern/cpu_data.h>
+@@ -68,6 +69,18 @@ kernel_preempt_check(void)
+ {
+ 	uint64_t state;
+ 
++	if (linux64_el0) {
++		if (!ml_get_interrupts_enabled()) {
++			return;
++		}
++		ml_set_interrupts_enabled(FALSE);
++		if (current_thread()->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
++			ast_taken_kernel();
++		}
++		ml_set_interrupts_enabled(TRUE);
++		return;
++	}
++
+ 	/* If interrupts are masked, we can't take an AST here */
+ 	state = __builtin_arm_rsr64("DAIF");
+ 	if (state & DAIF_IRQF) {
 diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
-index a17a07d..bf9934d 100644
+index a17a07d..81e5f76 100644
 --- a/osfmk/arm/rtclock.c
 +++ b/osfmk/arm/rtclock.c
 @@ -38,6 +38,7 @@
@@ -612,7 +939,7 @@ index a17a07d..bf9934d 100644
  	/* call the generic etimer */
  	timer_intr(user_mode, pc);
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
-index f7f387e..cd928a3 100644
+index f7f387e..bec4dcb 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
 @@ -28,6 +28,7 @@
@@ -623,7 +950,37 @@ index f7f387e..cd928a3 100644
  #include <debug.h>
  
  #include <kern/assert.h>
-@@ -1089,7 +1090,8 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
+@@ -404,6 +405,21 @@ phystokv(pmap_paddr_t pa)
+ 	return pa - gPhysBase + gVirtBase;
+ }
+ 
++pmap_paddr_t linux64_el0_ptov_vtop(vm_offset_t va);
++pmap_paddr_t
++linux64_el0_ptov_vtop(vm_offset_t va)
++{
++	for (size_t i = 0; (i < PTOV_TABLE_SIZE) && (ptov_table[i].len != 0); i++) {
++		if ((va >= ptov_table[i].va) && (va < (ptov_table[i].va + ptov_table[i].len))) {
++			return (pmap_paddr_t)(va - ptov_table[i].va) + ptov_table[i].pa;
++		}
++	}
++	if ((va >= gVirtBase) && (va < (gVirtBase + real_phys_size))) {
++		return (pmap_paddr_t)(va - gVirtBase) + gPhysBase;
++	}
++	return 0;
++}
++
+ vm_map_address_t
+ phystokv_range(pmap_paddr_t pa, vm_size_t *max_len)
+ {
+@@ -429,6 +445,7 @@ phystokv_range(pmap_paddr_t pa, vm_size_t *max_len)
+ 	return pa - gPhysBase + gVirtBase;
+ }
+ 
++
+ vm_offset_t
+ ml_static_vtop(vm_offset_t va)
+ {
+@@ -1089,7 +1106,8 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
  				/*
  				 * Set the 'guarded page' flag to enable ARM BTI enforcement.
  				 */
@@ -633,18 +990,51 @@ index f7f387e..cd928a3 100644
  					ptmp |= ARM_PTE_GP;
  				}
  #endif /* BTI_ENFORCED */
-@@ -2194,14 +2196,28 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -1888,6 +1906,15 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	port_crumb = 51;
+ 
+ 	physmap_base += physmap_slide;
++	if (linux64_el0) {
++		/*
++		 * Pure EL0 host: place physmap_base strictly above the initial linear
++		 * aperture (gVirtBase + real_phys_size), 2 MiB-aligned, so ptov_table[]
++		 * never overlaps the linear window's 2 MiB large frames and can be
++		 * mirrored into the high window using 2 MiB large frames.
++		 */
++		physmap_base = ROUND_TWIG(gVirtBase + real_phys_size);
++	}
+ 
+ #if XNU_MONITOR
+ 	physmap_base = ROUND_TWIG(physmap_base);
+@@ -2194,14 +2221,45 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  
  	arm_vm_physmap_init(args);
  	port_crumb = 38;
 -	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
 +	{
 +		if (linux64_hook) {
-+			/*
-+			 * LINUX64 (xnulinux): TTBR1 is Linux's. The host installs XNU's kernel L1 entries
-+			 * (the kernel VA range only) into Linux's top-level L1 table; TTBR0 stays Linux's.
-+			 */
-+			linux64_call(LINUX64_CALL_KERNEL_TABLES, cpu_tte);
++			if (!linux64_el0) {
++				/*
++				 * LINUX64 (xnulinux): TTBR1 is Linux's. The host installs XNU's kernel L1 entries
++				 * (the kernel VA range only) into Linux's top-level L1 table; TTBR0 stays Linux's.
++				 */
++				linux64_call(LINUX64_CALL_KERNEL_TABLES, cpu_tte);
++			} else {
++				/*
++				 * Pure EL0 host: mirror ptov_table[] (physmap) into the host high window so
++				 * phystokv() addresses outside gVirtBase..gVirtBase+size are mapped before
++				 * arm_vm_init returns.
++				 */
++				for (size_t i = 0; (i < PTOV_TABLE_SIZE) && (ptov_table[i].len != 0); i++) {
++					struct linux64_map_req req = {
++						.va = ptov_table[i].va,
++						.pa = ptov_table[i].pa,
++						.size = ptov_table[i].len,
++						.prot = LINUX64_PROT_READ | LINUX64_PROT_WRITE,
++					};
++					linux64_call(LINUX64_CALL_KMAP, &req);
++				}
++			}
 +		} else {
 +			set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
 +		}
@@ -664,7 +1054,7 @@ index f7f387e..cd928a3 100644
  
  	flush_mmu_tlb();
  	port_crumb = 40;
-@@ -2267,9 +2283,14 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+@@ -2267,9 +2325,14 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  		vm_kernel_etext = segTEXTEXECB + segSizeTEXTEXEC;
  		vm_kernel_slid_top = vm_slinkedit;
  	} else {
@@ -683,7 +1073,7 @@ index f7f387e..cd928a3 100644
  	}
  
 diff --git a/osfmk/arm64/asm.h b/osfmk/arm64/asm.h
-index 84deb3f..2579711 100644
+index 84deb3f..6d9cb11 100644
 --- a/osfmk/arm64/asm.h
 +++ b/osfmk/arm64/asm.h
 @@ -135,7 +135,7 @@
@@ -691,12 +1081,95 @@ index 84deb3f..2579711 100644
  
  .macro READ_THREAD
 -	mrs $0, TPIDR_EL1
-+	mrs $0, TPIDRRO_EL0
++	mrs $0, TPIDR_EL0
  .endmacro
  
  .macro BRANCH_EXTERN
+diff --git a/osfmk/arm64/caches_asm.s b/osfmk/arm64/caches_asm.s
+index 58a91a8..758ade8 100644
+--- a/osfmk/arm64/caches_asm.s
++++ b/osfmk/arm64/caches_asm.s
+@@ -44,6 +44,13 @@
+ LEXT(InvalidatePoU_Icache)
+ LEXT(invalidate_mmu_icache)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	dsb		ish
++	isb		sy
++	ret
++9:
+ 	dsb		sy
+ 	ic		ialluis								// Invalidate icache
+ 	dsb		sy
+@@ -214,6 +221,12 @@ L_ipui_loop:
+ 	.globl EXT(clean_mmu_dcache)
+ LEXT(CleanPoC_Dcache)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	dsb		sy
++	ret
++9:
+ #if  defined(APPLE_ARM64_ARCH_FAMILY)
+ 	dsb		sy
+ 	ret
+@@ -234,6 +247,12 @@ LEXT(CleanPoC_Dcache)
+ 	.globl EXT(CleanPoU_Dcache)
+ LEXT(CleanPoU_Dcache)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	dsb		sy
++	ret
++9:
+ #if defined(APPLE_ARM64_ARCH_FAMILY)
+ 	dsb sy
+ 	ret
+@@ -368,6 +387,12 @@ LEXT(CleanPoC_DcacheRegion_Force)
+ 	.globl EXT(FlushPoC_Dcache)
+ LEXT(FlushPoC_Dcache)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	dsb		sy
++	ret
++9:
+ #if defined(APPLE_ARM64_ARCH_FAMILY)
+ 	dsb sy
+ 	ret
+@@ -388,6 +413,12 @@ LEXT(FlushPoC_Dcache)
+ 	.globl EXT(Flush_Dcache)
+ LEXT(Flush_Dcache)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	dsb		sy
++	ret
++9:
+ 	mov x0, #6 // Maximum allowable caching level (0-based)
+ 	DCACHE_SET_WAY cisw 
+ 
+@@ -401,6 +432,12 @@ LEXT(Flush_Dcache)
+ 	.globl EXT(FlushPoU_Dcache)
+ LEXT(FlushPoU_Dcache)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	dsb		sy
++	ret
++9:
+ #if defined(APPLE_ARM64_ARCH_FAMILY)
+ 	dsb sy
+ 	ret
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index d10d7a1..0c3e1ed 100644
+index d10d7a1..91f6577 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -32,6 +32,7 @@
@@ -715,7 +1188,17 @@ index d10d7a1..0c3e1ed 100644
  #if defined(APPLETYPHOON)
  // <rdar://problem/15827409>
  extern void typhoon_prepare_for_wfi(void);
-@@ -430,6 +432,11 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
+@@ -389,6 +391,9 @@ cpu_sleep(void)
+ bool
+ cpu_interrupt_is_pending(void)
+ {
++	if (linux64_el0) {
++		return false;
++	}
+ 	uint64_t isr_value;
+ 	isr_value = __builtin_arm_rsr64("ISR_EL1");
+ 	return isr_value != 0;
+@@ -430,6 +435,11 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
  	 * another core/cluster in a powergated state.
  	 * Hence, optionally unmask IRQs+FIQs across WFE.
  	 */
@@ -727,7 +1210,7 @@ index d10d7a1..0c3e1ed 100644
  	if (unmask) {
  		/* Latch SW IRQ+FIQ counter prior to unmasking
  		 * interrupts.
-@@ -494,6 +501,37 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
+@@ -494,6 +504,37 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
  	return ipending || (nirqc != irqc);
  }
  
@@ -765,7 +1248,7 @@ index d10d7a1..0c3e1ed 100644
  /*
   *	Routine:	cpu_idle
   *	Function:
-@@ -506,6 +544,9 @@ cpu_idle(void)
+@@ -506,6 +547,9 @@ cpu_idle(void)
  	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
  	bool idle_disallowed = false;
  
@@ -775,7 +1258,7 @@ index d10d7a1..0c3e1ed 100644
  	if (__improbable((!idle_enable))) {
  		idle_disallowed = true;
  		os_atomic_inc(&virt_idle_disallowed[0], relaxed);
-@@ -1004,7 +1045,12 @@ cpu_start(int cpu)
+@@ -1004,7 +1048,12 @@ cpu_start(int cpu)
  #endif
  #endif /* CONFIG_SPTM */
  
@@ -790,7 +1273,7 @@ index d10d7a1..0c3e1ed 100644
  	}
  }
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
-index a191eb3..035b1a8 100644
+index a191eb3..9491d4f 100644
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
 @@ -185,7 +185,7 @@
@@ -798,25 +1281,39 @@ index a191eb3..035b1a8 100644
   */
  .macro	set_thread_registers
 -	msr		TPIDR_EL1, $0						// Write new thread pointer to TPIDR_EL1
-+	msr		TPIDRRO_EL0, $0						// LINUX64: the thread pointer (TPIDR_EL1 is Linux's; EL0's TPIDRRO is set on return to user space)
++	msr		TPIDR_EL0, $0						// LINUX64: kernel thread pointer in TPIDR_EL0 (readable/writable at EL0 & EL1)
  	ldr		$1, [$0, ACT_CPUDATAP]
  	str		$0, [$1, CPU_ACTIVE_THREAD]
  
-@@ -217,8 +217,6 @@
- 	bfi		$1, $2, #0, #MACHDEP_TPIDR_CPU_DATA_COUNT
- 	msr		TPIDR_EL0, $1                       // ... into the lower bits.
- 
+@@ -212,16 +212,14 @@
+ 	 * Note that if any bits are added to TPIDR_EL0 that the bootstrap
+ 	 * or idle thread may care about, this will need to change.
+ 	 */
+-	ldr		$2, [$1, CPU_TPIDR_EL0]             // Load encoded CPU info ...
+-	mrs		$1, TPIDR_EL0
+-	bfi		$1, $2, #0, #MACHDEP_TPIDR_CPU_DATA_COUNT
+-	msr		TPIDR_EL0, $1                       // ... into the lower bits.
+-
 -	ldr		$1, [$0, TH_CTH_SELF]				// Get cthread pointer
 -	msr		TPIDRRO_EL0, $1
- 
+-
++	adrp	$2, _linux64_el0@PAGE
++	add		$2, $2, _linux64_el0@PAGEOFF
++	ldr		$2, [$2]
++	tst		$2, #1
++	b.ne	1f
  	ldr		$1, [$0, TH_THREAD_ID]				// Save the bottom 32-bits of the thread ID into
  	msr		CONTEXTIDR_EL1, $1					// CONTEXTIDR_EL1 (top 32-bits are RES0).
++1:
+ .endmacro
+ 
+ #define CSWITCH_ROP_KEYS	(HAS_APPLE_PAC && HAS_PARAVIRTUALIZED_PAC)
 @@ -333,7 +331,7 @@ LEXT(machine_load_context)
  
  LEXT(Call_continuation)
  	ARM64_PROLOG
 -	mrs		x4, TPIDR_EL1						// Get the current thread pointer
-+	mrs		x4, TPIDRRO_EL0						// Get the current thread pointer
++	mrs		x4, TPIDR_EL0						// Get the current thread pointer
  
  	/* ARM64_TODO arm loads the kstack top instead of arg4. What should we use? */
  	LOAD_KERN_STACK_TOP	dst=x5, src=x4, tmp=x6
@@ -825,7 +1322,7 @@ index a191eb3..035b1a8 100644
  	blr		x20									// Branch to the continuation
  #endif
 -	mrs		x0, TPIDR_EL1						// Get the current thread pointer
-+	mrs		x0, TPIDRRO_EL0						// Get the current thread pointer
++	mrs		x0, TPIDR_EL0						// Get the current thread pointer
  	b		EXT(thread_terminate)				// Kill the thread
  
  
@@ -834,7 +1331,7 @@ index a191eb3..035b1a8 100644
  LEXT(Shutdown_context)
  	ARM64_PROLOG
 -	mrs		x10, TPIDR_EL1							// Get thread pointer
-+	mrs		x10, TPIDRRO_EL0							// Get thread pointer
++	mrs		x10, TPIDR_EL0							// Get thread pointer
  	LOAD_KERN_STACK_TOP	dst=x11, src=x10, tmp=x12	// Get the top of the kernel stack
  	save_general_registers	x11, 12
  	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)	// Disable interrupts
@@ -843,7 +1340,7 @@ index a191eb3..035b1a8 100644
  LEXT(Idle_context)
  	ARM64_PROLOG
 -	mrs		x0, TPIDR_EL1						// Get thread pointer
-+	mrs		x0, TPIDRRO_EL0						// Get thread pointer
++	mrs		x0, TPIDR_EL0						// Get thread pointer
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	save_general_registers	x1, 2
  	LOAD_INT_STACK_THREAD	dst=x2, src=x0, tmp=x1
@@ -852,11 +1349,11 @@ index a191eb3..035b1a8 100644
  LEXT(Idle_load_context)
  	ARM64_PROLOG
 -	mrs		x0, TPIDR_EL1						// Get thread pointer
-+	mrs		x0, TPIDRRO_EL0						// Get thread pointer
++	mrs		x0, TPIDR_EL0						// Get thread pointer
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	load_general_registers	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
-@@ -444,3 +442,199 @@ LEXT(machine_set_current_thread)
+@@ -444,3 +442,200 @@ LEXT(machine_set_current_thread)
  
  
  /* vim: set ts=4: */
@@ -878,7 +1375,7 @@ index a191eb3..035b1a8 100644
 +	.globl EXT(linux64_el0_run)
 +LEXT(linux64_el0_run)
 +	ARM64_PROLOG
-+	mrs		x11, TPIDRRO_EL0						// this CPU's thread
++	mrs		x11, TPIDR_EL0						// this CPU's thread
 +	LOAD_KERN_STACK_TOP	dst=x12, src=x11, tmp=x13
 +	sub		x15, x12, #LINUX64_EL0_BLOCK
 +	str		x11, [x15, #0]
@@ -924,6 +1421,7 @@ index a191eb3..035b1a8 100644
 +	mov		sp, x15								// the next exception from EL0 starts below the block
 +	ldr		x10, [x11, TH_CTH_SELF]				// the user's TSD (Darwin reads it from TPIDRRO_EL0)
 +	msr		TPIDRRO_EL0, x10
++	msr		TPIDR_EL0, xzr
 +	/*
 +	 * x1: JOP off for this thread (arm64, not arm64e): EnIA (31) and EnDA (27) off at EL0. Only after the last
 +	 * kernel pointer authentication (LOAD_KERN_STACK_TOP authenticates; with EnDA off it would trap to brk).
@@ -1043,7 +1541,7 @@ index a191eb3..035b1a8 100644
 +	str		w10, [x9, #516]
 +	add		x9, sp, #LINUX64_EL0_FRAME			// linux64_el0_run's block
 +	ldr		x10, [x9, #0]
-+	msr		TPIDRRO_EL0, x10					// XNU's thread pointer again
++	msr		TPIDR_EL0, x10					// XNU's thread pointer again
 +	ldr		x10, [x9, #8]
 +	msr		SP_EL0, x10
 +	ldr		x10, [x9, #16]
@@ -1057,7 +1555,7 @@ index a191eb3..035b1a8 100644
 +	bl		EXT(linux64_el0_exception)
 +	b		.
 diff --git a/osfmk/arm64/exception_asm.h b/osfmk/arm64/exception_asm.h
-index b0772a7..b2e9f03 100644
+index b0772a7..7c1624f 100644
 --- a/osfmk/arm64/exception_asm.h
 +++ b/osfmk/arm64/exception_asm.h
 @@ -299,7 +299,7 @@ Lspill_registers_skip_elr_far_\@:
@@ -1065,12 +1563,12 @@ index b0772a7..b2e9f03 100644
   */
  .macro SWITCH_TO_INT_STACK	tmp
 -	mrs		x1, TPIDR_EL1
-+	mrs		x1, TPIDRRO_EL0
++	mrs		x1, TPIDR_EL0
  	LOAD_INT_STACK_THREAD	dst=x1, src=x1, tmp=\tmp
  	mov		sp, x1			// Set the stack pointer to the interrupt stack
  .endmacro
 diff --git a/osfmk/arm64/locore.s b/osfmk/arm64/locore.s
-index 13d2819..1837c6a 100644
+index 13d2819..71b1e19 100644
 --- a/osfmk/arm64/locore.s
 +++ b/osfmk/arm64/locore.s
 @@ -144,7 +144,7 @@
@@ -1078,7 +1576,7 @@ index 13d2819..1837c6a 100644
  #endif /* DEVELOPMENT || DEBUG */
  #if CONFIG_XNUPOST
 -	mrs		x0, TPIDR_EL1
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  	/*
  	 * If hitting this with a null TPIDR, it's likely that this was an unexpected
  	 * exception in early boot rather than an expected one as a part of a test.
@@ -1087,7 +1585,7 @@ index 13d2819..1837c6a 100644
  	 * the per-CPU data.
  	 */
 -	mrs		x18, TPIDR_EL1
-+	mrs		x18, TPIDRRO_EL0
++	mrs		x18, TPIDR_EL0
  	ldr		x18, [x18, ACT_CPUDATAP]
  	ldr		x18, [x18, CPU_EXC_VECTORS]
  
@@ -1096,7 +1594,7 @@ index 13d2819..1837c6a 100644
  	mrs		x1, SP_EL0
  	str		x1, [x0, #32]						// sp
 -	mrs		x1, TPIDR_EL1
-+	mrs		x1, TPIDRRO_EL0
++	mrs		x1, TPIDR_EL0
  	str		x1, [x0, #40]						// tpidr (thread pointer)
  
  	/* Get timestamp */
@@ -1105,7 +1603,7 @@ index 13d2819..1837c6a 100644
  	b.ne	Lvalid_stack_\@						// ...validate the stack pointer
  	mrs		x0, SP_EL0					// Get SP_EL0
 -	mrs		x1, TPIDR_EL1						// Get thread pointer
-+	mrs		x1, TPIDRRO_EL0						// Get thread pointer
++	mrs		x1, TPIDR_EL0						// Get thread pointer
  	/*
  	 * Check for either a NULL TPIDR or a NULL kernel stack, both of which
  	 * are expected in early boot, but will cause recursive faults if not
@@ -1114,7 +1612,7 @@ index 13d2819..1837c6a 100644
   */
  .macro CHECK_EXCEPTION_STACK invalid_stack_label
 -	mrs		x18, TPIDR_EL1					// Get thread pointer
-+	mrs		x18, TPIDRRO_EL0					// Get thread pointer
++	mrs		x18, TPIDR_EL0					// Get thread pointer
  	/*
  	 * The thread pointer might be invalid during early boot.
  	 * Return zero in x18 to indicate that we failed to execute the check.
@@ -1123,7 +1621,7 @@ index 13d2819..1837c6a 100644
  	// point in the exception vector we can't spare the extra GPR.  Instead note
  	// that EL1_SP0_VECTOR ends with x0 == sp and use this to unclobber x0.
 -	mrs		x1, TPIDR_EL1
-+	mrs		x1, TPIDRRO_EL0
++	mrs		x1, TPIDR_EL0
  	LOAD_INT_STACK_THREAD	dst=x1, src=x1, tmp=x0
  	mov		x0, sp
  	mov		sp, x1
@@ -1132,7 +1630,7 @@ index 13d2819..1837c6a 100644
  	 * Skip redzone mapping if preemption is disabled (e.g. possibly in SPTM context)
  	 */
 -	mrs		x0, TPIDR_EL1
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  	ldr		w0, [x0, ACT_PREEMPT_CNT]
  	cbnz		w0, Lel1_sp0_redzone_done_\@			// Preemption disabled, skip redzone
  
@@ -1141,7 +1639,7 @@ index 13d2819..1837c6a 100644
  	 * Ensure that we actually performed the check on a legitmate value now.
  	 */
 -	mrs		x0, TPIDR_EL1
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  	LOAD_EXCEP_STACK_THREAD dst=x0, src=x0, tmp=x1
  	cmp		x0, x18
  	/* If we aren't equal, something is very wrong and we should lockdown. */
@@ -1150,7 +1648,7 @@ index 13d2819..1837c6a 100644
  	cbz		x0, 0f
  	/* This was a test; return to fault handler so they can fixup the system. */
 -	mrs		x0, TPIDR_EL1
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  	ldr		x16, [x0, TH_EXPECTED_FAULT_HANDLER]
  #if __has_feature(ptrauth_calls)
  	movk	x17, #TH_EXPECTED_FAULT_HANDLER_DIVERSIFIER
@@ -1159,7 +1657,7 @@ index 13d2819..1837c6a 100644
  	mov		x18, #0 						// Zero x18 to avoid leaking data to user SS
  #endif
 -	mrs		x0, TPIDR_EL1						// Load the thread register
-+	mrs		x0, TPIDRRO_EL0						// Load the thread register
++	mrs		x0, TPIDR_EL0						// Load the thread register
  	LOAD_USER_PCB	dst=x0, src=x0, tmp=x1		// Load the user context pointer
  	mrs		x1, SP_EL0							// Load the user stack pointer
  	str		x1, [x0, SS64_SP]					// Store the user stack pointer in the user PCB
@@ -1168,7 +1666,7 @@ index 13d2819..1837c6a 100644
  	stp		x0, x1, [sp, SS64_X0]				// Save x0, x1 to the user PCB
  	stp		x2, x3, [sp, SS64_X2]				// Save x2, x3 to the user PCB
 -	mrs		x1, TPIDR_EL1						// Load the thread register
-+	mrs		x1, TPIDRRO_EL0						// Load the thread register
++	mrs		x1, TPIDR_EL0						// Load the thread register
  
  
  
@@ -1177,7 +1675,7 @@ index 13d2819..1837c6a 100644
   */
  .macro BEGIN_INTERRUPT_HANDLER
 -	mrs		x22, TPIDR_EL1
-+	mrs		x22, TPIDRRO_EL0
++	mrs		x22, TPIDR_EL0
  	ldr		x23, [x22, ACT_CPUDATAP]			// Get current cpu
  	/* Update IRQ count; CPU_STAT_IRQ.* is required to be accurate for the WFE idle sequence  */
  	ldr		w1, [x23, CPU_STAT_IRQ]
@@ -1186,7 +1684,7 @@ index 13d2819..1837c6a 100644
  
  	/* Check if we have a valid thread */
 -	mrs		x1, TPIDR_EL1
-+	mrs		x1, TPIDRRO_EL0
++	mrs		x1, TPIDR_EL0
  	cbz		x1, Lfleh_check_map_redzone_skip
  
  	/* Get kernel stack bottom */
@@ -1195,7 +1693,7 @@ index 13d2819..1837c6a 100644
  	 * nested exception, so just stop here instead to preserve the call stack.
  	 */
 -	mrs		x9, TPIDR_EL1
-+	mrs		x9, TPIDRRO_EL0
++	mrs		x9, TPIDR_EL0
  	cbz		x9, 0f
  	ldr		x9, [x9, TH_KSTACKPTR]
  	cbz		x9, 0f
@@ -1204,7 +1702,7 @@ index 13d2819..1837c6a 100644
  	 * resume the TXM thread in x0.
  	 */
 -	mrs		x8, TPIDR_EL1
-+	mrs		x8, TPIDRRO_EL0
++	mrs		x8, TPIDR_EL0
  	ldr		x8, [x8, TH_TXM_THREAD_STACK]
  	cbz		x8, 1f
  	mov		x0, x8
@@ -1213,7 +1711,7 @@ index 13d2819..1837c6a 100644
  	 */
  1:
 -	mrs		x8, TPIDR_EL1
-+	mrs		x8, TPIDRRO_EL0
++	mrs		x8, TPIDR_EL0
  	ldr		x9, [x8, TH_EXCLAVES_INTSTATE]
  	and		x9, x9, TH_EXCLAVES_EXECUTION
  	cbz		x9, 1f
@@ -1222,7 +1720,7 @@ index 13d2819..1837c6a 100644
  	RETURN_TO_KERNEL_UNWIND
  	tbnz	w0, #DAIF_IRQF_SHIFT, exception_return  // Skip AST check if IRQ disabled
 -	mrs		x3, TPIDR_EL1                           // Load thread pointer
-+	mrs		x3, TPIDRRO_EL0                           // Load thread pointer
++	mrs		x3, TPIDR_EL0                           // Load thread pointer
  	ldr		w1, [x3, ACT_PREEMPT_CNT]               // Load preemption count
  	msr		DAIFSet, #DAIFSC_ALL                    // Disable exceptions
  	cbnz	x1, exception_return_unint_tpidr_x3     // If preemption disabled, skip AST check
@@ -1250,7 +1748,7 @@ index 13d2819..1837c6a 100644
 +	cbz		x9, 1f
 +	b		EXT(linux64_thread_bootstrap_return)
 +1:
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  	LOAD_USER_PCB	dst=x21, src=x0, tmp=x28
  	mov		x28, xzr
  
@@ -1259,7 +1757,7 @@ index 13d2819..1837c6a 100644
  	POP_FRAME_WITHOUT_LR
  #endif /* KASAN_TBI */
 -	mrs		x3, TPIDR_EL1					// Load thread pointer
-+	mrs		x3, TPIDRRO_EL0					// Load thread pointer
++	mrs		x3, TPIDR_EL0					// Load thread pointer
  
  	movn		w2, #0
  	str		w2, [x3, TH_IOTIER_OVERRIDE]			// Reset IO tier override to -1 before returning to user
@@ -1268,7 +1766,7 @@ index 13d2819..1837c6a 100644
  	bl		EXT(arm_debug_set)					// Establish thread debug state in live regs
  	POP_FRAME_WITHOUT_LR
 -	mrs		x3, TPIDR_EL1						// Reload thread pointer
-+	mrs		x3, TPIDRRO_EL0						// Reload thread pointer
++	mrs		x3, TPIDR_EL0						// Reload thread pointer
  	ldr		x4, [x3, ACT_CPUDATAP]				// Reload CPU data pointer
  L_skip_user_set_debug_state:
  
@@ -1277,7 +1775,7 @@ index 13d2819..1837c6a 100644
  	msr		DAIFSet, #DAIFSC_ALL				// Disable exceptions
  exception_return_unint:
 -	mrs		x3, TPIDR_EL1					// Load thread pointer
-+	mrs		x3, TPIDRRO_EL0					// Load thread pointer
++	mrs		x3, TPIDR_EL0					// Load thread pointer
  exception_return_unint_tpidr_x3:
  	mov		sp, x21						// Reload the pcb pointer
  
@@ -1286,7 +1784,7 @@ index 13d2819..1837c6a 100644
  	bne		Lno_sme_saved_state
  
 -	mrs		x3, TPIDR_EL1
-+	mrs		x3, TPIDRRO_EL0
++	mrs		x3, TPIDR_EL0
  	add		x3, x3, ACT_UMATRIX_HDR
  	ldr		x2, [x3]
  	cbz		x2, Lno_sme_saved_state
@@ -1295,7 +1793,7 @@ index 13d2819..1837c6a 100644
  	// If sync_on_cswitch and ERET is not a CSE, issue an ISB now. Unconditionally clear the
  	// sync_on_cswitch flag.
 -	mrs		x1, TPIDR_EL1
-+	mrs		x1, TPIDRRO_EL0
++	mrs		x1, TPIDR_EL0
  	ldr		x1, [x1, ACT_CPUDATAP]
  
  	// Redefined for backporting.
@@ -1304,7 +1802,7 @@ index 13d2819..1837c6a 100644
  	tst		x2, #(PSR64_MODE_EL_MASK)
  	b.ne	1f
 -	mrs		x2, TPIDR_EL1
-+	mrs		x2, TPIDRRO_EL0
++	mrs		x2, TPIDR_EL0
  	ldr		w2, [x2, TH_ARM_MACHINE_FLAGS]
  	tbz		w2, #ARM_MACHINE_THREAD_DISABLE_USER_JOP_SHIFT, 1f
  	mrs		x2, SCTLR_EL1
@@ -1313,7 +1811,7 @@ index 13d2819..1837c6a 100644
  	.align 2
  preempt_underflow:
 -	mrs		x0, TPIDR_EL1
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  	str		x0, [sp, #-16]!						// We'll print thread pointer
  	adr		x0, L_underflow_str					// Format string
  	CALL_EXTERN panic							// Game over
@@ -1322,7 +1820,7 @@ index 13d2819..1837c6a 100644
  	.align 2
  preempt_count_notzero:
 -	mrs		x0, TPIDR_EL1
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  	str		x0, [sp, #-16]!						// We'll print thread pointer
  	ldr		w0, [x0, ACT_PREEMPT_CNT]
  	str		w0, [sp, #8]
@@ -1331,7 +1829,7 @@ index 13d2819..1837c6a 100644
  
  	/* Load the preemption count. */
 -	mrs		x10, TPIDR_EL1
-+	mrs		x10, TPIDRRO_EL0
++	mrs		x10, TPIDR_EL0
  	ldr		w12, [x10, ACT_PREEMPT_CNT]
  
  	/* Detect underflow */
@@ -1340,7 +1838,7 @@ index 13d2819..1837c6a 100644
  
  	/* Restore the thread pointer into x10. */
 -	mrs		x10, TPIDR_EL1
-+	mrs		x10, TPIDRRO_EL0
++	mrs		x10, TPIDR_EL0
  
  Lskip_collect_measurement:
  #endif /* SCHED_HYGIENE_DEBUG */
@@ -1349,7 +1847,7 @@ index 13d2819..1837c6a 100644
  
  	/* Increase the preemption count. */
 -	mrs		x9, TPIDR_EL1
-+	mrs		x9, TPIDRRO_EL0
++	mrs		x9, TPIDR_EL0
  	cbz		x9, Lskip_preemption_check_sptmhook
  	ldr		w10, [x9, ACT_PREEMPT_CNT]
  	add		w10, w10, #1
@@ -1358,7 +1856,7 @@ index 13d2819..1837c6a 100644
  
  	/* Load the preemption count. */
 -	mrs		x0, TPIDR_EL1
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  	cbz		x0, Lsptm_skip_ast_taken_sptmhook
  	ldr		w12, [x0, ACT_PREEMPT_CNT]
  
@@ -1367,7 +1865,7 @@ index 13d2819..1837c6a 100644
  
  	/* Restore x0 as the thread pointer */
 -	mrs		x0, TPIDR_EL1
-+	mrs		x0, TPIDRRO_EL0
++	mrs		x0, TPIDR_EL0
  
  Lskip_collect_measurement_sptmhook:
  #endif /* SCHED_HYGIENE_DEBUG */
@@ -1376,12 +1874,12 @@ index 13d2819..1837c6a 100644
  	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_SP]
  
 -	mrs		x1, TPIDR_EL1
-+	mrs		x1, TPIDRRO_EL0
++	mrs		x1, TPIDR_EL0
  	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_TPIDR]
  
  	mrs		x1, MPIDR_EL1
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index f456377..b66afca 100644
+index f456377..10ebca4 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
 @@ -27,6 +27,7 @@
@@ -1392,7 +1890,7 @@ index f456377..b66afca 100644
  #include <arm64/proc_reg.h>
  #include <arm/machine_cpu.h>
  #include <arm/cpu_internal.h>
-@@ -385,6 +386,7 @@ wfe_process_recommendation(void)
+@@ -385,10 +386,11 @@ wfe_process_recommendation(void)
  void
  machine_idle(void)
  {
@@ -1400,6 +1898,11 @@ index f456377..b66afca 100644
  	/* Interrupts are expected to be masked on entry or re-entry via
  	 * Idle_load_context()
  	 */
+-	assert((__builtin_arm_rsr("DAIF") & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE);
++	assert(linux64_el0 || (__builtin_arm_rsr("DAIF") & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE);
+ 	/* Check for, and act on, a WFE recommendation.
+ 	 * Bypasses context spill/fill for a minor perf. increment.
+ 	 * May unmask and restore IRQ+FIQ mask.
 @@ -400,6 +402,13 @@ machine_idle(void)
  		 */
  		Idle_context();
@@ -1414,7 +1917,37 @@ index f456377..b66afca 100644
  	__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
  }
  
-@@ -441,6 +450,12 @@ ml_get_interrupts_enabled(void)
+@@ -414,6 +423,9 @@ get_aux_control(void)
+ {
+ 	uint64_t        value;
+ 
++	if (linux64_el0) {
++		return 0;
++	}
+ 	MRS(value, "ACTLR_EL1");
+ 	return value;
+ }
+@@ -423,6 +435,9 @@ get_mmu_control(void)
+ {
+ 	uint64_t        value;
+ 
++	if (linux64_el0) {
++		return 0;
++	}
+ 	MRS(value, "SCTLR_EL1");
+ 	return value;
+ }
+@@ -432,6 +447,9 @@ get_tcr(void)
+ {
+ 	uint64_t        value;
+ 
++	if (linux64_el0) {
++		return 0;
++	}
+ 	MRS(value, "TCR_EL1");
+ 	return value;
+ }
+@@ -441,6 +459,12 @@ ml_get_interrupts_enabled(void)
  {
  	uint64_t        value;
  
@@ -1427,18 +1960,72 @@ index f456377..b66afca 100644
  	MRS(value, "DAIF");
  	if ((value & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE) {
  		return FALSE;
-@@ -1367,7 +1382,9 @@ ml_parse_cpu_topology(void)
- 	assert(((tpidr_el0 & MACHDEP_TPIDR_CLUSTERID_MASK) >> MACHDEP_TPIDR_CLUSTERID_SHIFT) == boot_cpu->cluster_id);
- 	__builtin_arm_wsr64("TPIDR_EL0", tpidr_el0);
+@@ -453,6 +477,9 @@ get_mmu_ttb(void)
+ {
+ 	pmap_paddr_t    value;
  
++	if (linux64_el0) {
++		return 0;
++	}
+ 	MRS(value, "TTBR0_EL1");
+ 	return value;
+ }
+@@ -471,6 +498,9 @@ ml_feature_supported(uint64_t feature_bit)
+ {
+ 	uint64_t aidr_el1_value = 0;
+ 
++	if (linux64_el0) {
++		return false;
++	}
+ 	MRS(aidr_el1_value, "AIDR_EL1");
+ 
+ #ifdef APPLEAVALANCHE
+@@ -1365,9 +1395,9 @@ ml_parse_cpu_topology(void)
+ 	    ((boot_cpu->cluster_id << MACHDEP_TPIDR_CLUSTERID_SHIFT) & MACHDEP_TPIDR_CLUSTERID_MASK);
+ 	assert(((tpidr_el0 & MACHDEP_TPIDR_CPUNUM_MASK) >> MACHDEP_TPIDR_CPUNUM_SHIFT) == boot_cpu->cpu_id);
+ 	assert(((tpidr_el0 & MACHDEP_TPIDR_CLUSTERID_MASK) >> MACHDEP_TPIDR_CLUSTERID_SHIFT) == boot_cpu->cluster_id);
+-	__builtin_arm_wsr64("TPIDR_EL0", tpidr_el0);
+-
 -	__builtin_arm_wsr64("TPIDRRO_EL0", 0);
-+	if (!linux64_hook) {	/* LINUX64: hosted, TPIDRRO_EL0 already holds the kernel's thread pointer */
++	if (!linux64_hook) {	/* LINUX64: TPIDR_EL0 holds the kernel thread pointer; never overwrite it */
 +		__builtin_arm_wsr64("TPIDRRO_EL0", 0);
 +	}
  }
  
  const ml_topology_info_t *
-@@ -2529,6 +2546,12 @@ ml_set_decrementer(uint32_t dec_value)
+@@ -1460,8 +1490,13 @@ ml_get_cpu_number_local(void)
+ 	uint64_t mpidr_el1_value = 0;
+ 	unsigned cpu_id;
+ 
+-	/* We identify the CPU based on the constant bits of MPIDR_EL1. */
+-	MRS(mpidr_el1_value, "MPIDR_EL1");
++	/* We identify the CPU based on the constant bits of MPIDR_EL1 (or TPIDRRO_EL0 on EL0 host). */
++	if (linux64_el0) {
++		unsigned slot = linux64_cpu_slot();
++		mpidr_el1_value = (slot & 0xf) | (((uint64_t)((slot >> 4) & 0xf)) << 8);
++	} else {
++		MRS(mpidr_el1_value, "MPIDR_EL1");
++	}
+ 	cpu_id = ml_get_cpu_number((uint32_t)mpidr_el1_value);
+ 
+ 	assert(cpu_id <= (unsigned int)ml_get_max_cpu_number());
+@@ -1475,8 +1510,13 @@ ml_get_cluster_number_local()
+ 	uint64_t mpidr_el1_value = 0;
+ 	unsigned cluster_id;
+ 
+-	/* We identify the cluster based on the constant bits of MPIDR_EL1. */
+-	MRS(mpidr_el1_value, "MPIDR_EL1");
++	/* We identify the cluster based on the constant bits of MPIDR_EL1 (or TPIDRRO_EL0 on EL0 host). */
++	if (linux64_el0) {
++		unsigned slot = linux64_cpu_slot();
++		mpidr_el1_value = (slot & 0xf) | (((uint64_t)((slot >> 4) & 0xf)) << 8);
++	} else {
++		MRS(mpidr_el1_value, "MPIDR_EL1");
++	}
+ 	cluster_id = ml_get_cluster_number((uint32_t)mpidr_el1_value);
+ 
+ 	assert(cluster_id <= (unsigned int)ml_get_max_cluster_number());
+@@ -2529,6 +2569,12 @@ ml_set_decrementer(uint32_t dec_value)
  		}
  	}
  
@@ -1451,8 +2038,57 @@ index f456377..b66afca 100644
  	if (cdp->cpu_set_decrementer_func) {
  		cdp->cpu_set_decrementer_func((uint32_t)counter_value);
  	} else {
+@@ -2657,6 +2703,9 @@ ml_get_timebase_entropy(void)
+ uint32_t
+ ml_get_decrementer(void)
+ {
++	if (linux64_el0) {
++		return 0;
++	}
+ 	cpu_data_t *cdp = getCpuDatap();
+ 	uint32_t dec;
+ 
+@@ -2683,6 +2732,9 @@ ml_get_decrementer(void)
+ boolean_t
+ ml_get_timer_pending(void)
+ {
++	if (linux64_el0) {
++		return FALSE;
++	}
+ 	uint64_t cntv_ctl = __builtin_arm_rsr64(KERNEL_CNTV_CTL_EL0);
+ 	return ((cntv_ctl & CNTV_CTL_EL0_ISTATUS) != 0) ? TRUE : FALSE;
+ }
+@@ -2729,6 +2781,9 @@ platform_syscall(arm_saved_state_t *state)
+ static void
+ _enable_timebase_event_stream(uint32_t bit_index)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ 	if (bit_index >= 64) {
+ 		panic("%s: invalid bit index (%u)", __FUNCTION__, bit_index);
+ 	}
+@@ -2764,6 +2819,9 @@ _enable_timebase_event_stream(uint32_t bit_index)
+ static void
+ _enable_virtual_timer(void)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ 	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
+ 
+ 	__builtin_arm_wsr64(KERNEL_CNTV_CTL_EL0, cntvctl);
+@@ -3380,7 +3438,7 @@ ml_task_post_signature_processing_hook(__unused task_t task)
+ 	thread_t thread = current_thread();
+ 	uint32_t flags = thread->machine.arm_machine_flags;
+ 
+-	if (flags & (ARM_MACHINE_THREAD_PRESERVE_X18_SAVE | ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL)) {
++	if (!linux64_hook && (flags & (ARM_MACHINE_THREAD_PRESERVE_X18_SAVE | ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL))) {
+ 		uint64_t tpidr = __builtin_arm_rsr64("TPIDR_EL0");
+ 		if (!(tpidr & MACHDEP_TPIDR_FLAG_PRESERVE_X18)) {
+ 			tpidr |= MACHDEP_TPIDR_FLAG_PRESERVE_X18;
 diff --git a/osfmk/arm64/machine_routines_asm.s b/osfmk/arm64/machine_routines_asm.s
-index 96650a0..445ce31 100644
+index 96650a0..94ae456 100644
 --- a/osfmk/arm64/machine_routines_asm.s
 +++ b/osfmk/arm64/machine_routines_asm.s
 @@ -95,7 +95,7 @@ Lcre_start_\@:
@@ -1460,11 +2096,105 @@ index 96650a0..445ce31 100644
  
  .macro LOAD_CPU_JOP_KEY	dst, tmp
 -	mrs		\tmp, TPIDR_EL1
-+	mrs		\tmp, TPIDRRO_EL0
++	mrs		\tmp, TPIDR_EL0
  	ldr		\tmp, [\tmp, ACT_CPUDATAP]
  	ldr		\dst, [\tmp, CPU_JOP_KEY]
  .endmacro
-@@ -1748,6 +1748,11 @@ LEXT(arm64_force_wfi_clock_gate)
+@@ -283,6 +283,11 @@ Lupdate_mdscr_panic_str:
+ 	.globl EXT(set_mmu_ttb_alternate)
+ LEXT(set_mmu_ttb_alternate)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	ret
++9:
+ 	dsb		sy
+ #if defined(KERNEL_INTEGRITY_KTRR)
+ 	mov		x1, lr
+@@ -303,6 +308,11 @@ LEXT(set_mmu_ttb_alternate)
+ 	.globl EXT(set_mmu_ttb)
+ LEXT(set_mmu_ttb)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	ret
++9:
+ #if __ARM_KERNEL_PROTECT__
+ 	/* All EL1-mode ASIDs are odd. */
+ 	orr		x0, x0, #(1 << TTBR_ASID_SHIFT)
+@@ -331,6 +341,11 @@ LEXT(ml_get_ppl_cpu_data)
+ 	.globl EXT(set_aux_control)
+ LEXT(set_aux_control)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	ret
++9:
+ 	msr		ACTLR_EL1, x0
+ 	// Synchronize system
+ 	isb		sy
+@@ -342,6 +357,11 @@ LEXT(set_aux_control)
+ 	.globl EXT(set_vbar_el1)
+ LEXT(set_vbar_el1)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	ret
++9:
+ #if defined(KERNEL_INTEGRITY_KTRR)
+ 	b		EXT(pinst_set_vbar)
+ #else
+@@ -359,6 +379,11 @@ LEXT(set_vbar_el1)
+ 	.globl EXT(set_tcr)
+ LEXT(set_tcr)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	ret
++9:
+ #if defined(APPLE_ARM64_ARCH_FAMILY)
+ #if DEBUG || DEVELOPMENT
+ 	// Assert that T0Z is always equal to T1Z
+@@ -409,6 +434,11 @@ L_set_locked_reg_panic_str:
+ 	.globl EXT(mmu_kvtop)
+ LEXT(mmu_kvtop)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	b		EXT(linux64_el0_kvtop)
++9:
+ 	mrs		x2, DAIF									// Load current DAIF
+ 	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)		// Disable all asynchronous exceptions
+ 	at		s1e1r, x0									// Translation Stage 1 EL1
+@@ -431,6 +461,9 @@ L_mmu_kvtop_invalid:
+ 	.globl EXT(mmu_uvtop)
+ LEXT(mmu_uvtop)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbnz	w9, L_mmu_uvtop_invalid
+ 	lsr		x8, x0, #56									// Extract top byte
+ 	cbnz	x8, L_mmu_uvtop_invalid						// Tagged pointers are invalid
+ 	mrs		x2, DAIF									// Load current DAIF
+@@ -455,6 +488,11 @@ L_mmu_uvtop_invalid:
+ 	.globl EXT(mmu_kvtop_wpreflight)
+ LEXT(mmu_kvtop_wpreflight)
+ 	ARM64_PROLOG
++	adrp	x9, _linux64_el0@PAGE
++	ldr		w9, [x9, _linux64_el0@PAGEOFF]
++	cbz		w9, 9f
++	b		EXT(linux64_el0_kvtop)
++9:
+ 	mrs		x2, DAIF									// Load current DAIF
+ 	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)		// Disable all asynchronous exceptions
+ 	at		s1e1w, x0									// Translation Stage 1 EL1
+@@ -1748,6 +1786,11 @@ LEXT(arm64_force_wfi_clock_gate)
  LEXT(arm64_replace_bootstack)
  	ARM64_STACK_PROLOG
  	PUSH_FRAME
@@ -1476,7 +2206,7 @@ index 96650a0..445ce31 100644
  	// Set the exception stack pointer
  	ldr		x0, [x0, CPU_EXCEPSTACK_TOP]
  	mrs		x4, DAIF					// Load current DAIF; use x4 as pinst may trash x1-x3
-@@ -1763,6 +1768,7 @@ LEXT(arm64_replace_bootstack)
+@@ -1763,6 +1806,7 @@ LEXT(arm64_replace_bootstack)
  	mov		sp, x0
  	msr		SPSel, #0
  	msr		DAIF, x4					// Restore interrupt state
@@ -1484,8 +2214,72 @@ index 96650a0..445ce31 100644
  	POP_FRAME
  	ARM64_STACK_EPILOG EXT(arm64_replace_bootstack)
  
+@@ -1849,7 +1893,11 @@ LEXT(monitor_call)
+  *
+  * Branches to Lintr_enabled_panic if interrupts are in an unexpected state.
+  */
+-.macro CHECK_THREAD_STATE_INTERRUPTS tmp
++.macro CHECK_THREAD_STATE_INTERRUPTS tmp, wtmp
++	adrp	\tmp, _linux64_el0@PAGE
++	add		\tmp, \tmp, _linux64_el0@PAGEOFF
++	ldr		\wtmp, [\tmp]
++	cbnz	\wtmp, Lcheck_ts_el0_skip_\@
+ 	mrs		\tmp, DAIF
+ 	tbz		\tmp, #DAIF_IRQF_SHIFT, Lintr_enabled_panic
+ #if !CONFIG_SPTM
+@@ -1860,6 +1908,7 @@ LEXT(monitor_call)
+ 	mrs		\tmp, SPSel
+ 	tbz		\tmp, #0, Lintr_enabled_panic
+ #endif /* !CONFIG_SPTM */
++Lcheck_ts_el0_skip_\@:
+ .endm
+ 
+ /**
+@@ -1878,7 +1927,7 @@ LEXT(ml_sign_thread_state)
+ 	COMPUTE_THREAD_STATE_HASH
+ 	str		x1, [x0, SS64_JOPHASH]
+ #if DEBUG || DEVELOPMENT
+-	CHECK_THREAD_STATE_INTERRUPTS tmp=x1
++	CHECK_THREAD_STATE_INTERRUPTS tmp=x1, wtmp=w1
+ #endif
+ 	ret
+ 
+@@ -1895,7 +1944,7 @@ LEXT(ml_sign_thread_state)
+ 	.globl EXT(ml_check_signed_state)
+ LEXT(ml_check_signed_state)
+ 	ARM64_PROLOG
+-	CHECK_THREAD_STATE_INTERRUPTS tmp=x16
++	CHECK_THREAD_STATE_INTERRUPTS tmp=x16, wtmp=w16
+ 	ldr		x16, [x0, SS64_JOPHASH]
+ 	COMPUTE_THREAD_STATE_HASH
+ 	cmp		x1, x16
+@@ -1970,6 +2019,12 @@ Linvalid_cpsr_str:
+ 	.globl EXT(ml_pac_safe_interrupts_disable)
+ LEXT(ml_pac_safe_interrupts_disable)
+ 	ARM64_PROLOG
++	adrp	x16, _linux64_el0@PAGE
++	ldr		w16, [x16, _linux64_el0@PAGEOFF]
++	cbz		w16, 9f
++	mov		x0, #0
++	ret
++9:
+ 	mrs		x16, DAIF
+ 	and		x17, x16, DAIF_STANDARD_DISABLE
+ 	cmp		x17, DAIF_STANDARD_DISABLE
+@@ -1991,6 +2046,11 @@ Lalready_disabled:
+ 	.globl EXT(ml_pac_safe_interrupts_restore)
+ LEXT(ml_pac_safe_interrupts_restore)
+ 	ARM64_PROLOG
++	adrp	x16, _linux64_el0@PAGE
++	ldr		w16, [x16, _linux64_el0@PAGEOFF]
++	cbz		w16, 9f
++	ret
++9:
+ 	msr		DAIF, x0
+ 	ret
+ 
 diff --git a/osfmk/arm64/pac_asm.h b/osfmk/arm64/pac_asm.h
-index d211433..cb48971 100644
+index d211433..72e22a4 100644
 --- a/osfmk/arm64/pac_asm.h
 +++ b/osfmk/arm64/pac_asm.h
 @@ -216,7 +216,7 @@
@@ -1493,12 +2287,61 @@ index d211433..cb48971 100644
   */
  .macro PACGA_IRG_RESEED x, y, z
 -	mrs     \x, TPIDR_EL1
-+	mrs     \x, TPIDRRO_EL0
++	mrs     \x, TPIDR_EL0
  	ldr     \x, [\x, ACT_CPUDATAP]
  
  	// No need for atomic - These are per CPU and interrupts are disabled
+diff --git a/osfmk/arm64/pcb.c b/osfmk/arm64/pcb.c
+index 4538d50..9593e08 100644
+--- a/osfmk/arm64/pcb.c
++++ b/osfmk/arm64/pcb.c
+@@ -53,6 +53,7 @@
+ #include <arm64/sop.h>
+ #endif
+ #include <arm/cpu_data_internal.h>
++#include <linux64/linux64.h>
+ #include <arm/machdep_call.h>
+ #include <arm/misc_protos.h>
+ #include <arm/cpuid.h>
+@@ -364,6 +365,9 @@ machine_thread_switch_cpu_data(thread_t old, thread_t new)
+ static inline void
+ machine_switch_cpu_data(thread_t old, thread_t new)
+ {
++	/* LINUX64: kernel thread pointer lives in TPIDR_EL0; never overwrite it with CPU id */
++	machine_thread_switch_cpu_data(old, new);
++	return;
+ #if !__ARM_KERNEL_PROTECT__
+ 	/*
+ 	 * If the old thread was entitled for x18 preservation, save away
+@@ -503,7 +507,7 @@ machine_switch_context(thread_t old,
+ 	thread_t retval;
+ 
+ #if __ARM_PAN_AVAILABLE__
+-	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
++	if (__improbable(!linux64_el0 && __builtin_arm_rsr("pan") == 0)) {
+ 		panic("context switch with PAN disabled");
+ 	}
+ #endif
+@@ -1006,7 +1010,7 @@ machine_stack_attach(thread_t thread,
+ 
+ 	machine_stack_attach_kprintf("kstackptr: %lx\n", (vm_address_t)kstackptr);
+ 
+-	current_el = (uint32_t) __builtin_arm_rsr64("CurrentEL");
++	current_el = linux64_el0 ? PSR64_MODE_EL1 : (uint32_t) __builtin_arm_rsr64("CurrentEL");
+ 	context = &((thread_kernel_state_t) thread->machine.kstackptr)->machine;
+ 	savestate = &context->ss;
+ 	savestate->fp = 0;
+@@ -1048,7 +1052,7 @@ machine_stack_handoff(thread_t old,
+ 	vm_offset_t  stack;
+ 
+ #if __ARM_PAN_AVAILABLE__
+-	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
++	if (__improbable(!linux64_el0 && __builtin_arm_rsr("pan") == 0)) {
+ 		panic("stack handoff with PAN disabled");
+ 	}
+ #endif
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..3fac7b4 100644
+index d8f1b19..26e15fa 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
 @@ -1,4 +1,5 @@
@@ -1515,7 +2358,7 @@ index d8f1b19..3fac7b4 100644
  #endif
  
  #include <prng/entropy.h>
-@@ -3646,3 +3648,274 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3648,301 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -1650,6 +2493,10 @@ index d8f1b19..3fac7b4 100644
 +			linux64_el0_t0[slot] = 0;
 +		}
 +	}
++	if (linux64_el0) {
++		kprintf("linux64: EL0 host reached user-space entry point (pc 0x%llx)\n", get_saved_state_pc(thread->machine.upcb));
++		linux64_call2(LINUX64_CALL_PANIC, (unsigned long)"EL0 host reached user entry (Phase 3 complete)", 0);
++	}
 +	linux64_el0_run(thread->machine.upcb, (thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) != 0);
 +}
 +
@@ -1705,29 +2552,52 @@ index d8f1b19..3fac7b4 100644
 +		s64->sp = f->sp;
 +#if HAS_APPLE_PAC
 +		uint64_t intr = ml_pac_safe_interrupts_disable();
-+		asm volatile (
-+			"mov	x9, lr"				"\n"
-+			"mov	x0, %[ss]"			"\n"
-+			"mrs	x10, SPSel"			"\n"
-+			"msr	SPSel, #1"			"\n"
-+			"mov	x1, %[pc]"			"\n"
-+			"mov	w2, %w[cpsr]"			"\n"
-+			"mov	x3, %[lr]"			"\n"
-+			"mov	x4, %[x16]"			"\n"
-+			"mov	x5, %[x17]"			"\n"
-+			"str	x1, [x0, %[SS64_PC]]"		"\n"
-+			"str	w2, [x0, %[SS64_CPSR]]"		"\n"
-+			"str	x3, [x0, %[SS64_LR]]"		"\n"
-+			"stp	x4, x5, [x0, %[SS64_X16]]"	"\n"
-+			"bl	_ml_sign_thread_state"		"\n"
-+			"msr	SPSel, x10"			"\n"
-+			"mov	lr, x9"				"\n"
-+			:
-+			: [ss] "r"(ss), [pc] "r"(f->pc), [cpsr] "r"(cpsr), [lr] "r"(f->x[30]), [x16] "r"(f->x[16]), [x17] "r"(f->x[17]),
-+			  [SS64_X16] "i"(ss64_offsetof(x[16])), [SS64_PC] "i"(ss64_offsetof(pc)),
-+			  [SS64_CPSR] "i"(ss64_offsetof(cpsr)), [SS64_LR] "i"(ss64_offsetof(lr))
-+			: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x16", "x17", "memory"
-+		);
++		if (linux64_el0) {
++			asm volatile (
++				"mov	x9, lr"				"\n"
++				"mov	x0, %[ss]"			"\n"
++				"mov	x1, %[pc]"			"\n"
++				"mov	w2, %w[cpsr]"			"\n"
++				"mov	x3, %[lr]"			"\n"
++				"mov	x4, %[x16]"			"\n"
++				"mov	x5, %[x17]"			"\n"
++				"str	x1, [x0, %[SS64_PC]]"		"\n"
++				"str	w2, [x0, %[SS64_CPSR]]"		"\n"
++				"str	x3, [x0, %[SS64_LR]]"		"\n"
++				"stp	x4, x5, [x0, %[SS64_X16]]"	"\n"
++				"bl	_ml_sign_thread_state"		"\n"
++				"mov	lr, x9"				"\n"
++				:
++				: [ss] "r"(ss), [pc] "r"(f->pc), [cpsr] "r"(cpsr), [lr] "r"(f->x[30]), [x16] "r"(f->x[16]), [x17] "r"(f->x[17]),
++				  [SS64_X16] "i"(ss64_offsetof(x[16])), [SS64_PC] "i"(ss64_offsetof(pc)),
++				  [SS64_CPSR] "i"(ss64_offsetof(cpsr)), [SS64_LR] "i"(ss64_offsetof(lr))
++				: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x16", "x17", "memory"
++			);
++		} else {
++			asm volatile (
++				"mov	x9, lr"				"\n"
++				"mov	x0, %[ss]"			"\n"
++				"mrs	x10, SPSel"			"\n"
++				"msr	SPSel, #1"			"\n"
++				"mov	x1, %[pc]"			"\n"
++				"mov	w2, %w[cpsr]"			"\n"
++				"mov	x3, %[lr]"			"\n"
++				"mov	x4, %[x16]"			"\n"
++				"mov	x5, %[x17]"			"\n"
++				"str	x1, [x0, %[SS64_PC]]"		"\n"
++				"str	w2, [x0, %[SS64_CPSR]]"		"\n"
++				"str	x3, [x0, %[SS64_LR]]"		"\n"
++				"stp	x4, x5, [x0, %[SS64_X16]]"	"\n"
++				"bl	_ml_sign_thread_state"		"\n"
++				"msr	SPSel, x10"			"\n"
++				"mov	lr, x9"				"\n"
++				:
++				: [ss] "r"(ss), [pc] "r"(f->pc), [cpsr] "r"(cpsr), [lr] "r"(f->x[30]), [x16] "r"(f->x[16]), [x17] "r"(f->x[17]),
++				  [SS64_X16] "i"(ss64_offsetof(x[16])), [SS64_PC] "i"(ss64_offsetof(pc)),
++				  [SS64_CPSR] "i"(ss64_offsetof(cpsr)), [SS64_LR] "i"(ss64_offsetof(lr))
++				: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x16", "x17", "memory"
++			);
++		}
 +		ml_pac_safe_interrupts_restore(intr);
 +#else
 +		s64->x[16] = f->x[16];
@@ -1790,30 +2660,200 @@ index d8f1b19..3fac7b4 100644
 +	sleh_synchronous(thread->machine.contextData, f->esr, (vm_offset_t)f->far, false);
 +	thread_exception_return();
 +}
+diff --git a/osfmk/arm64/static_if.c b/osfmk/arm64/static_if.c
+index 22be6f2..ac29c4e 100644
+--- a/osfmk/arm64/static_if.c
++++ b/osfmk/arm64/static_if.c
+@@ -75,9 +75,15 @@ ml_static_if_entry_patch(static_if_entry_t sie, int branch)
+ 	}
+ }
+ 
++extern unsigned int linux64_el0;
++
+ MARK_AS_FIXUP_TEXT void
+ ml_static_if_flush_icache(void)
+ {
++	if (linux64_el0) {
++		asm volatile ("dsb sy\n\tisb sy" : : : "memory");
++		return;
++	}
+ 	asm volatile (""
+              "ic      ialluis"       "\n\t"
+              "dsb     sy"            "\n\t"
 diff --git a/osfmk/arm64/status.c b/osfmk/arm64/status.c
-index c615764..72ec4a7 100644
+index c615764..8929f2b 100644
 --- a/osfmk/arm64/status.c
 +++ b/osfmk/arm64/status.c
-@@ -2103,16 +2103,17 @@ machine_thread_state_initialize(thread_t thread)
-                         "mov	x3, #0"                 "\n"
-                         "mov	x4, #0"                 "\n"
-                         "mov	x5, #0"                 "\n"
-+                        "mrs	x10, SPSel"             "\n"
-                         "msr	SPSel, #1"              "\n"
-                         VERIFY_USER_THREAD_STATE_INSTR  "\n"
-                         "mov	x6, lr"                 "\n"
-                         "bl     _ml_sign_thread_state"  "\n"
+@@ -33,6 +33,7 @@
+ #include <kern/kalloc.h>
+ #include <arm/vmparam.h>
+ #include <arm/cpu_data_internal.h>
++#include <linux64/linux64.h>
+ #include <arm/misc_protos.h>
+ #include <arm64/machine_machdep.h>
+ #include <arm64/proc_reg.h>
+@@ -2096,24 +2097,44 @@ machine_thread_state_initialize(thread_t thread)
+ 	/* Sign the initial user-space thread state */
+ 	if (thread->machine.upcb != NULL) {
+ 		uint64_t intr = ml_pac_safe_interrupts_disable();
+-		asm volatile (
+-                        "mov	x0, %[iss]"             "\n"
+-                        "mov	x1, #0"                 "\n"
+-                        "mov	w2, %w[usr]"            "\n"
+-                        "mov	x3, #0"                 "\n"
+-                        "mov	x4, #0"                 "\n"
+-                        "mov	x5, #0"                 "\n"
+-                        "msr	SPSel, #1"              "\n"
+-                        VERIFY_USER_THREAD_STATE_INSTR  "\n"
+-                        "mov	x6, lr"                 "\n"
+-                        "bl     _ml_sign_thread_state"  "\n"
 -                        "msr	SPSel, #0"              "\n"
-+                        "msr	SPSel, x10"             "\n"
-                         "mov	lr, x6"                 "\n"
-                         :
-                         : [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr),
-                           VERIFY_USER_THREAD_STATE_INPUTS
+-                        "mov	lr, x6"                 "\n"
+-                        :
+-                        : [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr),
+-                          VERIFY_USER_THREAD_STATE_INPUTS
 -                        : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x17"
-+                        : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x10", "x17"
-                 );
+-                );
++		if (linux64_el0) {
++			asm volatile (
++				"mov	x0, %[iss]"             "\n"
++				"mov	x1, #0"                 "\n"
++				"mov	w2, %w[usr]"            "\n"
++				"mov	x3, #0"                 "\n"
++				"mov	x4, #0"                 "\n"
++				"mov	x5, #0"                 "\n"
++				VERIFY_USER_THREAD_STATE_INSTR  "\n"
++				"mov	x6, lr"                 "\n"
++				"bl     _ml_sign_thread_state"  "\n"
++				"mov	lr, x6"                 "\n"
++				:
++				: [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr),
++				  VERIFY_USER_THREAD_STATE_INPUTS
++				: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x17"
++			);
++		} else {
++			asm volatile (
++				"mov	x0, %[iss]"             "\n"
++				"mov	x1, #0"                 "\n"
++				"mov	w2, %w[usr]"            "\n"
++				"mov	x3, #0"                 "\n"
++				"mov	x4, #0"                 "\n"
++				"mov	x5, #0"                 "\n"
++				"mrs	x10, SPSel"             "\n"
++				"msr	SPSel, #1"              "\n"
++				VERIFY_USER_THREAD_STATE_INSTR  "\n"
++				"mov	x6, lr"                 "\n"
++				"bl     _ml_sign_thread_state"  "\n"
++				"msr	SPSel, x10"             "\n"
++				"mov	lr, x6"                 "\n"
++				:
++				: [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr),
++				  VERIFY_USER_THREAD_STATE_INPUTS
++				: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x10", "x17"
++			);
++		}
  		ml_pac_safe_interrupts_restore(intr);
  	}
+ #endif /* defined(HAS_APPLE_PAC) */
+diff --git a/osfmk/arm64/tlb.h b/osfmk/arm64/tlb.h
+index c0154ab..dcc77df 100644
+--- a/osfmk/arm64/tlb.h
++++ b/osfmk/arm64/tlb.h
+@@ -89,9 +89,14 @@ arm64_sync_tlb(bool strong __unused)
+ }
+ 
+ // flush_mmu_tlb: full TLB flush on all cores
++extern unsigned int linux64_el0;
++
+ static inline void
+ flush_mmu_tlb_async(void)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ 	asm volatile ("tlbi vmalle1is");
+ }
+ 
+@@ -111,6 +116,9 @@ flush_mmu_tlb(void)
+ static inline void
+ flush_core_tlb_async(void)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ #if HAS_FEAT_XS
+ 	asm volatile ("tlbi vmalle1nxs");
+ #else
+@@ -131,6 +139,9 @@ static inline void
+ flush_mmu_tlb_allentries_async(uint64_t start, uint64_t end, uint64_t pmap_page_size,
+     bool last_level_only, bool strong __unused)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ #if __ARM_16K_PG__
+ 	if (pmap_page_size == 16384) {
+ 		start = start & ~0x3ULL;
+@@ -192,6 +203,9 @@ static inline void
+ flush_mmu_tlb_entries_async(uint64_t start, uint64_t end, uint64_t pmap_page_size,
+     bool last_level_only, bool strong __unused)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ #if __ARM_16K_PG__
+ 	if (pmap_page_size == 16384) {
+ 		start = start & ~0x3ULL;
+@@ -289,6 +303,9 @@ flush_mmu_tlb_entries(uint64_t start, uint64_t end, uint64_t pmap_page_size, boo
+ static inline void
+ flush_mmu_tlb_asid_async(uint64_t val, bool strong __unused)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ #if __ARM_KERNEL_PROTECT__
+ 	/*
+ 	 * If we are flushing ASID 0, this is a kernel operation.  With this
+@@ -326,6 +343,9 @@ flush_mmu_tlb_asid(uint64_t val, bool strong)
+ static inline void
+ flush_core_tlb_asid_async(uint64_t val)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ #if __ARM_KERNEL_PROTECT__
+ 	/*
+ 	 * If we are flushing ASID 0, this is a kernel operation.  With this
+@@ -390,6 +410,9 @@ generate_rtlbi_param(ppnum_t npages, uint32_t asid, vm_offset_t va, uint64_t pma
+ static inline void
+ flush_mmu_tlb_range_async(uint64_t val, bool last_level_only, bool strong __unused)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ 	if (last_level_only) {
+ #if HAS_FEAT_XS
+ 		if (__probable(!strong)) {
+@@ -424,6 +447,9 @@ flush_mmu_tlb_range(uint64_t val, bool last_level_only, bool strong)
+ static inline void
+ flush_mmu_tlb_allrange_async(uint64_t val, bool last_level_only, bool strong __unused)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ 	if (last_level_only) {
+ #if HAS_FEAT_XS
+ 		if (__probable(!strong)) {
+@@ -458,6 +484,9 @@ flush_mmu_tlb_allrange(uint64_t val, bool last_level_only, bool strong)
+ static inline void
+ flush_core_tlb_allrange_async(uint64_t val)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ #if HAS_FEAT_XS
+ 	asm volatile ("tlbi rvaae1nxs, %0" : : "r"(val));
+ #else
 diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
 index 11d9eb4..8c59a02 100644
 --- a/osfmk/console/serial_console.c
@@ -2182,7 +3222,7 @@ index b2aae03..af01ff3 100644
 +	}
 +}
 diff --git a/osfmk/kern/stack.c b/osfmk/kern/stack.c
-index 1111ccf..9bc5118 100644
+index 1111ccf..b2a685d 100644
 --- a/osfmk/kern/stack.c
 +++ b/osfmk/kern/stack.c
 @@ -30,6 +30,7 @@
@@ -2251,35 +3291,101 @@ index 1111ccf..9bc5118 100644
  			stack = 0;
  
 diff --git a/osfmk/mach/arm/thread_status.h b/osfmk/mach/arm/thread_status.h
-index 99971b0..efc6ab8 100644
+index 99971b0..3f54a6d 100644
 --- a/osfmk/mach/arm/thread_status.h
 +++ b/osfmk/mach/arm/thread_status.h
-@@ -522,6 +522,7 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
- 	        asm volatile (                                                  \
- 	                "mov	x9, lr"				"\n"            \
- 	                "mov	x0, %[iss]"			"\n"            \
-+	                "mrs	x10, SPSel"			"\n"            \
- 	                "msr	SPSel, #1"			"\n"            \
- 	                "ldp	x4, x5, [x0, %[SS64_X16]]"	"\n"            \
- 	                "ldr	x7, [x0, %[SS64_PC]]"		"\n"            \
-@@ -535,7 +536,7 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
- 	                _instr					"\n"            \
- 	                "bl	_ml_sign_thread_state"		"\n"            \
- 	                "0:"					"\n"            \
+@@ -518,34 +518,64 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
+  */
+ #define MANIPULATE_SIGNED_THREAD_STATE(_iss, _instr, ...)                       \
+ 	do {                                                                    \
++	        extern unsigned int linux64_el0;                                \
+ 	        uint64_t _intr = ml_pac_safe_interrupts_disable();              \
+-	        asm volatile (                                                  \
+-	                "mov	x9, lr"				"\n"            \
+-	                "mov	x0, %[iss]"			"\n"            \
+-	                "msr	SPSel, #1"			"\n"            \
+-	                "ldp	x4, x5, [x0, %[SS64_X16]]"	"\n"            \
+-	                "ldr	x7, [x0, %[SS64_PC]]"		"\n"            \
+-	                "ldr	w8, [x0, %[SS64_CPSR]]"		"\n"            \
+-	                "ldr	x3, [x0, %[SS64_LR]]"		"\n"            \
+-	                "mov	x1, x7"				"\n"            \
+-	                "mov	w2, w8"				"\n"            \
+-	                "bl	_ml_check_signed_state"		"\n"            \
+-	                "mov	x1, x7"				"\n"            \
+-	                "mov	w2, w8"				"\n"            \
+-	                _instr					"\n"            \
+-	                "bl	_ml_sign_thread_state"		"\n"            \
+-	                "0:"					"\n"            \
 -	                "msr	SPSel, #0"			"\n"            \
-+	                "msr	SPSel, x10"			"\n"            \
- 	                "mov	lr, x9"				"\n"            \
- 	                :                                                       \
- 	                : [iss]         "r"(_iss),                              \
-@@ -544,7 +545,7 @@ extern void ml_check_signed_state(const arm_saved_state_t *, uint64_t, uint32_t,
- 	                  [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),               \
- 	                  [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__    \
- 	                : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", \
+-	                "mov	lr, x9"				"\n"            \
+-	                :                                                       \
+-	                : [iss]         "r"(_iss),                              \
+-	                  [SS64_X16]	"i"(ss64_offsetof(x[16])),              \
+-	                  [SS64_PC]	"i"(ss64_offsetof(pc)),                 \
+-	                  [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),               \
+-	                  [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__    \
+-	                : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", \
 -	                  "x9", "x16", "x17"                                    \
-+	                  "x9", "x10", "x16", "x17"                             \
- 	        );                                                              \
+-	        );                                                              \
++	        if (linux64_el0) {                                              \
++	                asm volatile (                                          \
++	                        "mov	x9, lr"				"\n"    \
++	                        "mov	x0, %[iss]"			"\n"    \
++	                        "ldp	x4, x5, [x0, %[SS64_X16]]"	"\n"    \
++	                        "ldr	x7, [x0, %[SS64_PC]]"		"\n"    \
++	                        "ldr	w8, [x0, %[SS64_CPSR]]"		"\n"    \
++	                        "ldr	x3, [x0, %[SS64_LR]]"		"\n"    \
++	                        "mov	x1, x7"				"\n"    \
++	                        "mov	w2, w8"				"\n"    \
++	                        "bl	_ml_check_signed_state"		"\n"    \
++	                        "mov	x1, x7"				"\n"    \
++	                        "mov	w2, w8"				"\n"    \
++	                        _instr					"\n"    \
++	                        "bl	_ml_sign_thread_state"		"\n"    \
++	                        "0:"					"\n"    \
++	                        "mov	lr, x9"				"\n"    \
++	                        :                                               \
++	                        : [iss]         "r"(_iss),                      \
++	                          [SS64_X16]	"i"(ss64_offsetof(x[16])),      \
++	                          [SS64_PC]	"i"(ss64_offsetof(pc)),         \
++	                          [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),       \
++	                          [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__ \
++	                        : "x0", "x1", "x2", "x3", "x4", "x5", "x6",     \
++	                          "x7", "x8", "x9", "x16", "x17"                \
++	                );                                                      \
++	        } else {                                                        \
++	                asm volatile (                                          \
++	                        "mov	x9, lr"				"\n"    \
++	                        "mov	x0, %[iss]"			"\n"    \
++	                        "mrs	x10, SPSel"			"\n"    \
++	                        "msr	SPSel, #1"			"\n"    \
++	                        "ldp	x4, x5, [x0, %[SS64_X16]]"	"\n"    \
++	                        "ldr	x7, [x0, %[SS64_PC]]"		"\n"    \
++	                        "ldr	w8, [x0, %[SS64_CPSR]]"		"\n"    \
++	                        "ldr	x3, [x0, %[SS64_LR]]"		"\n"    \
++	                        "mov	x1, x7"				"\n"    \
++	                        "mov	w2, w8"				"\n"    \
++	                        "bl	_ml_check_signed_state"		"\n"    \
++	                        "mov	x1, x7"				"\n"    \
++	                        "mov	w2, w8"				"\n"    \
++	                        _instr					"\n"    \
++	                        "bl	_ml_sign_thread_state"		"\n"    \
++	                        "0:"					"\n"    \
++	                        "msr	SPSel, x10"			"\n"    \
++	                        "mov	lr, x9"				"\n"    \
++	                        :                                               \
++	                        : [iss]         "r"(_iss),                      \
++	                          [SS64_X16]	"i"(ss64_offsetof(x[16])),      \
++	                          [SS64_PC]	"i"(ss64_offsetof(pc)),         \
++	                          [SS64_CPSR]	"i"(ss64_offsetof(cpsr)),       \
++	                          [SS64_LR]	"i"(ss64_offsetof(lr)),##__VA_ARGS__ \
++	                        : "x0", "x1", "x2", "x3", "x4", "x5", "x6",     \
++	                          "x7", "x8", "x9", "x10", "x16", "x17"         \
++	                );                                                      \
++	        }                                                               \
  	        ml_pac_safe_interrupts_restore(_intr);                          \
  	} while (0)
+ 
 diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
 index bb62cdd..9bea611 100644
 --- a/osfmk/mach/arm/vm_param.h
@@ -2353,6 +3459,130 @@ index 44b993c..4ce279b 100644
  	cc_clear(sizeof(seed), seed);
  
  	return 0;
+diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
+index 4f2045c..f716201 100644
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -65,6 +65,7 @@
+ 
+ #include <mach/kern_return.h>
+ #include <mach/vm_param.h>
++#include <linux64/linux64.h>
+ #include <kern/assert.h>
+ #include <kern/thread.h>
+ #include <vm/vm_entry_lock_internal.h>
+@@ -869,6 +870,9 @@ kmem_alloc_guard_internal(
+ 	 */
+ 	assert((flags & (KMA_PAGEABLE | KMA_DATA)) != (KMA_PAGEABLE | KMA_DATA));
+ #endif /* defined(__arm64__) */
++	if (linux64_el0 && (flags & KMA_PAGEABLE) && !(flags & KMA_VAONLY)) {
++		flags &= ~KMA_PAGEABLE;
++	}
+ 
+ #if DEBUG || DEVELOPMENT
+ 	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_START,
+@@ -2478,6 +2482,28 @@ alloc_fail:
+ 
+ #pragma mark map/remap/wire
+ 
++static void
++linux64_el0_prefault_kernel_map(
++	vm_map_t                map,
++	mach_vm_offset_t        addr,
++	mach_vm_size_t          size,
++	vm_prot_t               prot)
++{
++	if (!linux64_el0 || map == VM_MAP_NULL || map->pmap != kernel_pmap) {
++		return;
++	}
++	if (!(prot & (VM_PROT_READ | VM_PROT_WRITE)) || size == 0) {
++		return;
++	}
++	vm_map_offset_t start = vm_map_trunc_page(addr, VM_MAP_PAGE_MASK(map));
++	vm_map_offset_t end = vm_map_round_page(addr + size, VM_MAP_PAGE_MASK(map));
++	vm_prot_t ftype = (prot & VM_PROT_WRITE) ? VM_PROT_WRITE : VM_PROT_READ;
++	for (vm_map_offset_t va = start; va < end; va += VM_MAP_PAGE_SIZE(map)) {
++		(void)vm_fault(map, va, ftype, FALSE, VM_KERN_MEMORY_NONE,
++		    THREAD_UNINT, NULL, 0);
++	}
++}
++
+ kern_return_t
+ mach_vm_map_kernel(
+ 	vm_map_t                target_map,
+@@ -2493,7 +2519,7 @@ mach_vm_map_kernel(
+ 	vm_inherit_ut           inheritance)
+ {
+ 	/* range_id is set by vm_map_enter_mem_object */
+-	return vm_map_enter_mem_object(target_map,
++	kern_return_t kr = vm_map_enter_mem_object(target_map,
+ 	           address,
+ 	           initial_size,
+ 	           mask,
+@@ -2506,6 +2532,13 @@ mach_vm_map_kernel(
+ 	           inheritance,
+ 	           NULL,
+ 	           0);
++	if (kr == KERN_SUCCESS) {
++		linux64_el0_prefault_kernel_map(target_map,
++		    VM_SANITIZE_UNSAFE_UNWRAP(*address),
++		    VM_SANITIZE_UNSAFE_UNWRAP(initial_size),
++		    VM_SANITIZE_UNSAFE_UNWRAP(cur_protection));
++	}
++	return kr;
+ }
+ 
+ kern_return_t
+@@ -2531,7 +2564,7 @@ mach_vm_remap_new_kernel(
+ 	vmk_flags.vmf_return_data_addr = true;
+ 
+ 	/* range_id is set by vm_map_remap */
+-	return vm_map_remap(target_map,
++	kern_return_t kr = vm_map_remap(target_map,
+ 	           address,
+ 	           size,
+ 	           mask,
+@@ -2542,6 +2575,13 @@ mach_vm_remap_new_kernel(
+ 	           cur_protection,
+ 	           max_protection,
+ 	           inheritance);
++	if (kr == KERN_SUCCESS && cur_protection != NULL) {
++		linux64_el0_prefault_kernel_map(target_map,
++		    VM_SANITIZE_UNSAFE_UNWRAP(*address),
++		    VM_SANITIZE_UNSAFE_UNWRAP(size),
++		    VM_SANITIZE_UNSAFE_UNWRAP(*cur_protection));
++	}
++	return kr;
+ }
+ 
+ #pragma mark free
+diff --git a/osfmk/vm/vm_sanitize.c b/osfmk/vm/vm_sanitize.c
+index d1ff7d0..362f39f 100644
+--- a/osfmk/vm/vm_sanitize.c
++++ b/osfmk/vm/vm_sanitize.c
+@@ -640,7 +640,8 @@ vm_sanitize_addr_size(
+ 		 * instead of assuming it is 48 bits.
+ 		 * This is excluded from unit-test build due to being EL1 only instruction
+ 		 */
+-		assert((__builtin_arm_rsr64("ID_AA64MMFR2_EL1") & ID_AA64MMFR2_EL1_VARANGE_MASK) == 0);
++		extern unsigned int linux64_el0;
++		assert(linux64_el0 || (__builtin_arm_rsr64("ID_AA64MMFR2_EL1") & ID_AA64MMFR2_EL1_VARANGE_MASK) == 0);
+ #endif /* defined(__arm64__) && MACH_ASSERT && !__BUILDING_XNU_LIBRARY__ */
+ 		const uint64_t max_va_bits = 48;
+ 		const mach_vm_offset_t va_range_upper_bound = (1ULL << max_va_bits);
+diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+index a9b12f4..263775c 100644
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -788,7 +788,7 @@ vm_shared_region_create(
+ #endif /* CODE_SIGNING_MONITOR */
+ 			int vm_map_pageshift = PAGE_SHIFT;
+ #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+-			vm_map_pageshift = FOURK_PAGE_SHIFT;
++			vm_map_pageshift = PAGE_SHIFT;	/* LINUX64: as the task maps (mach_loader.c) */
+ #else
+ 			if (is_64bit ||
+ 			    page_shift_user32 == SIXTEENK_PAGE_SHIFT) {
 diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
 index fea9411..cdccb1f 100644
 --- a/pexpert/arm/pe_kprintf.c
@@ -2384,45 +3614,3 @@ index fea9411..cdccb1f 100644
  	if (!disable_serial_output && !disable_kprintf_output) {
  		va_start(listp, fmt);
  		va_copy(listp2, listp);
-diff --git a/bsd/kern/mach_loader.c b/bsd/kern/mach_loader.c
-index 6ce6141..8fb290b 100644
---- a/bsd/kern/mach_loader.c
-+++ b/bsd/kern/mach_loader.c
-@@ -801,7 +801,7 @@ load_machfile(
- #if defined(__arm64__)
- 	if (result->is_64bit_addr) {
- #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
--		vm_map_pageshift = FOURK_PAGE_SHIFT;
-+		vm_map_pageshift = PAGE_SHIFT;	/* LINUX64: the kernel's VM page (16 KB over a 4 KB granule with linux64_vm16k) */
- #else
- 		/* enforce 16KB alignment of VM map entries */
- 		vm_map_pageshift = SIXTEENK_PAGE_SHIFT;
-diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
-index a9b12f4..263775c 100644
---- a/osfmk/vm/vm_shared_region.c
-+++ b/osfmk/vm/vm_shared_region.c
-@@ -788,7 +788,7 @@ vm_shared_region_create(
- #endif /* CODE_SIGNING_MONITOR */
- 			int vm_map_pageshift = PAGE_SHIFT;
- #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
--			vm_map_pageshift = FOURK_PAGE_SHIFT;
-+			vm_map_pageshift = PAGE_SHIFT;	/* LINUX64: as the task maps (mach_loader.c) */
- #else
- 			if (is_64bit ||
- 			    page_shift_user32 == SIXTEENK_PAGE_SHIFT) {
-diff --git a/osfmk/arm/commpage/commpage.c b/osfmk/arm/commpage/commpage.c
-index 1f672e9..0413ad9 100644
---- a/osfmk/arm/commpage/commpage.c
-+++ b/osfmk/arm/commpage/commpage.c
-@@ -155,8 +155,9 @@ commpage_populate(void)
- 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) page_shift_user32;
- 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_32 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) page_shift_user32;
- #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
--	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) FOURK_PAGE_SHIFT;
--	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) FOURK_PAGE_SHIFT;
-+	/* LINUX64: user maps take the kernel's VM page (mach_loader.c) */
-+	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) PAGE_SHIFT;
-+	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) PAGE_SHIFT;
- #else
- 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64_LEGACY + _COMM_PAGE_RW_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;
- 	*((uint8_t*)(_COMM_PAGE_USER_PAGE_SHIFT_64 + _COMM_PAGE_RO_OFFSET)) = (uint8_t) SIXTEENK_PAGE_SHIFT;

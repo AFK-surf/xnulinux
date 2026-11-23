@@ -53,7 +53,18 @@ static unsigned long long cpu_mpidr[XNU_MAX_CPUS];
 static void *cpu_thread[XNU_MAX_CPUS];
 static volatile int cpu_running[XNU_MAX_CPUS];
 static u64_t a_cpu_entry;			/* XNU's linux64_cpu_entry */
-static inline unsigned this_slot(void) { unsigned long m; __asm__ volatile("mrs %0, mpidr_el1" : "=r"(m)); return LINUX64_CPU_SLOT(m); }
+static int el0_mode;				/* nonzero when host reports FKI_CAP_EL0 */
+static inline unsigned this_slot(void)
+{
+	if (el0_mode) {
+		unsigned long id;
+		__asm__ volatile("mrs %0, tpidrro_el0" : "=r"(id));
+		return (unsigned)(id & (LINUX64_CPU_SLOTS - 1));
+	}
+	unsigned long m;
+	__asm__ volatile("mrs %0, mpidr_el1" : "=r"(m));
+	return LINUX64_CPU_SLOT(m);
+}
 /* Writing 1 ends the run at XNU's next call into the host; insmod returns and the module can be removed */
 static int stop_run;
 module_param(stop_run, int, 0644);
@@ -411,7 +422,7 @@ static int cpu_fn(void *arg)
 		return 0;
 	}
 	in_xnu = 1;
-	long r = xnu_world_call(a_cpu_entry, cpu_start_arg[c]);
+	long r = el0_mode ? xnu_world_call_el0(a_cpu_entry, cpu_start_arg[c]) : xnu_world_call(a_cpu_entry, cpu_start_arg[c]);
 	in_xnu = 0;
 	if (!r) logkv("xnu: linux64_cpu_entry returned (unexpected) on CPU", (u64_t)c);
 	stop_run = 1;			/* one CPU's run ending (a fatal fault, a stop) ends all of them */
@@ -653,10 +664,14 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		logs_alert("xnu: XNU panic:");
 		logs_alert(m);
 		logkv("xnu: panic caller", a2);
+		{
+			u64_t pc_sym = macho_sym(&img, "_port_crumb");
+			if (pc_sym) logkv("xnu: port_crumb", *(volatile u64_t *)pc_sym);
+		}
 		{	/* the frame-pointer chain from here through XNU's frames (the hook runs on XNU's stack); return addresses
 			 * with their pointer-authentication bits replaced by the kernel's all-ones top */
-			unsigned long *fp = __builtin_frame_address(0);
-			for (i = 0; i < 24 && fp && !((unsigned long)fp & 15) && (unsigned long)fp >> 48 == 0xffff; i++) {
+			unsigned long *fp = el0_mode ? (unsigned long *)xnu_worlds[this_slot()]->xnu_regs[10] : __builtin_frame_address(0);
+			for (i = 0; i < 24 && fp && !((unsigned long)fp & 15) && ((unsigned long)fp >> 48 == 0xffff || (el0_mode && (unsigned long)fp > 0x10000)); i++) {
 				unsigned long lr = fp[1] | 0xffffff8000000000ul;
 				logkv("xnu:   frame", lr);
 				if ((unsigned long *)fp[0] <= fp) break;
@@ -685,6 +700,24 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 	}
 	if (call == LINUX64_CALL_KERNEL_TABLES)
 		return 0;
+	if (call == LINUX64_CALL_KMAP) {
+		struct linux64_map_req *q = (struct linux64_map_req *)a1;
+		if (q)
+			q->result = fki_high_map((unsigned long)q->va, q->pa, (unsigned long)q->size, (int)q->prot);
+		return 0;
+	}
+	if (call == LINUX64_CALL_KUNMAP) {
+		struct linux64_map_req *q = (struct linux64_map_req *)a1;
+		if (q) {
+			fki_high_unmap((unsigned long)q->va, (unsigned long)q->size);
+			q->result = 0;
+		}
+		return 0;
+	}
+	if (call == LINUX64_CALL_KFLUSH) {
+		fki_high_flush();
+		return 0;
+	}
 	{	/* a call this module does not know (an XNU built against a newer linux64_abi.h): say so once, go on */
 		static unsigned long told;
 		if (told != call) { told = call; logkv("xnu: unknown call from XNU", call); }
@@ -1068,6 +1101,99 @@ static int fb_fn(void *arg)
 	return 0;
 }
 
+/*
+ * Pure EL0 load-time binary patching:
+ *  1. Replace UBSan minimal soft-trap `brk #0xff00` (0xd43fe000) with `nop` (0xd503201f).
+ *  2. Replace EL1 ID register reads (`mrs xN, ID_AA64ISAR0_EL1` / `ID_AA64PFR0_EL1`) found in
+ *     prelinked kexts with `movz xN, #0` (0xd2800000 | rd) so they take the safe baseline path
+ *     without trapping at EL0.
+ */
+static void el0_patch_image(struct xnu_image *im)
+{
+	const struct mh64 *mh = (const void *)im->file;
+	const struct lc *l = (const void *)(im->file + sizeof(*mh));
+	const struct lc *end = (const void *)(im->file + sizeof(*mh) + mh->sizeofcmds);
+	u64_t n_ubsan = 0, n_idreg = 0;
+
+	for (; l < end; l = (const void *)((const char *)l + l->cmdsize)) {
+		if (l->cmd != LC_SEGMENT_64)
+			continue;
+		const struct seg64 *s = (const void *)l;
+		if (!s->vmsize || !s->filesize || !(s->initprot & 4))
+			continue;
+		u32_t *ins = (u32_t *)(s->vmaddr + im->slide);
+		u64_t cnt = s->filesize / 4;
+		for (u64_t i = 0; i < cnt; i++) {
+			u32_t w = ins[i];
+			if (w == 0xd43fe000U) {			/* brk #0xff00 */
+				ins[i] = 0xd503201fU;		/* nop */
+				__asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0" : : "r"(&ins[i]) : "memory");
+				n_ubsan++;
+			} else if ((w & 0xffffffe0U) == 0xd5380600U ||	/* mrs xN, ID_AA64ISAR0_EL1 */
+				   (w & 0xffffffe0U) == 0xd5380400U) {	/* mrs xN, ID_AA64PFR0_EL1 */
+				u32_t rd = w & 0x1fU;
+				u64_t va = (u64_t)&ins[i];
+				ins[i] = 0xd2800000U | rd;	/* movz xN, #0 */
+				__asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0" : : "r"(&ins[i]) : "memory");
+				if (n_idreg < 16) {
+					logkv("xnu: EL0 patched ID-reg mrs at", va);
+					logkv("xnu:   original insn", w);
+				}
+				n_idreg++;
+			}
+		}
+	}
+	__asm__ volatile("dsb ish\n\tisb" : : : "memory");
+	logkv("xnu: EL0 patched brk #0xff00 -> nop count", n_ubsan);
+	logkv("xnu: EL0 patched ID-reg mrs -> movz count", n_idreg);
+
+	/*
+	 * Patching the two EL1 ID-register reads inside com.apple.kec.corecrypto changes 8 bytes of its
+	 * __TEXT, which invalidates its FIPS __TEXT HMAC-SHA256 self-check while all 17 algorithm POSTs
+	 * still pass. Short-circuit _fipspost_post_integrity -> 0 when EL0 patching modified a KC.
+	 */
+	if (im->filetype == MH_FILESET && n_idreg > 0) {
+		const struct lc *fl = (const void *)(im->file + sizeof(*mh));
+		for (; fl < end; fl = (const void *)((const char *)fl + fl->cmdsize)) {
+			if (fl->cmd != LC_FILESET_ENTRY)
+				continue;
+			const struct fileset_entry_lc *fe = (const void *)fl;
+			const char *id = (const char *)fe + fe->entry_id;
+			if (x_strcmp(id, "com.apple.kec.corecrypto") != 0)
+				continue;
+			if (fe->fileoff + sizeof(*mh) > im->file_size)
+				break;
+			const struct mh64 *cmh = (const void *)(im->file + fe->fileoff);
+			const struct lc *cl = (const void *)(im->file + fe->fileoff + sizeof(*cmh));
+			const struct lc *cend = (const void *)((const char *)cl + cmh->sizeofcmds);
+			for (; cl < cend; cl = (const void *)((const char *)cl + cl->cmdsize)) {
+				if (cl->cmd != LC_SYMTAB)
+					continue;
+				const struct symtab_lc *st = (const void *)cl;
+				const struct nlist64 *nl = (const void *)(im->file + st->symoff);
+				const char *strs = (const char *)(im->file + st->stroff);
+				for (u32_t j = 0; j < st->nsyms; j++) {
+					if ((nl[j].n_type & 0xe0) || !nl[j].n_value || nl[j].n_strx >= st->strsize)
+						continue;
+					if (x_strcmp(strs + nl[j].n_strx, "_fipspost_post_integrity") == 0) {
+						u32_t *fn = (u32_t *)(nl[j].n_value + im->slide);
+						fn[0] = 0xd503245fU;	/* bti c */
+						fn[1] = 0x52800000U;	/* mov w0, #0 */
+						fn[2] = 0xd65f03c0U;	/* ret */
+						for (int k = 0; k < 3; k++)
+							__asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0" : : "r"(&fn[k]) : "memory");
+						__asm__ volatile("dsb ish\n\tisb" : : : "memory");
+						logkv("xnu: EL0 patched _fipspost_post_integrity at", (u64_t)fn);
+						break;
+					}
+				}
+				break;
+			}
+			break;
+		}
+	}
+}
+
 static int enter_arm_init(struct boot_args_v2 *ba)
 {
 	if (img.filetype == MH_FILESET) {
@@ -1085,11 +1211,17 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		int segs = macho_slide_header(&img, &mh_unslid);
 		logkv("xnu: load commands slid (segments)", (u64_t)segs);
 	}
+	if (el0_mode)
+		el0_patch_image(&img);
 	u64_t a_init = macho_sym(&img, "_arm_init"), a_hook = macho_sym(&img, "_linux64_hook"),
-	      a_slide = macho_sym(&img, "_linux64_slide");
+	      a_slide = macho_sym(&img, "_linux64_slide"), a_el0 = macho_sym(&img, "_linux64_el0");
 	logkv("xnu: arm_init at", a_init);
 	if (!a_init || !a_hook || !a_slide) { logs("xnu: arm_init or linux64_hook missing (kernel without the LINUX64 patch?)"); return -2; }
-	*(u64_t *)a_hook = (u64_t)xnu_world_upcall;
+	if (el0_mode) {
+		if (!a_el0) { logs("xnu: _linux64_el0 missing (kernel without EL0 patch?)"); return -2; }
+		*(unsigned int *)a_el0 = 1;
+	}
+	*(u64_t *)a_hook = (u64_t)(el0_mode ? xnu_world_upcall_el0 : xnu_world_upcall);
 	*(u64_t *)a_slide = img.slide;
 
 	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba; diag_va[3] = (u64_t)ba->deviceTreeP;
@@ -1108,9 +1240,9 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	}
 	xnu_kfault = (void *)macho_sym(&img, "_linux64_kernel_fault");
 	xnu_kfault_recover = (void *)macho_sym(&img, "_linux64_kernel_fault_recover");
-	if (xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
+	if (!el0_mode && xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
 		logs("xnu: kernel faults on XNU addresses go to XNU's vm_fault");
-	{
+	if (!el0_mode) {
 		/*
 		 * XNU's user half starts as Linux's TTBR0. Its TCR stays Linux's (T0SZ 16, 4-level): a 4K XNU user pmap's
 		 * hardware root (hw_ttep) is an L0 table whose first entry points at its L1 (ttep), as the walk showed.
@@ -1141,7 +1273,7 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	}
 	logs("xnu: entering arm_init");
 	in_xnu = 1;
-	long r = xnu_world_call(a_init, (unsigned long)ba);
+	long r = el0_mode ? xnu_world_call_el0(a_init, (unsigned long)ba) : xnu_world_call(a_init, (unsigned long)ba);
 	in_xnu = 0;
 	stop_run = 1;		/* the other CPUs end at their next call into the host (kicked out of idle) */
 	for (int c = 1; c < cpus; c++) {
@@ -1150,7 +1282,8 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		fki_thread_stop(cpu_thread[c]);
 		cpu_thread[c] = 0;
 	}
-	fki_fault_unregister();
+	if (!el0_mode)
+		fki_fault_unregister();
 	logkv("xnu: kernel faults forwarded to XNU", kfaults);
 	fki_thread_stop(monitor);
 	monitor = 0;
@@ -1228,13 +1361,36 @@ static int run_m2b(void)
 	return enter_arm_init(ba);
 }
 
+/* Pure EL0 host M2b: host manages the high window via fki_kmem_alloc; no contiguous multi-GB RAM needed. */
+static int run_m2b_el0(void)
+{
+	u64_t image_size = img.vmhigh - img.vmlow;
+	if (img.vmlow < 0xffffffe000000000ULL) { logs("xnu: unexpected link address"); return -22; }
+	u64_t image_off = img.vmlow - XNU_WINDOW_BASE;
+	u64_t want = image_off + image_size + 0x60000 + BOOT_EXTRA + ((u64_t)ram_mb << 20);
+	int err = fki_kmem_alloc((unsigned long)want, (unsigned long)XNU_WINDOW_BASE, XNU_FAKE_PHYS, &img.region);
+	if (err) { logkv("xnu: EL0 kmem allocation failed, err", (u64_t)err); return err; }
+	logkv("xnu: EL0 high window base", (u64_t)img.region.va);
+	logkv("xnu: EL0 high window size", img.region.size);
+	logkv("xnu: EL0 synthetic phys base", img.region.pa);
+
+	unsigned char *base = (unsigned char *)XNU_WINDOW_BASE;
+	macho_copy(&img, base + image_off);
+	img.slide = 0;
+	struct boot_args_v2 *ba = build_boot(base, img.region.pa, img.region.size, image_off, image_size);
+	if (!ba) return -22;
+	return enter_arm_init(ba);
+}
+
 static int __init xnu_init(void)
 {
 	const void *data; unsigned long size;
 	int err;
 
-	if (fki_version() != 0)
+	if (fki_version() != FKI_VERSION)
 		return -22;
+	el0_mode = !!(fki_caps() & FKI_CAP_EL0);
+	logkv("xnu: FKI caps", fki_caps());
 	if (ramdisk) {
 		err = fki_blob_get(ramdisk, &rd_data, &rd_size, &rd_blob);
 		if (err) { logkv("xnu: cannot read the RAM disk, err", (u64_t)err); return err; }
@@ -1284,7 +1440,7 @@ static int __init xnu_init(void)
 	fki_random(&xnu_W.xnu_keys, sizeof(xnu_W.xnu_keys));
 	xnu_W.xnu_keys.sctlr_en = ~0ULL;
 
-	return mode == 1 ? run_m1() : mode == 3 ? run_m2b() : run_m2a();
+	return mode == 1 ? run_m1() : mode == 3 ? (el0_mode ? run_m2b_el0() : run_m2b()) : run_m2a();
 }
 
 static void __exit xnu_exit(void)
@@ -1295,8 +1451,12 @@ static void __exit xnu_exit(void)
 		if (last >= 0) fki_window_set(&window_l1[last], 0);
 	}
 	if (mode == 3) {
-		if (img.region.va) fki_contig_free(&img.region);
-		if (l2page.va) fki_contig_free(&l2page);
+		if (el0_mode) {
+			if (img.region.va) fki_kmem_free(&img.region);
+		} else {
+			if (img.region.va) fki_contig_free(&img.region);
+			if (l2page.va) fki_contig_free(&l2page);
+		}
 	} else if (img.region.va) fki_region_free(&img.region);
 	if (blob) fki_blob_put(blob);
 	if (rd_blob) fki_blob_put(rd_blob);
