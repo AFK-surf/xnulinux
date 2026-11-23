@@ -74,6 +74,14 @@ awake = {"Label": "xnulinux.awake", "RunAtLoad": True,
          "ProgramArguments": ["/usr/bin/pmset", "-a", "displaysleep", "0", "sleep", "0", "disksleep", "0"]}
 p = D + "/Library/LaunchDaemons/xnulinux.awake.plist"
 plistlib.dump(awake, open(p, "wb")); os.chown(p, 0, 0); os.chmod(p, 0o644)
+# No screen saver either: after its idle time (no keyboard or pointer input: a hosted system with no one at it) it plays
+# the aerial wallpaper's video, which without the GPU bridge decodes in software and takes both of a two-CPU system's
+# CPUs, then locks the session. The setting is the user's, per host (ByHost, by IOPlatformUUID), so it is made at login.
+nosaver = {"Label": "xnulinux.nosaver", "RunAtLoad": True, "LimitLoadToSessionType": "Aqua",
+           "ProgramArguments": ["/usr/bin/defaults", "-currentHost", "write", "com.apple.screensaver", "idleTime", "-int", "0"]}
+os.makedirs(D + "/Library/LaunchAgents", exist_ok=True)
+p = D + "/Library/LaunchAgents/xnulinux.nosaver.plist"
+plistlib.dump(nosaver, open(p, "wb")); os.chown(p, 0, 0); os.chmod(p, 0o644)
 p = D + "/private/var/db/com.apple.xpc.launchd/disabled.plist"
 disabled = plistlib.load(open(p, "rb")) if os.path.exists(p) else {}
 disabled.update({label: True for label in os.environ["DISABLE"].split()})
@@ -86,7 +94,7 @@ plistlib.dump({"keyboardtype": {"22529-4617-0": 40}}, open(p, "wb")); os.chown(p
 # for it (WebKit's GPU process, WindowServer), over the limits set for a real GPU's clients. launchd applies sysctl.conf.
 p = D + "/private/etc/sysctl.conf"
 open(p, "w").write("kern.memorystatus_highwater_enabled=0\n"); os.chown(p, 0, 0); os.chmod(p, 0o644)
-print("console shell job, %d daemons disabled, keyboard type, sysctl.conf" % len(disabled))
+print("console shell job, no screen saver, %d daemons disabled, keyboard type, sysctl.conf" % len(disabled))
 PY
 # The boot cryptexes' contents where dyld finds them without a graft: on a Mac, dyld in launchd grafts the OS and App
 # cryptexes (Preboot/<group>/cryptex1/current/{os,app}.dmg) onto Preboot/Cryptexes/{OS,App} from the ignition blob
