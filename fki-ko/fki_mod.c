@@ -51,6 +51,12 @@ void fki_log(const char *s, unsigned long len)
 	pr_info("fki: %.*s\n", (int)len, s);
 }
 EXPORT_SYMBOL(fki_log);
+/* what an operator must see even with the console quiet (an XNU panic, a CPU gone silent): KERN_ALERT */
+void fki_log_alert(const char *s, unsigned long len)
+{
+	pr_alert("fki: %.*s\n", (int)len, s);
+}
+EXPORT_SYMBOL(fki_log_alert);
 
 
 /*
