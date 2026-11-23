@@ -28,6 +28,7 @@ What the PoC did to get each step running, and what replaces it. Ordered by what
 | `kc-amfi-platform.py` patches AMFI's expected platform version in the kernel collection | Build the collection from the same macOS build as the disk (one version source), no byte patching |
 | `amfi_get_out_of_my_way=1`, `lp-sip0=0x802`, `kern.memorystatus_highwater_enabled=0` | Keep SIP/AMFI on; sign our plugin and kexts (ad-hoc trust cache of our own), only the unauthenticated-root bit stays |
 | `/chosen` UUIDs passed by hand (`root_uuid=`, `preboot_uuid=`) | Read from the disk's APFS container at load (xnu.ko or a host tool), no manual parameters (step one done: `mk-macvm-disk.sh` writes them to `mac.conf`, `xnulinux-boot.sh` reads it) |
+| Fixed `carve_base=0x400000000` with `nokaslr` so Linux's arm64 EFI stub does not place the kernel image inside the carve-out before `mem=15G` takes effect | Have `fki` choose the carve-out dynamically at load from the actual memory map (avoiding the kernel image and reserved regions), then re-enable KASLR |
 
 ## 4. Scripts and tests
 

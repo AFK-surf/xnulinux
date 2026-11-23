@@ -8,7 +8,9 @@ set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 CARVE_BASE=${CARVE_BASE:-0x400000000}; CARVE_MB=${CARVE_MB:-8156}
 G=/etc/default/grub.d/99-xnulinux.cfg
-echo 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX mem=15G log_buf_len=128M"' | sudo tee $G >/dev/null
+# nokaslr: arm64's EFI stub randomises the Linux kernel's physical load address across all EFI memory before mem=15G
+# takes effect, which otherwise places the kernel image inside the 0x400000000 carve-out on ~1/3 of boots.
+echo 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX mem=15G nokaslr log_buf_len=128M"' | sudo tee $G >/dev/null
 sudo update-grub >/dev/null 2>&1
 sudo tee /etc/systemd/system/xnulinux-fki.service >/dev/null <<UNIT
 [Unit]
