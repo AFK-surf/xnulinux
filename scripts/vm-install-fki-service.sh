@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # In the VM (once): the hosted kernel's DRAM as RAM Linux never manages, and fki.ko loaded with it early in every boot.
 # The VM has 24 GB; Linux's command line says mem=15G (RAM from 0x40000000 to 0x400000000), and the 8 GB above, below
 # the firmware's holes near the top, are fki's carve-out (carve_base/carve_mb). A CMA area was not enough: one page Linux

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: APSL-2.0
 // XnuCPU: the hosted system's CPUs, one IOCPU per /cpus/cpuN node xnu.ko describes (compatible "xnulinux,cpu").
 //
 // On a Mac the platform's CPU driver registers each CPU with the kernel (ml_processor_register) and starts and signals

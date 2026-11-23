@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # On the Mac host: keep the Linux VM running under krunkit as a launchd agent of this user. krunkit exits when the guest
 # reboots or powers off; launchd starts it again (KeepAlive), and at login (RunAtLoad). With the hosted macOS as a service
 # in the VM (scripts/install-service.sh) a reboot of either comes back by itself.

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Rewrite plain ARM64 `blr Xn` / `br Xn` (n=0..29) in a linked arm64e Rust Mach-O dylib
 into `bl _nmb_pac_call_xN` / `b _nmb_pac_call_xN` trampolines (from RustPacBoundary.c),
 skipping the trampolines themselves and RustPacBoundary's own C functions."""

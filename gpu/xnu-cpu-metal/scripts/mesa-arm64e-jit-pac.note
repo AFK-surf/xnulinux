@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Patches applied to Mesa 26.3.1 for arm64e macOS PAC compatibility in gallivm JIT:
 #
 # 1. C -> JIT indirect calls (sign unsigned JIT code pointer for arm64e blraaz):

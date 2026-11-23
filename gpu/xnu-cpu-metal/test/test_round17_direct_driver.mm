@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Round 17 verification: deterministic direct driver loading (VK_LUNARG_direct_driver_loading)
 // Verifies:
 // 1. Selected backend loads ONLY its own driver dylib (unused ICDs in icd.d are never dlopen'd).

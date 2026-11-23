@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 # Find BL callers of a target in [lo, hi) of a fileset KC and print the instruction words after each (debugging aid).
 import struct, sys
 path, lo, hi, target = sys.argv[1], int(sys.argv[2], 16), int(sys.argv[3], 16), int(sys.argv[4], 16)

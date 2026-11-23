@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # On the Mac host: run the xnupoc VM with its console (hvc0) captured to ../serial-cap.log.
 cd "$(dirname "$0")/.."
 rm -f ../serial-name

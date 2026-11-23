@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 // ADT: node = {u32 nProperties, u32 nChildren}, then properties
 // {char name[32]; u32 length; value padded to 4}, then children.
 #include "xrt.h"

@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # On the Mac host: run the xnupoc Linux VM under krunkit (libkrun on Hypervisor.framework) instead of tart, for a GPU the
 # guest can use: krunkit gives Linux a virtio-gpu with Venus (Vulkan commands forwarded to virglrenderer, then MoltenVK and
 # Metal on the host GPU). The VM's disk is tart's own (stop tart first; both never run at once). Networking is gvproxy

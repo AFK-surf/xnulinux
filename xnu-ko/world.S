@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 /* World switch, see world.h. No PAC instructions here: keys change under our feet.
  * x18 is Linux's shadow call stack pointer (CONFIG_SHADOW_CALL_STACK), which belongs to the Linux task that entered the
  * world on this CPU. XNU does not use it or save it per thread, so it stays this CPU's while XNU runs (Linux code XNU
