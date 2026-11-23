@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #include <objc/message.h>
 // XnuCpuMetal.bundle — Pure-CPU Metal plugin for xnulinux (macOS 27).
 // Principal class: XnuCpuMetalDevice (subclass of IOGPUMetalDevice).

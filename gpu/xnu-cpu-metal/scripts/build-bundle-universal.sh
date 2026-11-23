@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,7 +28,7 @@ lipo -create \
   "$ROOT/dist/lavapipe-arm64e/lib/libvulkan_lvp.dylib" \
   -output "$BUNDLE/Contents/Frameworks/libvulkan_lvp.dylib"
 
-VENUS_DYLIB="${VENUS_DYLIB:-/Users/admin/w/venus-darwin/out/lib/libvulkan_virtio.dylib}"
+VENUS_DYLIB="${VENUS_DYLIB:-$HOME/w/venus-darwin/out/lib/libvulkan_virtio.dylib}"	# gpu/venus/build-darwin.sh output
 HAS_VENUS=0
 if [ -f "$VENUS_DYLIB" ]; then
   cp -f "$VENUS_DYLIB" "$BUNDLE/Contents/Frameworks/libvulkan_virtio.dylib"

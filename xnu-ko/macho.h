@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 /* Minimal Mach-O definitions (written from the public format, no Apple headers). */
 #pragma once
 #include "../fki-ko/fki.h"

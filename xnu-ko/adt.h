@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 /* Apple device tree (ADT) writer, written from the documented flattened format. */
 #pragma once
 struct adt { unsigned char *buf, *p, *end; int err; };

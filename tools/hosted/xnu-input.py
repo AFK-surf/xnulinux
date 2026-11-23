@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """Send keyboard and pointer input to the hosted macOS (XnuInput): Linux evdev records appended to xnu.ko's input_in.
 
     xnu-input.py [--file /var/tmp/xnu-input] [--screen 1280x800] COMMAND ...

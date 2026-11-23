@@ -26,4 +26,3 @@ Install: `scripts/mk-macvm-disk.sh` (repo root) puts the bundle on the system di
 - `/Library/GPUBundles` is trusted only with `CSR_ALLOW_UNRESTRICTED_FS` (boot-arg `lp-sip0=2` in the hosted kernel).
 - The device class must conform to `MTLDeviceSPI` (`MTLAddDevice` asserts it).
 - `targetDeviceArchitecture` must be an `MTLTargetDeviceArchitecture` (the AIR type here), or binary archives assert.
-`REPORT.md` is the development log (host-side reproduction and pixel comparisons against an M5 Max GPU).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 // A minimal static arm64 Mach-O for /sbin/launchd on a test root, BSD syscalls through svc #0x80 only:
 // open("/dev/console", O_WRONLY), write a line, fork; the child writes its own line and exits 7,
 // the child then execve()s /sbin/hello (which writes its line and exits 7); the parent wait4()s for it, writes a closing line and exits 42.

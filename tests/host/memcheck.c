@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Fill GBs of memory with a pattern derived from each word's address, re-verify it in a loop and report every word
  * that changed: its virtual and physical address (/proc/self/pagemap, root) and the value found. A probe for a foreign
  * writer (the hosted kernel, a device) scribbling over Linux's memory. Usage: memcheck GB SECONDS */

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """Set the lowest code-signature platform version AMFI accepts in a built kernel collection (in place).
 
 The hosted kernel links Apple's kexts from one macOS build (the collection) while the system disk can be another: AMFI

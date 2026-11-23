@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # On the Mac host, with the VM running and XNU loaded with CONSOLE_IN=/var/tmp/console-in: an interactive terminal on
 # XNU's /dev/console. Output: the "darwin console:" lines of the captured serial log; input: each line typed here is
 # appended to the console input file in the VM.

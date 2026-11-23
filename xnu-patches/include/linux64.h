@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 /*
  * Copyright (c) 2026 xnulinux contributors. All rights reserved.
  *

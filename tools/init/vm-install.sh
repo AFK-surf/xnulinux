@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # In the VM: build tools/init with the DroidVM k27 toolchain and put it at /sbin/launchd in /lib/firmware/xnu/root.img.
 set -euo pipefail
 cd "$(dirname "$0")"; TC=~/w/dvm/toolchains/linux/bin26

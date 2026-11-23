@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 // XnuEAN: the EAN of the hosted macOS, the small keyed store the Secure Enclave's replacement on Apple's virtual platform keeps
 // its xART in.
 //

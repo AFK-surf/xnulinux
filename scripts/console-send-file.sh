@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # console-send-file.sh LOCAL REMOTE: types LOCAL into the hosted macOS console shell as short base64 lines (one every
 # 0.3 s, so the tty input queue never overflows: one long typed line gets mangled by the line editor), decoded to REMOTE.
 cd "$(dirname "$0")/.."

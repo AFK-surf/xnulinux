@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 # In the hosted macOS, at boot (launchd job xnulinux.network): en0 is XNU's link to the host's xnu0 (bsd/net/if_linux64.c).
 # Without an IOKit interface behind it configd's IPConfiguration does not manage it, so configure it here: address, default
 # route, and the DNS/IPv4 state mDNSResponder resolves through (it does not read /etc/resolv.conf).

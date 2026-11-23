@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # In the Linux guest: build Mesa's Venus Vulkan driver with our patches (patches/), then check it on the GPU behind
 # virtio-gpu: list the device and run test/compute.c (a compute dispatch over 16 MB of host-visible memory, read back and
 # compared). Output: $OUT/lib/libvulkan_virtio.so and $OUT/share/vulkan/icd.d/virtio_icd.*.json.

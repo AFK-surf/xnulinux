@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Shared between fki's own files (not part of the interface in fki.h). */
 #ifndef FKI_INTERNAL_H
 #define FKI_INTERNAL_H

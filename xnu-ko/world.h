@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 /* World switch between Linux and the hosted XNU (see world.S for the layout). */
 #pragma once
 #include "../fki-ko/fki.h"

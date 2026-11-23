@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Round 19 regression test (non-fallback fixes):
 // 1. MTLDevice linear/IOSurface texture alignment queries return 16 (matching Apple Silicon).
 // 2. 2-plane 10-bit YCbCr IOSurface ('x420') -> MTLPixelFormatYCBCR10_420_2P (505) texture creation + shader sampling.
