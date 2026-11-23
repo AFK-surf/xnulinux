@@ -14,9 +14,7 @@ U=$(id -un)
 CPUS=${CPUS:-2}		# its CPUs (the Linux CPUs from 0 up; Linux keeps the rest and its device interrupts)
 RAM_MB=${RAM_MB:-7900}	# its memory, within fki's carve-out
 #DISK=/var/tmp/mac.img
-# The GPU bridge (virtio-gpu Venus to the host GPU under krunkit) hangs the whole VM in about one boot of six
-# (all vCPUs stuck in krunkit, no guest output; 0 of 8 with it off): CPU rendering until that is fixed
-GPU=${GPU:-off}		# auto: the host GPU when the VM has a render node
+GPU=${GPU:-auto}	# auto: the host GPU when the VM has a render node; off: CPU rendering only
 #XNU_ARGS="model=VirtualMac2,1"
 #BOOTARGS="amfi_get_out_of_my_way=1 lp-sip0=2050"
 CONF

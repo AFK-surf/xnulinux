@@ -62,8 +62,8 @@ Working, on an Apple Silicon Mac running an arm64 Linux VM (krunkit) with 1 to 6
   Calculator, TextEdit, System Settings, Spotlight and a disk walk) finishes with no panic and no crash report.
 - Runs as a systemd service: started at boot, stopped cleanly with the VM, restarted after a hosted-kernel panic, each
   run's log kept in `/var/log/xnulinux/`.
-- The GPU bridge gives hosted apps the host GPU (`Virtio-GPU Venus (Apple M5 Max)`); it is off by default
-  (`GPU=off`) while an occasional hang of the whole VM with it on is investigated.
+- The GPU bridge gives hosted apps the host GPU (`Virtio-GPU Venus (Apple M5 Max)`) and is enabled by default
+  (`GPU=auto`) when a Linux render node is present, falling back to CPU rendering (`GPU=off`) otherwise.
 
 What is still a stopgap is listed in [`docs/production.md`](docs/production.md). Notably: the OS cryptex is merged into
 the system volume, AMFI is patched and SIP relaxed, and memory access is slower than a native VM (4K pages vs 16K).
