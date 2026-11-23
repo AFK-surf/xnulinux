@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # In the VM (once, after scripts/vm-install-fki-service.sh and with the disk from scripts/mk-macvm-disk.sh): run the hosted
 # macOS as a system service. It starts at boot, is stopped cleanly (its disk synced) when the VM shuts down, and is
 # started again after a panic or a run that ended by itself; each run's kernel log is in /var/log/xnulinux/.

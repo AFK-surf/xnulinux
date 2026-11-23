@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 # In [lo, hi) of a fileset KC: "ldr xA, [xB, #off]" followed within 4 instructions by "mov x17, #imm" and
 # "blraa xA, x17" (a call through a type-discriminated function pointer field). Prints off, imm, base reg, address.
 import struct, sys, collections

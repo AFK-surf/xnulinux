@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 // A rendering probe for the hosted macOS: one borderless window above everything (screen-saver level), for SECONDS seconds.
 // MODE picks who renders its content, to tell the client's rendering from WindowServer's compositing apart:
 //   draw   AppKit drawRect: four colour quadrants and a label (the client renders its layer tree)

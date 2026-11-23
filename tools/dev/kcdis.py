@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 # Disassemble [va, va+len) of a fileset kernel collection (top-level LC_SEGMENT_64s) with llvm-mc. Debugging aid.
 import struct, subprocess, sys
 path, va, n = sys.argv[1], int(sys.argv[2], 16), int(sys.argv[3], 0)

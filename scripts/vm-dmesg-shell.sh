@@ -1,5 +1,6 @@
 #!/bin/bash
-# On tokyo: talk to the hosted macOS shell through the VM. XNU's output is read from the kernel ring buffer (dmesg,
+# SPDX-License-Identifier: GPL-2.0-only
+# On the macOS host: talk to the hosted macOS shell through the VM. XNU's output is read from the kernel ring buffer (dmesg,
 # log_buf_len=128M) instead of the serial console: a flood of console lines through a 115200-baud console stalled
 # printk with interrupts off on XNU's CPU (RCU stall). The ring buffer is read through journald (`journalctl -k`): after a
 # few minutes of XNU's output `dmesg` (util-linux, /dev/kmsg) stopped showing new records while journald kept them.

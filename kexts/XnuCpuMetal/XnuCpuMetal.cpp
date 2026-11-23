@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: APSL-2.0
 // XnuCpuMetal: the hosted macOS's Metal device, as a kext of the kernel collection (written for xnulinux, clean room).
 // Metal.framework finds GPUs by watching IOServiceMatching("IOAccelerator") and loads the plugin bundle named by the service's
 // MetalPluginName from /Library/GPUBundles, taking MetalPluginClassName (an IOGPUMetalDevice subclass) as the device class.

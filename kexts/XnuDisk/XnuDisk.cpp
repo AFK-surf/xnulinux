@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 // XnuDisk: the hosted macOS's internal disk, a block storage device whose blocks are a file on the Linux side.
 //
 // The file is a whole disk as macOS makes one: a GUID partition table and an APFS container (System and Data volumes),

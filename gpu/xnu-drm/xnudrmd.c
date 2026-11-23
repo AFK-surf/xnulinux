@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * xnudrmd: the Linux end of the DRM bridge. It serves the hosted macOS's GPU clients (kexts/XnuDrm, libxnudrm) from
  * Linux's virtio-gpu render node: each request comes as a host call on /dev/xnu-hostcall (fki), is carried out with an

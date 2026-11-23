@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # On a Mac: build Mesa's Venus Vulkan driver for the hosted macOS, its renderer talking to the Linux host's GPU over the
 # DRM bridge (gpu/xnu-drm: libxnudrm in the driver, kexts/XnuDrm in the hosted kernel, xnudrmd on Linux). Patches as for
 # the Linux guest (patches/), plus libxnudrm copied into the tree. Also builds test/compute.c against it.

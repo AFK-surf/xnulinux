@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 /* Tiny freestanding helpers so xnu.ko needs nothing from Linux beyond <linux/fki.h>. */
 #pragma once
 static inline void *x_memcpy(void *d, const void *s, unsigned long n) { char *a = d; const char *b = s; while (n--) *a++ = *b++; return d; }

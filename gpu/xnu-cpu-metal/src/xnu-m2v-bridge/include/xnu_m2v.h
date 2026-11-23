@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #ifndef XNU_M2V_H
 #define XNU_M2V_H
 

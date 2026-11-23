@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: APSL-2.0
 // Mach-O loading and threaded-rebase for the XNU image (APSL side).
 #include "xrt.h"
 #define ENOEXEC 8

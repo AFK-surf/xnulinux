@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Host calls: a message channel from the foreign kernel to a Linux user process (a host service such as the DRM bridge,
  * gpu/xnu-drm/xnudrmd). The foreign kernel calls fki_hostcall() with a request; the service reads it from

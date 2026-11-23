@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Fetch the upstream sources the plugin builds against into src/ (never committed: see ../README.md),
 # then apply our local patches from patches/<project>/*.patch idempotently.
 set -euo pipefail

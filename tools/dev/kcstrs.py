@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 # For adrp+add pairs in [va, va+len) of a fileset KC: the target address and the C string there (debugging aid).
 import struct, sys
 path, va0, n = sys.argv[1], int(sys.argv[2], 16), int(sys.argv[3], 0)

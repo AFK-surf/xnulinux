@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """Convert the hosted macOS's framebuffer dump (xnu.ko fb_dump: raw 32-bit BGRA rows) to a PNG.
 
     fb2png.py DUMP WIDTH HEIGHT OUT.png

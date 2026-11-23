@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Keep known values in the FP/SIMD registers v8..v15 on one CPU while sleeping in a loop (so the task is switched out
  * and back in), and count the times they came back changed: a probe for a foreign kernel using SIMD on that CPU
  * behind Linux's back (Linux skips reloading a task's FP state when it believes the registers still hold it).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause-Patent
 // Adapted from UniXNU/AdrenoMetal's IOGPUMetalDeviceShim.h (BSD-2-Clause-Patent).
 // Installs macOS IOGPUMetalDevice compatibility selectors and Metal protocol conformances
 // on the dynamically created _MTLDevice subclass and Xcm* frontend classes.

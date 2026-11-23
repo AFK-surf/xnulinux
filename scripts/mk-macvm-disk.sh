@@ -1,5 +1,6 @@
 #!/bin/bash
-# On the macOS host (tokyo): the hosted system's disk from a macOS VM disk installed by Apple's own installer, then sent to
+# SPDX-License-Identifier: GPL-2.0-only
+# On the macOS host: the hosted system's disk from a macOS VM disk installed by Apple's own installer, then sent to
 # the xnupoc VM as /var/tmp/mac.img (xnu.ko disk=, kexts/XnuDisk; boot-arg rd=<its system volume>).
 #
 # `tart create NAME --from-ipsw latest` installs macOS with Virtualization.framework, as Apple's own VMs are installed: the
@@ -15,7 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 V="bash scripts/vm.sh"
 SRC=${SRC:-$HOME/.tart/vms/xnumac/disk.img}; W=${W:-$PWD/../macvm}; IMG=$W/mac.img
-GPU=${GPU:-/Users/admin/.stillfail/sessions/chat/c-73ef26e7b6/workspace/src/xnulinux/gpu/xnu-cpu-metal/dist/XnuCpuMetal.bundle}
+GPU=${GPU:-$PWD/gpu/xnu-cpu-metal/dist/XnuCpuMetal.bundle}
 DISABLE="com.apple.watchdogd com.apple.iomfb_bics_daemon com.apple.audiomxd com.apple.audio.coreaudiod com.apple.PerfPowerServices
  com.apple.PerfPowerServicesExtended com.apple.oahd com.apple.oahd-root-helper ${DISABLE:-}"
 # images of ours left attached by an earlier run

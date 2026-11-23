@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """Make the hosted macOS's local user and automatic login, in a mounted system tree (run as root).
 
     gui-user.py ROOT TEMPLATE [NAME PASSWORD UID]

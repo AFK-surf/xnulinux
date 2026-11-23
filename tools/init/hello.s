@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 // /sbin/hello for the test root: write a line to /dev/console (fd 0 is not set up: open it) and exit 7.
 	.text
 	.globl	_start

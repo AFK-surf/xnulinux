@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Round 20 regression test:
 // Preserves all Round 19 assertions (1-3) + verifies true mach_vm_remap physical-page aliasing (4-7):
 // 1. 16-byte linear/IOSurface texture alignment queries.

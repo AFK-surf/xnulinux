@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # In the VM, with a hosted system running: checks that the hosted kernel leaves Linux alone. 1 min.
 #   fpcheck: a task on the hosted kernel's CPU (0) keeps its FP/SIMD registers across being switched out
 #   memcheck: 4 GB of Linux memory keep their contents (nothing writes over Linux's pages)

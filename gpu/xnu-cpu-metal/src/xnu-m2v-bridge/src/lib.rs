@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! C ABI bridge over `metal2vulkan` and `metal2vulkan-runtime` for xnulinux CPU Metal.
 
 use metal2vulkan::bind::SamplerDescriptor;
