@@ -23,6 +23,8 @@ Description=xnulinux: the hosted macOS
 After=xnulinux-fki.service network-online.target
 Wants=network-online.target
 Requires=xnulinux-fki.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -34,8 +36,6 @@ TimeoutStartSec=infinity
 TimeoutStopSec=180
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=600
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
