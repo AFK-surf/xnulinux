@@ -11,7 +11,7 @@ set -euo pipefail
 KRUN=${KRUN:-$HOME/.local/krunkit}
 DISK=${DISK:-$HOME/.tart/vms/xnupoc/disk.img}
 MAC=${MAC:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["macAddress"])' "$(dirname "$DISK")/config.json")}
-CPUS=${CPUS:-6}; MEM=${MEM:-24576}; SSH_PORT=${SSH_PORT:-2223}
+CPUS=${CPUS:-6}; MEM=${MEM:-16384}; SSH_PORT=${SSH_PORT:-2223}
 S=${S:-$HOME/.local/state/xnupoc-krun}; mkdir -p "$S"
 if pgrep -f "tart run xnupoc" >/dev/null; then echo "tart is running xnupoc: stop it first" >&2; exit 1; fi
 rm -f "$S"/gv.sock "$S"/gvapi.sock

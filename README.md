@@ -70,7 +70,7 @@ the system volume, AMFI is patched and SIP relaxed, and memory access is slower 
 
 ## Requirements
 
-- An arm64 Linux host with PAC (Apple Silicon M1 or later in a VM: krunkit for GPU access, or tart), 4K pages, ~24 GB of
+- An arm64 Linux host with PAC (Apple Silicon M1 or later in a VM: krunkit for GPU access, or tart), 4K pages, 16 GB of
   RAM (8 GB of it reserved for the hosted kernel).
 - A Mac with Xcode to make the system disk and build the GPU parts.
 - A macOS 27 installation (an Apple Virtualization VM disk) of your own. **No Apple binaries are in this repository or

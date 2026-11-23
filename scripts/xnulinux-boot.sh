@@ -48,7 +48,7 @@ build xnu-ko "KBUILD_EXTRA_SYMBOLS=$PWD/fki-ko/Module.symvers"
 sudo dmesg -n "${CONLEVEL:-1}"
 # fki has the hosted kernel's DRAM from its load at boot (scripts/vm-install-fki-service.sh): reload it only when it changed,
 # with the same carve-out
-CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || echo 0x400000000) carve_mb=$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null || echo 8156)"
+CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || echo 0x200000000) carve_mb=$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null || echo 8156)"
 if [ "$(cat /sys/module/fki/srcversion 2>/dev/null)" != "$(modinfo -F srcversion fki-ko/fki.ko)" ]; then
   sudo systemctl stop xnudrmd 2>/dev/null || true	# it holds fki's /dev/xnu-hostcall
   sudo rmmod fki 2>/dev/null || true
@@ -83,8 +83,8 @@ for try in 1 2 3 4 5 6 7 8 9; do
     console_in="$CONSOLE_IN" input_in="$INPUT_IN" fb_dump="$FB_DUMP" keystore="$KEYSTORE" bootargs="\"$BOOTARGS\"" ${XNU_ARGS:-} \
     > /var/tmp/xnu-insmod.log 2>&1 < /dev/null &
   sleep 5
-  if sudo dmesg | grep -aq "fki: carve-out .* overlaps"; then
-    sudo dmesg | grep -a "fki: carve-out .* overlaps" >&2
+  if sudo dmesg | grep -aqE "fki: carve-out .* (overlaps|is not all RAM)"; then	# a configuration error: no retry
+    sudo dmesg | grep -aE "fki: carve-out .* (overlaps|is not all RAM)" >&2
     exit 1
   fi
   sudo dmesg | grep -aq "contiguous allocation failed" || break

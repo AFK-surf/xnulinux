@@ -13,6 +13,7 @@
 #include <linux/irqflags.h>
 #include <linux/mm.h>
 #include <linux/io.h>
+#include <linux/efi.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/preempt.h>
@@ -76,6 +77,7 @@ static bool (*p_cma_release)(struct cma *, const struct page *, unsigned long);
 static set_memory_fn p_set_memory_x, p_set_memory_nx;
 static unsigned long p_stext, p_end;
 static u64 *p_kimage_voffset;
+static int (*p_efi_mem_type)(unsigned long);	/* the firmware's memory map: is the carve-out RAM at all */
 
 static int fki_resolve(void)
 {
@@ -102,6 +104,7 @@ static int fki_resolve(void)
 	p_stext = lookup("_stext");
 	p_end = lookup("_end");
 	p_kimage_voffset = (u64 *)lookup("kimage_voffset");
+	p_efi_mem_type = (void *)lookup("efi_mem_type");
 	return p_set_memory_x && p_set_memory_nx ? 0 : -ENOENT;
 }
 
@@ -466,6 +469,23 @@ static int fki_carve_check(unsigned long base, unsigned long len)
 	if (end < base) {
 		pr_err("fki: carve-out [%#lx, %#lx) overflows physical address space\n", base, end);
 		return -EINVAL;
+	}
+	/* RAM in the firmware's map, every 2 MiB of it: a carve-out past the end of the VM's memory (carve_base from a
+	 * bigger VM) would map addresses with nothing behind them */
+	if (p_efi_mem_type && p_efi_mem_type(base) >= 0) {	/* < 0: no EFI memory map (not an EFI boot) */
+		unsigned long a;
+
+		for (a = base; a < end; a += SZ_2M) {
+			int t = p_efi_mem_type(a);
+
+			/* free RAM once Linux runs: loader and boot-services code and data, conventional memory */
+			if (t != EFI_LOADER_CODE && t != EFI_LOADER_DATA && t != EFI_BOOT_SERVICES_CODE &&
+			    t != EFI_BOOT_SERVICES_DATA && t != EFI_CONVENTIONAL_MEMORY) {
+				pr_err("fki: carve-out [%#lx, %#lx) is not all RAM (EFI type %d at %#lx); refusing to map (check carve_base, carve_mb and the VM's memory size)\n",
+				       base, end, t, a);
+				return -EINVAL;
+			}
+		}
 	}
 	if (p_stext && p_end && p_kimage_voffset) {
 		unsigned long k_start = p_stext - *p_kimage_voffset;
