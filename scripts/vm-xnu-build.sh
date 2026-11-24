@@ -43,10 +43,16 @@ patch_cctools() {
 }
 python3 scripts/setup-env.py toolchain --jobs 12
 patch_cctools
-# decomment keeps getc() in a char: EOF never matches where char is unsigned (aarch64) and it spins forever
+# decomment keeps getc() in a char: EOF never matches where char is unsigned (aarch64) and it spins forever, writing until
+# the disk is full. `setup-env.py x12377` makes the tree (out/k27/xnu) and runs decomment (installhdrs) in one go, so on a
+# fresh checkout the tree is made first on its own and patched before that step.
+[ -d out/k27/xnu ] || python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('setup_env', 'scripts/setup-env.py'); m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m); m.kernel_tree()"
 D=out/k27/xnu/SETUP/decomment/decomment.c
-[ -f $D ] && sed -i 's/^\tchar bufchar;/\tint bufchar;/' $D && grep -n 'bufchar;' $D && rm -f out/x12377/build/xnu/hdrs-obj/SETUP/decomment/decomment
-pkill -x decomment || true
+test -f $D
+sed -i 's/^\tchar bufchar;/\tint bufchar;/' $D && grep -n 'int bufchar;' $D && rm -f out/x12377/build/xnu/hdrs-obj/SETUP/decomment/decomment
 # libclang_rt.cc_kext comes from the CLTools package (unpacked only; Darling is not needed for it)
 A=toolchains/linux/appleclang; mkdir -p $A
 python3 compat/xnu-linux/scripts/setup-appleclang.py fetch --directory $A
