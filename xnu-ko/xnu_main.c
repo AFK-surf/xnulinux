@@ -208,7 +208,7 @@ static int run_m1(void)
 	logkv("xnu: threaded fixups applied", (u64_t)n);
 	if (n < 0) return n;
 	u64_t v = macho_sym(&img, "_version"), sl = macho_sym(&img, "_strlen"), cr = macho_sym(&img, "_crc32");
-	if (!v || !sl || !cr) { logs("xnu: symbols missing"); return 0; }
+	if (!v || !sl || !cr) { logs("xnu: symbols missing"); return -2; }
 	c = fki_enter(&xnu_W.xnu_keys, &saved);
 	unsigned long len = ((strlen_fn)sl)((const char *)v);
 	unsigned int crc = ((crc32_fn)cr)(0, (const void *)v, len);
@@ -1462,14 +1462,16 @@ static int va_in_loaded_segs_prot(const struct xnu_image *im, u64_t va, u64_t le
 		if (l->cmd != LC_SEGMENT_64 || l->cmdsize < sizeof(struct seg64))
 			continue;
 		const struct seg64 *s = (const void *)l;
-		/* Writable symbols may reside in zero-filled BSS (vmsize > filesize). */
-		u64_t span = (req_prot & 2) ? s->vmsize : s->filesize;
+		if (!x_strncmp(s->segname, "__PAGEZERO", 16))
+			continue;
+		/* Writable segments include zero-filled BSS (vmsize > filesize). */
+		u64_t span = (s->initprot & 2) ? s->vmsize : s->filesize;
 		if (!span || (s->initprot & req_prot) != req_prot)
 			continue;
-		u64_t lo = s->vmaddr + im->slide;
-		u64_t hi = lo + span;
-		if (lo < s->vmaddr || hi < lo)
+		u64_t lo;
+		if (!macho_va_to_loaded(im, s->vmaddr, span, &lo))
 			continue;
+		u64_t hi = lo + span;
 		if (va >= lo && va + len <= hi)
 			return 1;
 	}
@@ -1626,7 +1628,6 @@ static void el0_patch_macho_sections(const struct xnu_image *im, const struct mh
 {
 	const char *file = (const char *)im->file;
 	u64_t file_size = im->file_size;
-	u64_t slide = im->slide;
 	u64_t mh_off = (u64_t)((const char *)mh - file);
 	if (mh_off > file_size || file_size - mh_off < sizeof(*mh) ||
 	    mh->magic != MH_MAGIC_64 ||
@@ -1652,9 +1653,9 @@ static void el0_patch_macho_sections(const struct xnu_image *im, const struct mh
 			    sc[si].addr - s->vmaddr > s->vmsize ||
 			    sc[si].size > s->vmsize - (sc[si].addr - s->vmaddr))
 				continue;
-			u64_t sec_va = sc[si].addr + slide;
-			if (sec_va < sc[si].addr || (sec_va & 3) ||
-			    sec_va + sc[si].size < sec_va ||
+			u64_t sec_va;
+			if (!macho_va_to_loaded(im, sc[si].addr, sc[si].size, &sec_va) ||
+			    (sec_va & 3) ||
 			    !va_in_loaded_segs(im, sec_va, sc[si].size))
 				continue;
 			u32_t *ins = (u32_t *)sec_va;
@@ -1693,8 +1694,9 @@ static void el0_patch_image(struct xnu_image *im)
 	const struct lc *l = (const void *)(im->file + sizeof(*mh));
 	const struct lc *end = (const void *)(im->file + sizeof(*mh) + mh->sizeofcmds);
 	u64_t n_ubsan = 0, n_idreg = 0, n_cc_idreg = 0, n_cc_ubsan = 0;
-	struct el0_va_span cc_sects[8];
+	struct el0_va_span cc_sects[32];
 	unsigned cc_nsects = 0;
+	int cc_sects_overflow = 0;
 	const struct fileset_entry_lc *cc_fe = 0;
 	unsigned char cc_digest[32];
 	int have_cc_digest = 0;
@@ -1731,8 +1733,8 @@ static void el0_patch_image(struct xnu_image *im)
 					continue;
 				const struct seg64 *cs = (const void *)cl;
 				if (cs->filesize) {
-					u64_t seg_va = cs->vmaddr + im->slide;
-					if (seg_va < cs->vmaddr ||
+					u64_t seg_va;
+					if (!macho_va_to_loaded(im, cs->vmaddr, cs->filesize, &seg_va) ||
 					    !va_in_loaded_segs(im, seg_va, cs->filesize)) {
 						hash_ok = 0;
 					} else {
@@ -1751,15 +1753,17 @@ static void el0_patch_image(struct xnu_image *im)
 					    csc[si].addr - cs->vmaddr > cs->vmsize ||
 					    csc[si].size > cs->vmsize - (csc[si].addr - cs->vmaddr))
 						continue;
-					u64_t lo = csc[si].addr + im->slide;
-					u64_t hi = lo + csc[si].size;
-					if (lo < csc[si].addr || hi < lo ||
+					u64_t lo;
+					if (!macho_va_to_loaded(im, csc[si].addr, csc[si].size, &lo) ||
 					    !va_in_loaded_segs(im, lo, csc[si].size))
 						continue;
+					u64_t hi = lo + csc[si].size;
 					if (cc_nsects < sizeof(cc_sects) / sizeof(cc_sects[0])) {
 						cc_sects[cc_nsects].lo = lo;
 						cc_sects[cc_nsects].hi = hi;
 						cc_nsects++;
+					} else {
+						cc_sects_overflow = 1;
 					}
 				}
 			}
@@ -1806,7 +1810,7 @@ static void el0_patch_image(struct xnu_image *im)
 	int fips_digest_ok = (have_cc_digest &&
 			      parse_sha256_hex(el0_fips_sha256, want_digest) &&
 			      ct_memeq32(cc_digest, want_digest));
-	if (fips_digest_ok && cc_fe && n_cc_idreg == 2 && n_cc_ubsan == 0) {
+	if (fips_digest_ok && cc_fe && !cc_sects_overflow && n_cc_idreg == 2 && n_cc_ubsan == 0) {
 		const struct mh64 *cmh = (const void *)(im->file + cc_fe->fileoff);
 		const struct lc *cl = (const void *)(cmh + 1);
 		const struct lc *cend = (const void *)((const char *)cl + cmh->sizeofcmds);
@@ -1828,8 +1832,9 @@ static void el0_patch_image(struct xnu_image *im)
 				if (x_str_bounded_eq(strs + nl[j].n_strx,
 						     st->strsize - nl[j].n_strx,
 						     "_fipspost_post_integrity")) {
-					u64_t fn_va = nl[j].n_value + im->slide;
-					if (fn_va < nl[j].n_value || (fn_va & 3) ||
+					u64_t fn_va;
+					if (!macho_va_to_loaded(im, nl[j].n_value, 12, &fn_va) ||
+					    (fn_va & 3) ||
 					    !va_in_spans(cc_sects, cc_nsects, fn_va, 12) ||
 					    !va_in_loaded_segs(im, fn_va, 12)) {
 						logs("xnu: skipping _fipspost_post_integrity patch (outside corecrypto exec section)");
@@ -1856,8 +1861,10 @@ static void el0_patch_image(struct xnu_image *im)
 			}
 			break;
 		}
-	} else if (cc_fe && (n_cc_idreg > 0 || n_cc_ubsan > 0)) {
-		if (!el0_fips_sha256 || !el0_fips_sha256[0])
+	} else if (cc_fe && (n_cc_idreg > 0 || n_cc_ubsan > 0 || cc_sects_overflow)) {
+		if (cc_sects_overflow)
+			logs("xnu: preserving _fipspost_post_integrity (corecrypto exec section table overflow)");
+		else if (!el0_fips_sha256 || !el0_fips_sha256[0])
 			logs("xnu: preserving _fipspost_post_integrity (el0_fips_sha256 not set)");
 		else if (!fips_digest_ok)
 			logs("xnu: preserving _fipspost_post_integrity (el0_fips_sha256 mismatch or invalid hex)");
@@ -1930,9 +1937,32 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 
 	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba; diag_va[3] = (u64_t)ba->deviceTreeP;
 	diag_va[4] = macho_sym(&img, "_port_crumb");
+	if (diag_va[4] && ((diag_va[4] & 3) || !va_in_loaded_segs_prot(&img, diag_va[4], 4, 1))) {
+		logs("xnu: ignoring invalid _port_crumb symbol");
+		diag_va[4] = 0;
+	}
 	diag_va[5] = macho_sym(&img, "_strlen");
-	xnu_dbg = (const unsigned long *)macho_sym(&img, "_linux64_dbg");
-	xnu_el0_stat = (const unsigned long *)macho_sym(&img, "_linux64_el0_stat");
+	if (diag_va[5] && ((diag_va[5] & 3) || !va_in_loaded_segs_prot(&img, diag_va[5], 4, 5))) {
+		logs("xnu: ignoring invalid _strlen symbol");
+		diag_va[5] = 0;
+	}
+	{
+		u64_t a_dbg = macho_sym(&img, "_linux64_dbg");
+		if (a_dbg && ((a_dbg & 7) || !va_in_loaded_segs_prot(&img, a_dbg, 16 * sizeof(unsigned long), 1))) {
+			logs("xnu: ignoring invalid _linux64_dbg symbol");
+			a_dbg = 0;
+		}
+		xnu_dbg = (const unsigned long *)a_dbg;
+
+		u64_t a_stat = macho_sym(&img, "_linux64_el0_stat");
+		if (a_stat && ((a_stat & 7) ||
+		    !va_in_loaded_segs_prot(&img, a_stat,
+					    (u64_t)LINUX64_CPU_SLOTS * 2 * LINUX64_EL0_CLASSES * sizeof(unsigned long), 1))) {
+			logs("xnu: ignoring invalid _linux64_el0_stat symbol");
+			a_stat = 0;
+		}
+		xnu_el0_stat = (const unsigned long *)a_stat;
+	}
 	{	/* the helpers run where XNU does not: a CPU running XNU lets Linux in only at XNU's calls into the host */
 		int host_cpu = cpus < fki_num_cpus() ? cpus : fki_num_cpus() - 1;
 		if (monitor_cpu == -2)
@@ -1942,8 +1972,21 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		if (fb_off && fb_dump && fb_dump_ms > 0 && img.region.va)
 			fb_thread = fki_thread_start(fb_fn, 0, monitor_cpu >= 0 ? monitor_cpu : host_cpu, "xnu-fb");
 	}
-	xnu_kfault = (void *)macho_sym(&img, "_linux64_kernel_fault");
-	xnu_kfault_recover = (void *)macho_sym(&img, "_linux64_kernel_fault_recover");
+	{
+		u64_t a_kf = macho_sym(&img, "_linux64_kernel_fault");
+		if (a_kf && ((a_kf & 3) || !va_in_loaded_segs_prot(&img, a_kf, 4, 5))) {
+			logs("xnu: ignoring invalid _linux64_kernel_fault symbol");
+			a_kf = 0;
+		}
+		xnu_kfault = (void *)a_kf;
+
+		u64_t a_kfr = macho_sym(&img, "_linux64_kernel_fault_recover");
+		if (a_kfr && ((a_kfr & 3) || !va_in_loaded_segs_prot(&img, a_kfr, 4, 5))) {
+			logs("xnu: ignoring invalid _linux64_kernel_fault_recover symbol");
+			a_kfr = 0;
+		}
+		xnu_kfault_recover = (void *)a_kfr;
+	}
 	if (!el0_mode && xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
 		logs("xnu: kernel faults on XNU addresses go to XNU's vm_fault");
 	if (!el0_mode) {
@@ -1964,6 +2007,11 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		xnu_W.xnu_ttbr0 = ttbr0;
 	}
 	a_cpu_entry = macho_sym(&img, "_linux64_cpu_entry");
+	if (a_cpu_entry && ((a_cpu_entry & 3) || !va_in_loaded_segs_prot(&img, a_cpu_entry, 4, 5))) {
+		logs("xnu: ignoring invalid _linux64_cpu_entry symbol: one CPU");
+		a_cpu_entry = 0;
+		cpus = 1;
+	}
 	for (int c = 1; c < cpus; c++) {	/* the secondary CPUs' save areas start as the boot CPU's: XNU's keys, user TTBR0/TCR */
 		worlds[c].xnu_keys = xnu_W.xnu_keys;
 		worlds[c].xnu_tcr = xnu_W.xnu_tcr;

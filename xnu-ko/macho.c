@@ -212,6 +212,26 @@ int macho_rebase(struct xnu_image *img)
 	return (int)n;
 }
 
+int macho_va_to_loaded(const struct xnu_image *img, u64_t unslid, u64_t len, u64_t *out_va)
+{
+	if (!img || !out_va || img->vmhigh < img->vmlow)
+		return 0;
+	if (unslid < img->vmlow || unslid > img->vmhigh)
+		return 0;
+	u64_t off = unslid - img->vmlow;
+	u64_t span = img->vmhigh - img->vmlow;
+	if (len > span - off)
+		return 0;
+	u64_t base = img->vmlow + img->slide;
+	if (base + off < base)
+		return 0;
+	u64_t va = base + off;
+	if (va + len < va)
+		return 0;
+	*out_va = va;
+	return 1;
+}
+
 u64_t macho_sym(struct xnu_image *img, const char *name)
 {
 	const struct symtab_lc *st = img->symtab;
@@ -221,8 +241,8 @@ u64_t macho_sym(struct xnu_image *img, const char *name)
 	for (u32_t i = 0; i < st->nsyms; i++) {
 		if ((nl[i].n_type & 0x0e) != 0x0e || nl[i].n_strx >= st->strsize) continue;	/* N_SECT */
 		if (cstr_bounded_eq(strs + nl[i].n_strx, st->strsize - nl[i].n_strx, name)) {
-			u64_t va = nl[i].n_value + img->slide;
-			if (va < nl[i].n_value)
+			u64_t va;
+			if (!macho_va_to_loaded(img, nl[i].n_value, 1, &va))
 				return 0;
 			return va;
 		}
