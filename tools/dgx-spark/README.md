@@ -14,5 +14,13 @@ Bare metal: Secure Boot off; `kvm-arm.mode=nvhe mem=112G nokaslr`;
 `insmod fki.ko carve_base=0x1E00000000 carve_mb=8156 cpu_list=5,6,7,8,9`; NetworkManager off `xnu0`;
 `/etc/xnulinux.conf`: `GPU=off CPUS=4`.
 
-Open: `iconservicesagent` crashes in lavapipe (disabled with `launchctl disable gui/501/...`); no GPU bridge for
-NVIDIA's driver; one boot in three takes the leftover encrypted Data volume for the root device.
+- `gpu/`: `build-virglrenderer.sh` installs virglrenderer 1.2.0 with Venus, which `gpu/xnu-drm/xnudrmd` then serves the
+  hosted system's Vulkan from (NVIDIA's render node is not virtio-gpu). Written and tested off the machine only
+  (`make -C gpu/xnu-drm test-virgl`); not yet run on NVIDIA's driver.
+
+With `GPU=auto` and the Venus driver in `/Library/GPUBundles/XnuCpuMetal.bundle` Metal and WindowServer run on the GB10
+(`Virtio-GPU Venus (NVIDIA GB10)`), the Dock with its icons. The counter here runs at 1 GHz: xnu.ko has XNU scale it to
+Apple's 24 MHz (user space assumes it).
+
+Open: without a GPU `iconservicesagent` crashes in lavapipe; stopping a run takes minutes; one boot in three takes the
+leftover encrypted Data volume for the root device.
