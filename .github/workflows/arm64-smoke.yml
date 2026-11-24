@@ -80,32 +80,40 @@ jobs:
       - name: Boot XNU in xnu.ko (empty disk, no root)
         run: |
           sudo dmesg -n 1
-          sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+          echo "--- memory map"; sudo grep -E "System RAM|reserved|Kernel" /proc/iomem; cat /proc/buddyinfo
           sudo insmod fki-ko/fki.ko
           truncate -s 1G /var/tmp/empty.img
-          : > /var/tmp/console-in; : > /var/tmp/xnu-input; : > /var/tmp/xnu-fb.raw; truncate -s 1M /var/tmp/xnu-keystore.bin
           U=11111111-2222-3333-4444-555555555555
-          sudo dmesg -C
-          sudo setsid nohup insmod xnu-ko/xnu.ko mode=3 cpus=1 ram_mb=${RAM_MB:-2048} image=xnu/kc.bin disk=/var/tmp/empty.img \
-            root_uuid=$U boot_uuid=$U preboot_uuid=$U console_in=/var/tmp/console-in input_in=/var/tmp/xnu-input \
-            fb_dump=/var/tmp/xnu-fb.raw keystore=/var/tmp/xnu-keystore.bin bootargs='"amfi_get_out_of_my_way=1 lp-sip0=2050"' \
-            > /var/tmp/xnu-insmod.log 2>&1 < /dev/null &
           ok=0
-          for i in $(seq 1 60); do
-            sleep 5
-            if sudo journalctl -k -q --no-pager | grep -aq "Waiting on"; then ok=1; sleep 20; break; fi
-            pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null || break
+          # no carve-out here (no mem= without a reboot, and a reboot ends the runner): XNU's DRAM from alloc_contig_pages,
+          # which takes a naturally aligned power-of-two block (ram_mb + the ~90 MB image rounded up: 3900 = 4 GiB); try smaller
+          # ones until one is free
+          for MB in ${RAM_MB:-3900 1950 900}; do
+            sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+            : > /var/tmp/console-in; : > /var/tmp/xnu-input; : > /var/tmp/xnu-fb.raw; rm -f /var/tmp/xnu-keystore.bin; truncate -s 1M /var/tmp/xnu-keystore.bin
+            START=$(date +%s)
+            echo "=== ram_mb=$MB"
+            sudo setsid nohup insmod xnu-ko/xnu.ko mode=3 cpus=1 ram_mb=$MB image=xnu/kc.bin disk=/var/tmp/empty.img \
+              root_uuid=$U boot_uuid=$U preboot_uuid=$U console_in=/var/tmp/console-in input_in=/var/tmp/xnu-input \
+              fb_dump=/var/tmp/xnu-fb.raw keystore=/var/tmp/xnu-keystore.bin bootargs='"amfi_get_out_of_my_way=1 lp-sip0=2050"' \
+              > /var/tmp/xnu-insmod.log 2>&1 < /dev/null &
+            for i in $(seq 1 60); do
+              sleep 5
+              if sudo journalctl -k -q --no-pager --since @$START | grep -aq "Waiting on"; then ok=1; sleep 20; break; fi
+              pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null || break
+            done
+            echo "--- insmod"; cat /var/tmp/xnu-insmod.log
+            echo "--- kernel log"; sudo journalctl -k -q -o short-monotonic --no-pager --since @$START | grep -av "audit" | tail -400
+            if [ -d /sys/module/xnu ]; then echo 1 | sudo tee /sys/module/xnu/parameters/stop_run >/dev/null; sleep 10; fi
+            sudo journalctl -k -q -o short-monotonic --no-pager --since @$START > /tmp/kernel-$MB.log || true
+            grep -aq "contiguous allocation failed" /tmp/kernel-$MB.log || break
           done
-          echo "--- insmod"; cat /var/tmp/xnu-insmod.log
-          echo "--- kernel log"; sudo journalctl -k -q -o short-monotonic --no-pager | grep -av "audit" | tail -400
-          if [ -d /sys/module/xnu ]; then echo 1 | sudo tee /sys/module/xnu/parameters/stop_run >/dev/null; sleep 10; fi
-          sudo journalctl -k -q -o short-monotonic --no-pager > /tmp/kernel.log || true
           test $ok = 1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: kernel-log
           path: |
-            /tmp/kernel.log
+            /tmp/kernel-*.log
             /tmp/xnu-build.log
           if-no-files-found: ignore
