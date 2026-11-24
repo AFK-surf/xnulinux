@@ -1234,9 +1234,10 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 	struct l4h_uctx *u;
 	struct fki_as *as;
 	struct fki_vs_slot *slot;
-	unsigned long gp[40];
+	struct l4h_user_ext ext;
+	unsigned long gp[37];
 	u64 gen = 0;
-	bool as_changed, seg_changed;
+	bool as_changed, tls_ro_changed, seg_changed;
 	int st, i;
 
 	if (!utcb || !regs || !stop || !utcb->as)
@@ -1275,17 +1276,24 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 	gp[32] = (unsigned long)regs->pc;
 	gp[33] = (unsigned long)(regs->pstate & 0xf0000000UL);
 	gp[L4H_GP_TLS] = (unsigned long)regs->tpidr;
-	gp[L4H_GP_TLS_RO] = (unsigned long)regs->tpidrro;
 
+	tls_ro_changed = (!utcb->have_tls ||
+			  regs->tpidrro != utcb->last_tpidrro ||
+			  as_changed ||
+			  u->state == L4H_UCTX_FRESH);
 	seg_changed = (!utcb->have_tls ||
 		       regs->tpidr != utcb->last_tpidr ||
-		       regs->tpidrro != utcb->last_tpidrro ||
-		       as_changed ||
-		       u->state == L4H_UCTX_FRESH);
+		       tls_ro_changed);
 	l4h_user_mark_dirty(u, seg_changed ? 1 : 0);
 
+	ext.size = sizeof(ext);
+	ext.flags = L4H_USER_EXT_TLS_RO |
+		    (tls_ro_changed ? L4H_USER_EXT_TLS_RO_UPDATE : 0);
+	ext.tls_ro = (unsigned long)regs->tpidrro;
+	ext.raw_fsr = 0;
+
 	this_cpu_write(fki_cur_utcb, u);
-	st = l4h_user_run(u, gp, 1);
+	st = l4h_user_run_ex(u, gp, 1, &ext);
 	if (!u->regs_valid)
 		l4h_user_sync_regs(u, gp);
 
@@ -1297,7 +1305,6 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 	regs->pc = gp[32];
 	regs->pstate = gp[33];
 	regs->tpidr = gp[L4H_GP_TLS];
-	regs->tpidrro = gp[L4H_GP_TLS_RO];
 	utcb->last_tpidr = regs->tpidr;
 	utcb->last_tpidrro = regs->tpidrro;
 	utcb->have_tls = true;
@@ -1311,7 +1318,7 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 		break;
 	case L4H_STOP_PAGEFAULT:
 		stop->kind = FKI_STOP_PAGEFAULT;
-		stop->esr = u->raw_fsr;
+		stop->esr = ext.raw_fsr;
 		stop->fault_addr = u->fault_addr;
 		stop->fault_ip = u->fault_ip;
 		break;

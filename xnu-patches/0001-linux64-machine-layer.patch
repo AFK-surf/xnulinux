@@ -819,13 +819,11 @@ index 79d0bc1..12adbea 100644
  		if ((pmap->type == PMAP_TYPE_USER) && (ptep_get_info(pte_p)->refcnt == 0)) {
  			pmap_tte_deallocate(pmap, start, eva, need_strong_sync, tte_p, pt_attr_twig_level(pt_attr));
  			remove_count = 0; // pmap_tte_deallocate has flushed the TLB for us
-@@ -5070,6 +5209,9 @@ pmap_page_protect_options_with_flush_range(
+@@ -5070,6 +5209,7 @@ pmap_page_protect_options_with_flush_range(
  
  			assert(spte != tmplate);
  			write_pte_fast(pte_p, tmplate);
-+			if (pmap != kernel_pmap) {
-+				linux64_el0_mirror_pte(pmap, va, tmplate, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO);
-+			}
++			linux64_el0_mirror_pte(pmap, va, tmplate, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO);
  			update = true;
  			++pass1_updated;
  
@@ -994,7 +992,15 @@ index 79d0bc1..12adbea 100644
  		}
  
  fff_skip_pve_pass1:
-@@ -8935,6 +9207,15 @@ pmap_map_cpu_windows_copy_internal(
+@@ -8500,6 +8770,7 @@ arm_clear_fast_fault(
+ 				tlb_flush_needed = true;
+ 			}
+ 			write_pte_fast(pte_p, tmplate);
++			linux64_el0_mirror_pte(pmap, ptd_get_va(ptdp, pte_p), tmplate, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO);
+ 			result = TRUE;
+ 		}
+ 
+@@ -8935,6 +9206,15 @@ pmap_map_cpu_windows_copy_internal(
  	need_strong_sync = pte_is_xs(native_pt_attr, pte);
  #endif
  	write_pte_fast(ptep, pte);
