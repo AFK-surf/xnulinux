@@ -24,6 +24,7 @@ typedef u64 fki_u64;
 #define FKI_CAP_EL0         (1UL << 0)	/* hosted kernel runs at EL0 */
 #define FKI_CAP_HIGH_WINDOW (1UL << 1)	/* host manages TTBR1 high window */
 #define FKI_CAP_PAC         (1UL << 2)	/* per-context PAC keys supported */
+#define FKI_CAP_EXEC_ONLY   (1UL << 3)	/* execute-only (--x) user mappings supported */
 
 /* Page mapping protection bits for fki_high_map() and fki_as_map(). */
 #define FKI_PROT_READ       (1 << 0)
@@ -107,6 +108,8 @@ void fki_kmem_free(struct fki_region *r);
 int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot);
 void fki_high_unmap(unsigned long va, unsigned long size);
 void fki_high_flush(void);
+int fki_high_readable(unsigned long va, unsigned long size);
+void fki_icache_flush(unsigned long va, unsigned long size);
 /*
  * Host-managed user address spaces and user execution contexts (FKI_CAP_EL0).
  * Passing as == NULL to fki_as_unmap() broadcasts the unmap of [va, va + size)
@@ -122,6 +125,8 @@ void fki_utcb_destroy(void *utcb);
 int fki_utcb_set_as(void *utcb, void *as);
 int fki_utcb_set_pac(void *utcb, const struct fki_pac_keys *keys);
 int fki_utcb_run(void *utcb, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop);
+int fki_utcb_resume(void *utcb, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop);
+int fki_utcb_sync_regs(void *utcb, struct fki_utcb_regs *regs);
 int fki_utcb_fpu_read(void *utcb, void *buf, unsigned long len);
 int fki_utcb_fpu_write(void *utcb, const void *buf, unsigned long len);
 /*

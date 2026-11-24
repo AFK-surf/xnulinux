@@ -37,6 +37,7 @@ extern "C" {
 extern unsigned long linux64_hook;
 extern unsigned long linux64_slide;
 extern unsigned int linux64_el0;
+extern unsigned int linux64_el0_caps;
 /* This CPU's slot in the per-CPU arrays: valid before XNU knows its cpu number */
 static inline unsigned
 linux64_cpu_slot(void)
@@ -126,6 +127,10 @@ void linux64_trust_cache_late_init(void);
 int linux64_amfi_off(void);
 /* osfmk/arm64/cswitch.s, sleh.c: user space while hosted */
 void linux64_el0_run(void *saved_state, unsigned long arg) __attribute__((noreturn));
+struct thread;
+void linux64_el0_fpu_switch_out(struct thread *old);
+void linux64_el0_fpu_flush(struct thread *thread);
+void linux64_el0_fpu_invalidate(struct thread *thread);
 /* osfmk/arm/machine_routines_common.c: in a spin-wait, let the host take this CPU now and then (see arm/locks.h) */
 void linux64_spin_relax(void);
 /* osfmk/kern/sched_prim.c: every thread's state and saved frames to the host log (on the host's request) */

@@ -26,7 +26,7 @@
 
 unsigned long fki_caps(void)
 {
-	return FKI_CAP_PAC;
+	return FKI_CAP_PAC | FKI_CAP_EXEC_ONLY;
 }
 EXPORT_SYMBOL(fki_caps);
 
@@ -538,6 +538,18 @@ void fki_high_unmap(unsigned long va, unsigned long size) {}
 EXPORT_SYMBOL(fki_high_unmap);
 void fki_high_flush(void) {}
 EXPORT_SYMBOL(fki_high_flush);
+int fki_high_readable(unsigned long va, unsigned long size)
+{
+	return size && va + size >= va && va >= 0xffffff8000000000UL && va + size <= 0xfffffffc00000000UL;
+}
+EXPORT_SYMBOL(fki_high_readable);
+void fki_icache_flush(unsigned long va, unsigned long size)
+{
+	(void)va;
+	(void)size;
+	asm volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
+}
+EXPORT_SYMBOL(fki_icache_flush);
 
 void *fki_as_create(void) { return NULL; }
 EXPORT_SYMBOL(fki_as_create);
@@ -560,6 +572,10 @@ int fki_utcb_set_pac(void *utcb, const struct fki_pac_keys *keys) { return -EOPN
 EXPORT_SYMBOL(fki_utcb_set_pac);
 int fki_utcb_run(void *utcb, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop) { return -EOPNOTSUPP; }
 EXPORT_SYMBOL(fki_utcb_run);
+int fki_utcb_resume(void *utcb, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop) { return -ENOSYS; }
+EXPORT_SYMBOL(fki_utcb_resume);
+int fki_utcb_sync_regs(void *utcb, struct fki_utcb_regs *regs) { return -ENOSYS; }
+EXPORT_SYMBOL(fki_utcb_sync_regs);
 int fki_utcb_fpu_read(void *utcb, void *buf, unsigned long len) { return -EOPNOTSUPP; }
 EXPORT_SYMBOL(fki_utcb_fpu_read);
 int fki_utcb_fpu_write(void *utcb, const void *buf, unsigned long len) { return -EOPNOTSUPP; }

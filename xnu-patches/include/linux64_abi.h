@@ -36,6 +36,11 @@ enum linux64_call {
 	LINUX64_CALL_AS_UNMAP       = 223,	/* EL0 host: unmap pages in user address space */
 	LINUX64_CALL_AS_FLUSH       = 224,	/* EL0 host: flush user address space TLB */
 	LINUX64_CALL_UTCB_RUN       = 225,	/* EL0 host: run user context */
+	LINUX64_CALL_UTCB_FPU_SYNC  = 226,	/* EL0 host: flush/invalidate user FPU state */
+	LINUX64_CALL_UTCB_RESUME    = 227,	/* EL0 host: resume user context with unchanged GP regs after PF */
+	LINUX64_CALL_UTCB_SYNC_REGS = 228,	/* EL0 host: read full GP regs after a lazy PF stop */
+	LINUX64_CALL_ICACHE_FLUSH   = 229,	/* EL0 host: a1 = va, a2 = size: cross-CPU icache flush */
+	LINUX64_CALL_USER_PAC_OP    = 230,	/* EL0 host: a1 = struct linux64_user_pac_req: user JOP key sign/auth */
 	LINUX64_CALL_IDLE           = 810,	/* a1 = nanoseconds to XNU's next timer (0: one is due), a2 = this CPU's pending-IPI word
 					 * (the host does not sleep while it is set); the host runs Linux meanwhile */
 	LINUX64_CALL_PREEMPTED      = 811,	/* a host interrupt is pending: let Linux handle it; a1 = 1 from the kernel, 0 from EL0 */
@@ -65,6 +70,9 @@ enum linux64_call {
 #define LINUX64_PROT_WRITE (1 << 1)
 #define LINUX64_PROT_EXEC  (1 << 2)
 
+/* EL0 host capability bits exported to XNU via linux64_el0_caps. */
+#define LINUX64_EL0_CAP_EXEC_ONLY (1U << 0)	/* host supports execute-only (--x) user mappings */
+
 /* Kernel/user page mapping request for EL0 hosts (LINUX64_CALL_KMAP/KUNMAP/AS_*). */
 struct linux64_map_req {
 	__UINT64_TYPE__ as_handle;
@@ -83,19 +91,46 @@ enum {
 	LINUX64_STOP_INTERRUPT = 4,
 };
 
+/* User-context FPU sync request for EL0 hosts (LINUX64_CALL_UTCB_FPU_SYNC). */
+#define LINUX64_FPU_FLUSH      (1U << 0)
+#define LINUX64_FPU_INVALIDATE (1U << 1)
+
+struct linux64_fpu_sync_req {
+	__UINT64_TYPE__ thread_id;
+	__UINT64_TYPE__ neon_ptr;	/* &thread->machine.uNeon->ns_64 (520B) */
+	__UINT32_TYPE__ flags;
+	__INT32_TYPE__ result;
+};
+
 /* User-context execution request for EL0 hosts (LINUX64_CALL_UTCB_RUN). */
 struct linux64_utcb_req {
 	__UINT64_TYPE__ as_handle;
 	__UINT64_TYPE__ thread_id;
 	__UINT64_TYPE__ disable_jop;
+	__UINT64_TYPE__ rop_pid;
+	__UINT64_TYPE__ jop_pid;
 	__UINT64_TYPE__ x[31];
 	__UINT64_TYPE__ sp, pc, pstate, tpidr, tpidrro;
-	__UINT64_TYPE__ neon[64];	/* q0..q31 (512 bytes) */
-	__UINT32_TYPE__ fpsr, fpcr;	/* + 8 bytes = 520 bytes, matches arm_neon_saved_state64 */
+	__UINT64_TYPE__ neon_ptr;	/* &thread->machine.uNeon->ns_64 (520B) */
 	__UINT32_TYPE__ fpu_dirty;
 	__INT32_TYPE__ stop_kind;
 	__UINT64_TYPE__ fault_addr, fault_ip, esr;
 	__INT64_TYPE__ result;
+};
+
+/* User JOP-key PAC sign/auth request for EL0 hosts (LINUX64_CALL_USER_PAC_OP). */
+enum {
+	LINUX64_PAC_KEY_IA = 0,
+	LINUX64_PAC_KEY_DA = 2,
+};
+
+struct linux64_user_pac_req {
+	__UINT64_TYPE__ value;
+	__UINT64_TYPE__ discriminator;
+	__UINT64_TYPE__ jop_key;
+	__UINT64_TYPE__ result;
+	__UINT32_TYPE__ key;		/* LINUX64_PAC_KEY_IA or LINUX64_PAC_KEY_DA */
+	__UINT32_TYPE__ is_auth;	/* 0: sign, 1: auth */
 };
 
 /* A buffer: bytes to send or room to receive into. */

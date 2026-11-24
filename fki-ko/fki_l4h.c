@@ -13,6 +13,8 @@
 #include <linux/minmax.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/overflow.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
@@ -39,6 +41,8 @@
 
 static bool pac_unsupported;
 static DEFINE_PER_CPU(struct fki_pac_keys, l4h_cur_pac);
+static DEFINE_PER_CPU(struct fki_pac_keys, l4h_hw_pac);
+static DEFINE_PER_CPU(bool, l4h_hw_pac_valid);
 static DEFINE_PER_CPU(struct l4h_uctx *, fki_cur_utcb);
 
 static void fki_utcb_release_sc(void)
@@ -123,30 +127,49 @@ static unsigned long sctlr_to_l4h_pac_en(fki_u64 sctlr_en)
 	return en;
 }
 
-static void keys_apply(const struct fki_pac_keys *k)
+static int keys_apply(const struct fki_pac_keys *k, bool force_disable)
 {
 	unsigned long words[L4H_PAC_KEY_WORDS];
 	unsigned long en;
 	int err;
 
-	*this_cpu_ptr(&l4h_cur_pac) = *k;
-	if (pac_unsupported || !(l4h_provider_features() & L4H_PROVIDER_ARM_PAC))
-		return;
-	en = sctlr_to_l4h_pac_en(k->sctlr_en);
-	if (!en) {
-		l4h_tcb_set_pac(0, 0, NULL);
-		return;
+	if (pac_unsupported || !(l4h_provider_features() & L4H_PROVIDER_ARM_PAC)) {
+		*this_cpu_ptr(&l4h_cur_pac) = *k;
+		return 0;
 	}
-	words[0] = k->ia[0]; words[1] = k->ia[1];
-	words[2] = k->ib[0]; words[3] = k->ib[1];
-	words[4] = k->da[0]; words[5] = k->da[1];
-	words[6] = k->db[0]; words[7] = k->db[1];
-	words[8] = k->ga[0]; words[9] = k->ga[1];
-	err = l4h_tcb_set_pac(0, en, words);
+	en = sctlr_to_l4h_pac_en(k->sctlr_en);
+	if (!en && !force_disable && !IS_ENABLED(CONFIG_ARM64_PTR_AUTH_KERNEL)) {
+		*this_cpu_ptr(&l4h_cur_pac) = *k;
+		return 0;
+	}
+	if (*this_cpu_ptr(&l4h_hw_pac_valid) &&
+	    memcmp(this_cpu_ptr(&l4h_hw_pac), k, sizeof(*k)) == 0) {
+		*this_cpu_ptr(&l4h_cur_pac) = *k;
+		return 0;
+	}
+	if (en) {
+		words[0] = k->ia[0]; words[1] = k->ia[1];
+		words[2] = k->ib[0]; words[3] = k->ib[1];
+		words[4] = k->da[0]; words[5] = k->da[1];
+		words[6] = k->db[0]; words[7] = k->db[1];
+		words[8] = k->ga[0]; words[9] = k->ga[1];
+	}
+	err = l4h_tcb_set_pac(0, en, en ? words : NULL);
 	if (err == FKI_L4H_ERR_ILLEGAL_OP) {
 		pac_unsupported = true;
 		l4h_tcb_set_pac(0, 0, NULL);
+		*this_cpu_ptr(&l4h_hw_pac_valid) = false;
+		*this_cpu_ptr(&l4h_cur_pac) = *k;
+		return 0;
 	}
+	if (err) {
+		pr_err_ratelimited("fki: l4h_tcb_set_pac failed: %d\n", err);
+		return -EIO;
+	}
+	*this_cpu_ptr(&l4h_hw_pac) = *k;
+	*this_cpu_ptr(&l4h_hw_pac_valid) = true;
+	*this_cpu_ptr(&l4h_cur_pac) = *k;
+	return 0;
 }
 
 unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved)
@@ -157,7 +180,7 @@ unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys 
 	preempt_disable();
 	local_irq_save(flags);
 	*saved = *this_cpu_ptr(&l4h_cur_pac);
-	keys_apply(foreign);
+	keys_apply(foreign, false);
 	return flags;
 }
 EXPORT_SYMBOL(fki_enter);
@@ -165,7 +188,7 @@ EXPORT_SYMBOL(fki_enter);
 void fki_leave(unsigned long cookie, const struct fki_pac_keys *saved)
 {
 	fki_utcb_release_sc();
-	keys_apply(saved);
+	keys_apply(saved, true);
 	local_irq_restore(cookie);
 	preempt_enable();
 }
@@ -174,7 +197,7 @@ EXPORT_SYMBOL(fki_leave);
 void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save)
 {
 	*save = *this_cpu_ptr(&l4h_cur_pac);
-	keys_apply(load);
+	keys_apply(load, false);
 }
 EXPORT_SYMBOL(fki_pac_swap);
 
@@ -239,23 +262,34 @@ struct fki_kmem {
 	unsigned long nchunks;
 	struct fki_kmem_chunk *chunks;
 	struct list_head pts;
+	struct list_head as_list;	/* protected by fki_vs_lock */
 	struct xarray dyn_slots;	/* (va >> PAGE_SHIFT) -> xa_mk_value(cptr) */
+	struct xarray pt_ready;		/* (va >> 21) -> xa_mk_value(1) when L1..L3 PTs exist */
 	spinlock_t lock;
 };
 
 static struct fki_kmem *active_kmem;
+static DEFINE_MUTEX(fki_kmem_mutex);
 
 static int fki_vs_pool_init(void);
 static void fki_vs_pool_fini(void);
 
+struct fki_bind_ctx {
+	unsigned long vs;
+	int errs[NR_CPUS];
+};
+
 static void bind_high_vspace_cpu(void *arg)
 {
-	unsigned long vs = (unsigned long)arg;
-	int err = l4h_tcb_set_high_vspace(0, vs);
+	struct fki_bind_ctx *ctx = arg;
+	int cpu = smp_processor_id();
+	int err = l4h_tcb_set_high_vspace(0, ctx->vs);
 
+	if (cpu < NR_CPUS)
+		ctx->errs[cpu] = err;
 	if (err)
 		pr_err("fki: cpu %d: l4h_tcb_set_high_vspace(%#lx) failed: %d\n",
-		       smp_processor_id(), vs, err);
+		       cpu, ctx->vs, err);
 }
 
 static int map_high_frame(struct fki_kmem *km, unsigned long frame_slot,
@@ -287,12 +321,17 @@ static int map_high_frame(struct fki_kmem *km, unsigned long frame_slot,
 static int xpa_to_gpa(struct fki_kmem *km, fki_u64 xpa, unsigned long *gpa_out)
 {
 	unsigned long off, ci, coff;
+	fki_u64 pa_end;
 	struct fki_kmem_chunk *ch;
 
-	if (!km || xpa < km->pa_base || xpa >= km->pa_base + km->size)
+	if (!km || check_add_overflow(km->pa_base, (fki_u64)km->size, &pa_end))
+		return -EINVAL;
+	if (xpa < km->pa_base || xpa >= pa_end)
 		return -EINVAL;
 	off = (unsigned long)(xpa - km->pa_base);
 	ci = off >> 21;
+	if (ci >= km->nchunks)
+		return -EINVAL;
 	coff = off & (SZ_2M - 1);
 	ch = &km->chunks[ci];
 	if (ch->is_large) {
@@ -319,6 +358,7 @@ static void kmem_cleanup(struct fki_kmem *km)
 			l4h_slot_delete(slot);
 	}
 	xa_destroy(&km->dyn_slots);
+	xa_destroy(&km->pt_ready);
 
 	if (km->chunks) {
 		for (i = 0; i < km->nchunks; i++) {
@@ -359,33 +399,52 @@ static void kmem_cleanup(struct fki_kmem *km)
 
 int fki_kmem_alloc(unsigned long size, unsigned long high_va, fki_u64 pa_base, struct fki_region *r)
 {
-	unsigned long aligned = ALIGN(size, SZ_2M);
-	unsigned long nchunks = aligned >> 21;
+	unsigned long aligned, nchunks, va_end;
+	fki_u64 pa_end;
 	struct fki_kmem *km;
+	struct fki_bind_ctx *bctx = NULL;
 	unsigned long i, j;
-	int err = 0;
+	int cpu, err = 0;
 
 	if (!(fki_caps() & FKI_CAP_HIGH_WINDOW))
 		return -EOPNOTSUPP;
-	if (active_kmem)
-		return -EBUSY;
-	if ((high_va & (SZ_2M - 1)) || (pa_base & (SZ_2M - 1)) || !aligned)
+	if (!size || !r)
+		return -EINVAL;
+	if (check_add_overflow(size, (unsigned long)(SZ_2M - 1), &aligned))
+		return -EINVAL;
+	aligned &= ~(unsigned long)(SZ_2M - 1);
+	nchunks = aligned >> 21;
+	if ((high_va & (SZ_2M - 1)) || (pa_base & (SZ_2M - 1)) || !aligned || !nchunks)
+		return -EINVAL;
+	if (check_add_overflow(high_va, aligned, &va_end) ||
+	    check_add_overflow(pa_base, (fki_u64)aligned, &pa_end))
 		return -EINVAL;
 
+	mutex_lock(&fki_kmem_mutex);
+	if (active_kmem) {
+		mutex_unlock(&fki_kmem_mutex);
+		return -EBUSY;
+	}
+
 	km = kzalloc(sizeof(*km), GFP_KERNEL);
-	if (!km)
+	if (!km) {
+		mutex_unlock(&fki_kmem_mutex);
 		return -ENOMEM;
+	}
 	km->high_va = high_va;
 	km->pa_base = pa_base;
 	km->size = aligned;
 	km->nchunks = nchunks;
 	INIT_LIST_HEAD(&km->pts);
+	INIT_LIST_HEAD(&km->as_list);
 	xa_init_flags(&km->dyn_slots, XA_FLAGS_LOCK_IRQ);
+	xa_init_flags(&km->pt_ready, XA_FLAGS_LOCK_IRQ);
 	spin_lock_init(&km->lock);
 
 	km->chunks = kvcalloc(nchunks, sizeof(*km->chunks), GFP_KERNEL);
 	if (!km->chunks) {
 		kfree(km);
+		mutex_unlock(&fki_kmem_mutex);
 		return -ENOMEM;
 	}
 
@@ -459,8 +518,29 @@ int fki_kmem_alloc(unsigned long size, unsigned long high_va, fki_u64 pa_base, s
 	if (err)
 		goto fail;
 
-	active_kmem = km;
-	on_each_cpu(bind_high_vspace_cpu, (void *)L4H_CPTR(L4H_SLOT_HIGH_VSPACE), 1);
+	bctx = kzalloc(sizeof(*bctx), GFP_KERNEL);
+	if (!bctx) {
+		err = -ENOMEM;
+		goto fail;
+	}
+	bctx->vs = L4H_CPTR(L4H_SLOT_HIGH_VSPACE);
+	on_each_cpu(bind_high_vspace_cpu, bctx, 1);
+	for_each_online_cpu(cpu) {
+		if (cpu < NR_CPUS && bctx->errs[cpu]) {
+			err = -EIO;
+			break;
+		}
+	}
+	if (err) {
+		bctx->vs = 0;
+		on_each_cpu(bind_high_vspace_cpu, bctx, 1);
+		kfree(bctx);
+		goto fail;
+	}
+	kfree(bctx);
+
+	WRITE_ONCE(active_kmem, km);
+	mutex_unlock(&fki_kmem_mutex);
 
 	r->va = (void *)high_va;
 	r->pa = pa_base;
@@ -471,23 +551,43 @@ int fki_kmem_alloc(unsigned long size, unsigned long high_va, fki_u64 pa_base, s
 fail:
 	fki_vs_pool_fini();
 	kmem_cleanup(km);
+	mutex_unlock(&fki_kmem_mutex);
 	return err;
 }
 EXPORT_SYMBOL(fki_kmem_alloc);
 
+static void fki_as_drain_list(struct fki_kmem *km);
+
 void fki_kmem_free(struct fki_region *r)
 {
-	struct fki_kmem *km = r ? r->handle : NULL;
+	struct fki_kmem *km;
+	struct fki_bind_ctx *bctx;
 
-	if (!km)
+	if (!r)
 		return;
-	on_each_cpu(bind_high_vspace_cpu, (void *)0UL, 1);
+	mutex_lock(&fki_kmem_mutex);
+	km = r->handle;
+	if (!km) {
+		mutex_unlock(&fki_kmem_mutex);
+		return;
+	}
+	bctx = kzalloc(sizeof(*bctx), GFP_KERNEL);
+	if (bctx) {
+		bctx->vs = 0;
+		on_each_cpu(bind_high_vspace_cpu, bctx, 1);
+		kfree(bctx);
+	} else {
+		struct fki_bind_ctx fallback = { .vs = 0 };
+		on_each_cpu(bind_high_vspace_cpu, &fallback, 1);
+	}
 	if (active_kmem == km)
-		active_kmem = NULL;
+		WRITE_ONCE(active_kmem, NULL);
 	fki_vs_pool_fini();
+	fki_as_drain_list(km);
 	kmem_cleanup(km);
 	r->va = NULL;
 	r->handle = NULL;
+	mutex_unlock(&fki_kmem_mutex);
 }
 EXPORT_SYMBOL(fki_kmem_free);
 
@@ -504,114 +604,191 @@ static int prot_to_l4h(int prot)
 	return p;
 }
 
+static int ensure_high_pt(struct fki_kmem *km, unsigned long va)
+{
+	unsigned long high_vs = L4H_CPTR(L4H_SLOT_HIGH_VSPACE);
+	unsigned long idx = va >> 21;
+	int lvl;
+
+	if (xa_load(&km->pt_ready, idx))
+		return 0;
+	for (lvl = 0; lvl < 3; lvl++) {
+		struct fki_pt_node *node = kzalloc(sizeof(*node), GFP_ATOMIC);
+		int err;
+
+		if (!node)
+			return -ENOMEM;
+		if (l4h_obj_alloc(L4H_OBJ_PT, 0, &node->pt)) {
+			kfree(node);
+			return -ENOMEM;
+		}
+		err = l4h_pt_map(L4H_OBJ_PT, node->pt.cptr, high_vs, va & ~(SZ_2M - 1));
+		if (err) {
+			l4h_obj_free(&node->pt);
+			kfree(node);
+			break;
+		}
+		list_add(&node->list, &km->pts);
+	}
+	if (xa_err(xa_store(&km->pt_ready, idx, xa_mk_value(1), GFP_ATOMIC)))
+		return -ENOMEM;
+	return 0;
+}
+
 int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 {
-	struct fki_kmem *km = active_kmem;
-	unsigned long flags, off;
+	struct fki_kmem *km = READ_ONCE(active_kmem);
+	unsigned long flags, va_end, km_va_end, npages, i, mapped = 0;
+	unsigned long last_pt_idx = ~0UL;
+	fki_u64 xpa_end;
 	int lprot = prot_to_l4h(prot);
+	unsigned long stack_slots[16];
+	unsigned long *new_slots = stack_slots;
 	int err = 0;
 
 	if (!km)
 		return -ENODEV;
+	if (!size)
+		return 0;
 	if ((va | xpa | size) & ~PAGE_MASK)
 		return -EINVAL;
-	/* Initial linear aperture is already mapped RWX (often with 2 MiB large frames). */
-	if (va >= km->high_va && va + size <= km->high_va + km->size &&
+	if (check_add_overflow(va, size, &va_end) ||
+	    check_add_overflow(xpa, (fki_u64)size, &xpa_end) ||
+	    check_add_overflow(km->high_va, km->size, &km_va_end))
+		return -EINVAL;
+	/* Initial linear aperture is already mapped RWX (with 2 MiB large frames). */
+	if (va >= km->high_va && va_end <= km_va_end &&
 	    xpa >= km->pa_base && (va - km->high_va) == (unsigned long)(xpa - km->pa_base))
 		return 0;
 
-	spin_lock_irqsave(&km->lock, flags);
-	for (off = 0; off < size; ) {
-		unsigned long cur_va = va + off;
-		fki_u64 cur_xpa = xpa + off;
-		unsigned long pfn = cur_va >> PAGE_SHIFT;
+	npages = size >> PAGE_SHIFT;
+	if (npages > ARRAY_SIZE(stack_slots)) {
+		new_slots = kcalloc(npages, sizeof(*new_slots), GFP_ATOMIC);
+		if (!new_slots)
+			return -ENOMEM;
+	} else {
+		memset(stack_slots, 0, npages * sizeof(*stack_slots));
+	}
+
+	/* Phase 1: validate every page and pre-allocate all frame caps before mutating any mapping. */
+	for (i = 0; i < npages; i++) {
 		unsigned long gpa, slot;
-		void *old;
 
-		/* Fast path: 2 MiB aligned VA/PA/size backed by a large frame. */
-		if (((cur_va | cur_xpa) & (SZ_2M - 1)) == 0 && (size - off) >= SZ_2M &&
-		    cur_xpa >= km->pa_base && cur_xpa + SZ_2M <= km->pa_base + km->size) {
-			unsigned long ci = (unsigned long)(cur_xpa - km->pa_base) >> 21;
-			struct fki_kmem_chunk *ch = &km->chunks[ci];
-
-			if (ch->is_large) {
-				unsigned long lf = l4h_large_frame(ch->large_gpa);
-				unsigned long sub;
-
-				if (lf) {
-					for (sub = 0; sub < 512; sub++) {
-						old = xa_erase(&km->dyn_slots, pfn + sub);
-						if (old) {
-							unsigned long old_slot = xa_to_value(old);
-
-							if (old_slot)
-								l4h_slot_delete(old_slot);
-						}
-					}
-					slot = l4h_cap_copy(lf, L4H_RIGHTS_ALL);
-					if (!slot) {
-						err = -ENOMEM;
-						break;
-					}
-					err = map_high_frame(km, slot, cur_va,
-							     lprot | L4H_PROT_LARGE);
-					if (err) {
-						l4h_slot_delete(slot);
-						break;
-					}
-					if (xa_err(xa_store(&km->dyn_slots, pfn,
-							    xa_mk_value(slot), GFP_ATOMIC))) {
-						l4h_slot_delete(slot);
-						err = -ENOMEM;
-						break;
-					}
-					off += SZ_2M;
-					continue;
-				}
-			}
-		}
-
-		err = xpa_to_gpa(km, cur_xpa, &gpa);
+		err = xpa_to_gpa(km, xpa + ((fki_u64)i << PAGE_SHIFT), &gpa);
 		if (err)
-			break;
-		old = xa_erase(&km->dyn_slots, pfn);
-		if (old) {
-			unsigned long old_slot = xa_to_value(old);
-
-			if (old_slot)
-				l4h_slot_delete(old_slot);
-		}
+			goto err_prealloc;
 		slot = l4h_cap_copy(L4H_FRAME_CPTR(gpa), L4H_RIGHTS_ALL);
 		if (!slot) {
 			err = -ENOMEM;
-			break;
+			goto err_prealloc;
 		}
-		err = map_high_frame(km, slot, cur_va, lprot);
-		if (err) {
-			l4h_slot_delete(slot);
-			break;
+		new_slots[i] = slot;
+	}
+
+	/* Phase 1b: pre-ensure L1..L3 PTs and reserve dyn_slots xarray nodes before mutating anything. */
+	spin_lock_irqsave(&km->lock, flags);
+	for (i = 0; i < npages; i++) {
+		unsigned long cur_va = va + (i << PAGE_SHIFT);
+		unsigned long pt_idx = cur_va >> 21;
+		unsigned long pfn = cur_va >> PAGE_SHIFT;
+
+		if (pt_idx != last_pt_idx) {
+			err = ensure_high_pt(km, cur_va);
+			if (err)
+				break;
+			last_pt_idx = pt_idx;
 		}
-		if (xa_err(xa_store(&km->dyn_slots, pfn, xa_mk_value(slot), GFP_ATOMIC))) {
-			l4h_slot_delete(slot);
+		if (!xa_load(&km->dyn_slots, pfn)) {
+			err = xa_reserve(&km->dyn_slots, pfn, GFP_ATOMIC);
+			if (err)
+				break;
+		}
+	}
+	if (err) {
+		unsigned long j;
+
+		for (j = 0; j < i; j++) {
+			unsigned long pfn = (va + (j << PAGE_SHIFT)) >> PAGE_SHIFT;
+
+			xa_release(&km->dyn_slots, pfn);
+		}
+		spin_unlock_irqrestore(&km->lock, flags);
+		goto err_prealloc;
+	}
+
+	/* Phase 2: install 4 KiB dynamic mappings; PTs and xarray slots are pre-allocated. */
+	for (i = 0; i < npages; i++) {
+		unsigned long cur_va = va + (i << PAGE_SHIFT);
+		unsigned long pfn = cur_va >> PAGE_SHIFT;
+		void *old;
+
+		old = xa_load(&km->dyn_slots, pfn);
+		if (old) {
+			unsigned long old_slot = xa_to_value(old);
+
+			xa_erase(&km->dyn_slots, pfn);
+			if (old_slot)
+				l4h_slot_delete(old_slot);
+		}
+		err = map_high_frame(km, new_slots[i], cur_va, lprot);
+		if (err)
+			break;
+		if (xa_err(xa_store(&km->dyn_slots, pfn, xa_mk_value(new_slots[i]), GFP_ATOMIC))) {
 			err = -ENOMEM;
 			break;
 		}
-		off += PAGE_SIZE;
+		mapped++;
+	}
+	if (err) {
+		for (i = 0; i < mapped; i++) {
+			unsigned long pfn = (va + (i << PAGE_SHIFT)) >> PAGE_SHIFT;
+
+			xa_erase(&km->dyn_slots, pfn);
+			l4h_slot_delete(new_slots[i]);
+			new_slots[i] = 0;
+		}
+		for (i = mapped; i < npages; i++) {
+			unsigned long pfn = (va + (i << PAGE_SHIFT)) >> PAGE_SHIFT;
+
+			xa_release(&km->dyn_slots, pfn);
+			if (new_slots[i]) {
+				l4h_slot_delete(new_slots[i]);
+				new_slots[i] = 0;
+			}
+		}
 	}
 	spin_unlock_irqrestore(&km->lock, flags);
+
+	if (new_slots != stack_slots)
+		kfree(new_slots);
 	if (err)
 		pr_err_ratelimited("fki: high_map va=0x%lx xpa=0x%llx size=0x%lx prot=0x%x failed: %d\n",
 				   va, xpa, size, prot, err);
+	return err;
+
+err_prealloc:
+	for (i = 0; i < npages; i++) {
+		if (new_slots[i])
+			l4h_slot_delete(new_slots[i]);
+	}
+	if (new_slots != stack_slots)
+		kfree(new_slots);
+	pr_err_ratelimited("fki: high_map va=0x%lx xpa=0x%llx size=0x%lx prot=0x%x failed: %d\n",
+			   va, xpa, size, prot, err);
 	return err;
 }
 EXPORT_SYMBOL(fki_high_map);
 
 void fki_high_unmap(unsigned long va, unsigned long size)
 {
-	struct fki_kmem *km = active_kmem;
-	unsigned long flags, off;
+	struct fki_kmem *km = READ_ONCE(active_kmem);
+	unsigned long flags, off, va_end;
 
-	if (!km)
+	if (!km || !size)
+		return;
+	if ((va | size) & ~PAGE_MASK)
+		return;
+	if (check_add_overflow(va, size, &va_end))
 		return;
 	spin_lock_irqsave(&km->lock, flags);
 	for (off = 0; off < size; off += PAGE_SIZE) {
@@ -635,6 +812,59 @@ void fki_high_flush(void)
 		l4h_vspace_flush(L4H_CPTR(L4H_SLOT_HIGH_VSPACE));
 }
 EXPORT_SYMBOL(fki_high_flush);
+
+int fki_high_readable(unsigned long va, unsigned long size)
+{
+	struct fki_kmem *km = READ_ONCE(active_kmem);
+	unsigned long end, km_end, page_va, last_page, flags;
+
+	if (!km || !size)
+		return 0;
+	if (check_add_overflow(va, size, &end) ||
+	    check_add_overflow(km->high_va, km->size, &km_end))
+		return 0;
+	if (va >= km->high_va && end <= km_end)
+		return 1;
+	page_va = va & PAGE_MASK;
+	last_page = (end - 1) & PAGE_MASK;
+	spin_lock_irqsave(&km->lock, flags);
+	for (;; page_va += PAGE_SIZE) {
+		if (!(page_va >= km->high_va && page_va < km_end) &&
+		    !xa_load(&km->dyn_slots, page_va >> PAGE_SHIFT)) {
+			spin_unlock_irqrestore(&km->lock, flags);
+			return 0;
+		}
+		if (page_va == last_page)
+			break;
+	}
+	spin_unlock_irqrestore(&km->lock, flags);
+	return 1;
+}
+EXPORT_SYMBOL(fki_high_readable);
+
+static unsigned long icache_anchor;
+
+void fki_icache_flush(unsigned long va, unsigned long size)
+{
+	if (size && fki_high_readable(va, size)) {
+		unsigned long ctr;
+
+		asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
+		if (!((ctr >> 28) & 1UL)) {
+			unsigned long step = 4UL << ((ctr >> 16) & 0xfUL);
+			unsigned long cur = va & ~(step - 1);
+			unsigned long end = va + size;
+
+			for (; cur < end; cur += step)
+				asm volatile("dc cvau, %0" : : "r"(cur) : "memory");
+			asm volatile("dsb ish" ::: "memory");
+		}
+	}
+	/* Trigger EL1 cross-core ic ialluis on a valid Linux low-VA anchor (never pass high VA or 0,0). */
+	l4h_flush_icache((unsigned long)&icache_anchor, (unsigned long)&icache_anchor + 64);
+	asm volatile("dsb ish; isb" ::: "memory");
+}
+EXPORT_SYMBOL(fki_icache_flush);
 
 /* Use high window for fki_region_alloc so mode=1 smoke tests have executable memory. */
 int fki_region_alloc(unsigned long size, struct fki_region *r)
@@ -727,6 +957,7 @@ struct fki_as {
 	u64 gen;
 	atomic_t active_cpus;
 	spinlock_t lock;
+	struct list_head kmem_node;
 };
 
 struct fki_vs_slot {
@@ -832,9 +1063,27 @@ static void fki_vs_pool_fini(void)
 	INIT_LIST_HEAD(&fki_vs_lru);
 }
 
+static void fki_as_drain_list(struct fki_kmem *km)
+{
+	struct fki_as *as, *tmp;
+	LIST_HEAD(dead);
+	unsigned long flags;
+
+	spin_lock_irqsave(&fki_vs_lock, flags);
+	list_splice_init(&km->as_list, &dead);
+	spin_unlock_irqrestore(&fki_vs_lock, flags);
+
+	list_for_each_entry_safe(as, tmp, &dead, kmem_node) {
+		list_del_init(&as->kmem_node);
+		kfree(as);
+	}
+}
+
 void *fki_as_create(void)
 {
+	struct fki_kmem *km = READ_ONCE(active_kmem);
 	struct fki_as *as = kzalloc(sizeof(*as), GFP_ATOMIC);
+	unsigned long flags;
 
 	if (!as)
 		return NULL;
@@ -842,6 +1091,13 @@ void *fki_as_create(void)
 	as->gen = 0;
 	atomic_set(&as->active_cpus, 0);
 	spin_lock_init(&as->lock);
+	INIT_LIST_HEAD(&as->kmem_node);
+	if (km) {
+		spin_lock_irqsave(&fki_vs_lock, flags);
+		if (READ_ONCE(active_kmem) == km)
+			list_add_tail(&as->kmem_node, &km->as_list);
+		spin_unlock_irqrestore(&fki_vs_lock, flags);
+	}
 	return as;
 }
 EXPORT_SYMBOL(fki_as_create);
@@ -855,10 +1111,11 @@ void fki_as_destroy(void *as_ptr)
 	if (!as)
 		return;
 	spin_lock_irqsave(&fki_vs_lock, flags);
+	list_del_init(&as->kmem_node);
 	spin_lock(&as->lock);
 	if (as->vs_idx >= 0 && fki_vs_pool) {
 		slot = &fki_vs_pool[as->vs_idx];
-		as->vs_idx = -1;
+		WRITE_ONCE(as->vs_idx, -1);
 		as->gen++;
 		slot->owner = NULL;
 		list_del_init(&slot->lru);
@@ -866,6 +1123,9 @@ void fki_as_destroy(void *as_ptr)
 	}
 	spin_unlock(&as->lock);
 	spin_unlock_irqrestore(&fki_vs_lock, flags);
+
+	while (atomic_read(&as->active_cpus) != 0)
+		cpu_relax();
 
 	if (slot) {
 		fki_vs_slot_reset(slot);
@@ -906,9 +1166,9 @@ static int map_user_frame(struct fki_vs_slot *slot, unsigned long cptr,
 int fki_as_map(void *as_ptr, unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 {
 	struct fki_as *as = as_ptr;
-	struct fki_kmem *km = active_kmem;
-	unsigned long lprot = fki_eff_prot(prot_to_l4h(prot));
-	unsigned long flags, off;
+	struct fki_kmem *km = READ_ONCE(active_kmem);
+	unsigned long lprot, va_end, flags, off;
+	fki_u64 xpa_end;
 	int changed = 0, err = 0;
 
 	if (!as || !km)
@@ -917,6 +1177,12 @@ int fki_as_map(void *as_ptr, unsigned long va, fki_u64 xpa, unsigned long size, 
 		return -EINVAL;
 	if (!size)
 		return 0;
+	if (check_add_overflow(va, size, &va_end) ||
+	    check_add_overflow(xpa, (fki_u64)size, &xpa_end))
+		return -EINVAL;
+	if ((prot & FKI_PROT_EXEC) && !(prot & FKI_PROT_READ))
+		return -EOPNOTSUPP;
+	lprot = fki_eff_prot(prot_to_l4h(prot));
 	if (!lprot) {
 		fki_as_unmap(as, va, size);
 		return 0;
@@ -1008,9 +1274,13 @@ static void fki_vs_slot_unmap_range(struct fki_vs_slot *slot,
 void fki_as_unmap(void *as_ptr, unsigned long va, unsigned long size)
 {
 	struct fki_as *as = as_ptr;
-	unsigned long flags;
+	unsigned long flags, va_end;
 
 	if (!size)
+		return;
+	if ((va | size) & ~PAGE_MASK)
+		return;
+	if (check_add_overflow(va, size, &va_end))
 		return;
 	if (!as) {
 		int i;
@@ -1075,9 +1345,9 @@ static struct fki_vs_slot *fki_vs_activate(struct fki_as *as, u64 *gen_out)
 			list_del_init(&slot->lru);
 			spin_lock(&as->lock);
 			slot->owner = as;
-			as->vs_idx = (int)(slot - fki_vs_pool);
 			as->gen = (u64)atomic64_inc_return(&fki_vs_gen);
 			*gen_out = as->gen;
+			smp_store_release(&as->vs_idx, (int)(slot - fki_vs_pool));
 			spin_unlock(&as->lock);
 			list_add_tail(&slot->lru, &fki_vs_lru);
 			spin_unlock_irqrestore(&fki_vs_lock, flags);
@@ -1092,9 +1362,19 @@ static struct fki_vs_slot *fki_vs_activate(struct fki_as *as, u64 *gen_out)
 		}
 		if (victim) {
 			struct fki_as *vas = victim->owner;
+			int old_idx;
 
 			spin_lock(&vas->lock);
-			vas->vs_idx = -1;
+			old_idx = vas->vs_idx;
+			WRITE_ONCE(vas->vs_idx, -1);
+			smp_mb();
+			if (atomic_read(&vas->active_cpus) != 0) {
+				smp_store_release(&vas->vs_idx, old_idx);
+				spin_unlock(&vas->lock);
+				spin_unlock_irqrestore(&fki_vs_lock, flags);
+				cpu_relax();
+				continue;
+			}
 			vas->gen++;
 			victim->owner = NULL;
 			list_del_init(&victim->lru);
@@ -1183,6 +1463,15 @@ fail_free:
 }
 EXPORT_SYMBOL(fki_utcb_create);
 
+static void fki_utcb_desched_ipi(void *arg)
+{
+	struct l4h_uctx *u = arg;
+
+	if (this_cpu_read(fki_cur_utcb) == u)
+		this_cpu_write(fki_cur_utcb, NULL);
+	l4h_user_deschedule(u);
+}
+
 void fki_utcb_destroy(void *utcb_ptr)
 {
 	struct fki_utcb *utcb = utcb_ptr;
@@ -1193,9 +1482,9 @@ void fki_utcb_destroy(void *utcb_ptr)
 	u = &utcb->u;
 	if (u->sc_vcpu >= 0) {
 		if (u->sc_vcpu == smp_processor_id()) {
-			if (this_cpu_read(fki_cur_utcb) == u)
-				this_cpu_write(fki_cur_utcb, NULL);
-			l4h_user_deschedule(u);
+			fki_utcb_desched_ipi(u);
+		} else if (u->sc_vcpu < nr_cpu_ids && cpu_online(u->sc_vcpu)) {
+			smp_call_function_single(u->sc_vcpu, fki_utcb_desched_ipi, u, 1);
 		}
 	}
 	if (u->fault_ep)
@@ -1254,7 +1543,8 @@ int fki_utcb_set_pac(void *utcb_ptr, const struct fki_pac_keys *keys)
 }
 EXPORT_SYMBOL(fki_utcb_set_pac);
 
-int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop)
+static int fki_utcb_run_inner(void *utcb_ptr, struct fki_utcb_regs *regs,
+			      struct fki_utcb_stop *stop, bool resume_unchanged)
 {
 	struct fki_utcb *utcb = utcb_ptr;
 	struct l4h_uctx *u;
@@ -1263,8 +1553,8 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 	struct l4h_user_ext ext;
 	unsigned long gp[37];
 	u64 gen = 0;
-	bool as_changed, tls_ro_changed, seg_changed;
-	int st, i;
+	bool as_changed, tls_ro_changed, fast_resume;
+	int st, i, idx;
 
 	if (!utcb || !regs || !stop || !utcb->as)
 		return -EINVAL;
@@ -1272,10 +1562,17 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 	as = utcb->as;
 
 	atomic_inc(&as->active_cpus);
-	slot = fki_vs_activate(as, &gen);
-	if (!slot) {
-		atomic_dec(&as->active_cpus);
-		return -ENOMEM;
+	smp_mb__after_atomic();
+	idx = smp_load_acquire(&as->vs_idx);
+	if (likely(idx >= 0 && fki_vs_pool)) {
+		gen = READ_ONCE(as->gen);
+		slot = &fki_vs_pool[idx];
+	} else {
+		slot = fki_vs_activate(as, &gen);
+		if (!slot) {
+			atomic_dec(&as->active_cpus);
+			return -ENOMEM;
+		}
 	}
 
 	as_changed = (u->vspace != slot->root || utcb->as_gen != gen);
@@ -1295,22 +1592,26 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 		utcb->as_gen = gen;
 	}
 
-	memset(gp, 0, sizeof(gp));
-	for (i = 0; i < 31; i++)
-		gp[i] = (unsigned long)regs->x[i];
-	gp[31] = (unsigned long)regs->sp;
-	gp[32] = (unsigned long)regs->pc;
-	gp[33] = (unsigned long)(regs->pstate & 0xf0000000UL);
-	gp[L4H_GP_TLS] = (unsigned long)regs->tpidr;
+	fast_resume = (resume_unchanged && !as_changed && !u->regs_valid &&
+		       u->state == L4H_UCTX_FAULTED &&
+		       utcb->have_tls && regs->tpidrro == utcb->last_tpidrro);
+	if (!fast_resume) {
+		for (i = 0; i < 31; i++)
+			gp[i] = (unsigned long)regs->x[i];
+		gp[31] = (unsigned long)regs->sp;
+		gp[32] = (unsigned long)regs->pc;
+		gp[33] = (unsigned long)(regs->pstate & 0xf0000000UL);
+		gp[34] = 0;
+		gp[L4H_GP_TLS] = (unsigned long)regs->tpidr;
+		gp[36] = 0;
 
-	tls_ro_changed = (!utcb->have_tls ||
-			  regs->tpidrro != utcb->last_tpidrro ||
-			  as_changed ||
-			  u->state == L4H_UCTX_FRESH);
-	seg_changed = (!utcb->have_tls ||
-		       regs->tpidr != utcb->last_tpidr ||
-		       tls_ro_changed);
-	l4h_user_mark_dirty(u, seg_changed ? 1 : 0);
+		tls_ro_changed = (!utcb->have_tls ||
+				  regs->tpidrro != utcb->last_tpidrro ||
+				  u->state == L4H_UCTX_FRESH);
+		l4h_user_mark_dirty(u, tls_ro_changed ? 1 : 0);
+	} else {
+		tls_ro_changed = false;
+	}
 
 	ext.size = sizeof(ext);
 	ext.flags = L4H_USER_EXT_TLS_RO |
@@ -1320,6 +1621,16 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 
 	this_cpu_write(fki_cur_utcb, u);
 	st = l4h_user_run_ex(u, gp, 1, &ext);
+	if (st == L4H_STOP_PAGEFAULT) {
+		atomic_dec(&as->active_cpus);
+		utcb->last_tpidrro = regs->tpidrro;
+		utcb->have_tls = true;
+		stop->kind = FKI_STOP_PAGEFAULT;
+		stop->esr = ext.raw_fsr;
+		stop->fault_addr = u->fault_addr;
+		stop->fault_ip = u->fault_ip;
+		return 0;
+	}
 	if (!u->regs_valid)
 		l4h_user_sync_regs(u, gp);
 
@@ -1342,12 +1653,6 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 		stop->fault_ip = gp[32];
 		stop->fault_addr = 0;
 		break;
-	case L4H_STOP_PAGEFAULT:
-		stop->kind = FKI_STOP_PAGEFAULT;
-		stop->esr = ext.raw_fsr;
-		stop->fault_addr = u->fault_addr;
-		stop->fault_ip = u->fault_ip;
-		break;
 	case L4H_STOP_EXCEPTION:
 		stop->kind = FKI_STOP_EXCEPTION;
 		stop->esr = u->exc_number;
@@ -1365,7 +1670,42 @@ int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_sto
 	}
 	return 0;
 }
+
+int fki_utcb_run(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop)
+{
+	return fki_utcb_run_inner(utcb_ptr, regs, stop, false);
+}
 EXPORT_SYMBOL(fki_utcb_run);
+
+int fki_utcb_resume(void *utcb_ptr, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop)
+{
+	return fki_utcb_run_inner(utcb_ptr, regs, stop, true);
+}
+EXPORT_SYMBOL(fki_utcb_resume);
+
+int fki_utcb_sync_regs(void *utcb_ptr, struct fki_utcb_regs *regs)
+{
+	struct fki_utcb *utcb = utcb_ptr;
+	struct l4h_uctx *u;
+	unsigned long gp[37];
+	int i;
+
+	if (!utcb || !regs)
+		return -EINVAL;
+	u = &utcb->u;
+	if (u->regs_valid)
+		return 0;
+	l4h_user_sync_regs(u, gp);
+	for (i = 0; i < 31; i++)
+		regs->x[i] = gp[i];
+	regs->sp = gp[31];
+	regs->pc = gp[32];
+	regs->pstate = gp[33];
+	regs->tpidr = gp[L4H_GP_TLS];
+	utcb->last_tpidr = regs->tpidr;
+	return 0;
+}
+EXPORT_SYMBOL(fki_utcb_sync_regs);
 
 int fki_utcb_fpu_read(void *utcb_ptr, void *buf, unsigned long len)
 {

@@ -168,3 +168,73 @@ int fki_bind_cpu(int cpu)
 	return set_cpus_allowed_ptr(current, cpumask_of(cpu));
 }
 EXPORT_SYMBOL(fki_bind_cpu);
+
+/* FKI v1 capability & EL0/high-window stubs (native EL1 backend). */
+unsigned long fki_caps(void)
+{
+	return FKI_CAP_PAC | FKI_CAP_EXEC_ONLY;
+}
+EXPORT_SYMBOL(fki_caps);
+
+int fki_cpu_id(void)
+{
+	return smp_processor_id();
+}
+EXPORT_SYMBOL(fki_cpu_id);
+
+void fki_log_alert(const char *s, unsigned long len)
+{
+	pr_alert("fki: %.*s\n", (int)len, s);
+}
+EXPORT_SYMBOL(fki_log_alert);
+
+int fki_kmem_alloc(unsigned long size, unsigned long high_va, fki_u64 pa_base, struct fki_region *r) { return -EOPNOTSUPP; }
+EXPORT_SYMBOL(fki_kmem_alloc);
+void fki_kmem_free(struct fki_region *r) {}
+EXPORT_SYMBOL(fki_kmem_free);
+int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot) { return -EOPNOTSUPP; }
+EXPORT_SYMBOL(fki_high_map);
+void fki_high_unmap(unsigned long va, unsigned long size) {}
+EXPORT_SYMBOL(fki_high_unmap);
+void fki_high_flush(void) {}
+EXPORT_SYMBOL(fki_high_flush);
+int fki_high_readable(unsigned long va, unsigned long size)
+{
+	return size && va + size >= va && va >= 0xffffff8000000000UL && va + size <= 0xfffffffc00000000UL;
+}
+EXPORT_SYMBOL(fki_high_readable);
+void fki_icache_flush(unsigned long va, unsigned long size)
+{
+	(void)va;
+	(void)size;
+	asm volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
+}
+EXPORT_SYMBOL(fki_icache_flush);
+void *fki_as_create(void) { return NULL; }
+EXPORT_SYMBOL(fki_as_create);
+void fki_as_destroy(void *as) {}
+EXPORT_SYMBOL(fki_as_destroy);
+int fki_as_map(void *as, unsigned long va, fki_u64 xpa, unsigned long size, int prot) { return -EOPNOTSUPP; }
+EXPORT_SYMBOL(fki_as_map);
+void fki_as_unmap(void *as, unsigned long va, unsigned long size) {}
+EXPORT_SYMBOL(fki_as_unmap);
+void fki_as_flush(void *as) {}
+EXPORT_SYMBOL(fki_as_flush);
+void *fki_utcb_create(void *as) { return NULL; }
+EXPORT_SYMBOL(fki_utcb_create);
+void fki_utcb_destroy(void *utcb) {}
+EXPORT_SYMBOL(fki_utcb_destroy);
+int fki_utcb_set_as(void *utcb, void *as) { return -EOPNOTSUPP; }
+EXPORT_SYMBOL(fki_utcb_set_as);
+int fki_utcb_set_pac(void *utcb, const struct fki_pac_keys *keys) { return -EOPNOTSUPP; }
+EXPORT_SYMBOL(fki_utcb_set_pac);
+int fki_utcb_run(void *utcb, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop) { return -EOPNOTSUPP; }
+EXPORT_SYMBOL(fki_utcb_run);
+int fki_utcb_resume(void *utcb, struct fki_utcb_regs *regs, struct fki_utcb_stop *stop) { return -ENOSYS; }
+EXPORT_SYMBOL(fki_utcb_resume);
+int fki_utcb_sync_regs(void *utcb, struct fki_utcb_regs *regs) { return -ENOSYS; }
+EXPORT_SYMBOL(fki_utcb_sync_regs);
+int fki_utcb_fpu_read(void *utcb, void *buf, unsigned long len) { return -EOPNOTSUPP; }
+EXPORT_SYMBOL(fki_utcb_fpu_read);
+int fki_utcb_fpu_write(void *utcb, const void *buf, unsigned long len) { return -EOPNOTSUPP; }
+EXPORT_SYMBOL(fki_utcb_fpu_write);
