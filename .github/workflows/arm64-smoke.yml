@@ -41,11 +41,23 @@ jobs:
           sudo insmod fki-ko/fki.ko || { sudo dmesg | tail -30; exit 1; }
           sudo dmesg | grep -a "fki" | tail -20
           sudo rmmod fki
+      - name: Room for the build (disk, swap)
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost || true
+          sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile
+          df -h /; free -g
       - name: XNU kernel (DroidVM toolchain, xnu-12377)
         run: |
           mkdir -p ~/w && ln -sfn $GITHUB_WORKSPACE ~/w/poc
-          sed -i 's/--jobs 12/--jobs 4/g; s/JOBS=12/JOBS=4/g' scripts/vm-xnu-build.sh scripts/vm-xnu-rebuild.sh
-          bash scripts/vm-xnu-build.sh 2>&1 | tail -80
+          sed -i 's/--jobs 12/--jobs 3/g; s/JOBS=12/JOBS=3/g' scripts/vm-xnu-build.sh scripts/vm-xnu-rebuild.sh
+          # the runner agent must keep its CPU and memory (the first run lost the runner in this step): the build at
+          # the lowest priority, in a memory-capped scope, with disk and memory printed while it runs
+          ( while sleep 60; do echo "[mon] $(date -u +%T) $(df -h / | tail -1) | $(free -m | awk '/Mem/{print "mem used "$3" avail "$7}') | load $(cut -d' ' -f1 /proc/loadavg)"; done ) &
+          MON=$!; trap 'kill $MON' EXIT
+          sudo systemd-run --scope -q -p MemoryMax=11G -p MemorySwapMax=8G env HOME=$HOME PATH=$PATH \
+            setpriv --reuid=$(id -u) --regid=$(id -g) --init-groups nice -n 19 bash scripts/vm-xnu-build.sh > /tmp/xnu-build.log 2>&1 || { tail -150 /tmp/xnu-build.log; exit 1; }
+          tail -60 /tmp/xnu-build.log
           test -s ~/w/dvm/out/k27/kernel-k27.macho
       - name: Kernel collection input (kernelcache.release.vma2 of macOS 27.2 26B123, from Apple)
         run: |
@@ -93,5 +105,7 @@ jobs:
         if: always()
         with:
           name: kernel-log
-          path: /tmp/kernel.log
+          path: |
+            /tmp/kernel.log
+            /tmp/xnu-build.log
           if-no-files-found: ignore
