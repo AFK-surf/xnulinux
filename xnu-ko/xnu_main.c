@@ -646,6 +646,10 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		logkv("xnu: XNU enters user space (EL0); user pc", a1);
 		return 0;
 	}
+	if (call == LINUX64_CALL_HALT) {	/* the hosted system shut down: XNU would spin with this CPU's interrupts masked */
+		logs(a1 ? "xnu: the hosted system asked for a restart: run ended" : "xnu: the hosted system halted: run ended");
+		return 1;
+	}
 	if (call == LINUX64_CALL_PANIC) {
 		char m[500]; const char *f = (const char *)a1; unsigned i = 0;
 		while (f && f[i] && i < sizeof(m) - 1) { m[i] = f[i]; i++; }
