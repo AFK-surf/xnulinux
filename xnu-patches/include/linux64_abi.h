@@ -75,6 +75,29 @@ struct linux64_map_req {
 	__INT64_TYPE__ result;
 };
 
+/* User-context stop reasons (match FKI_STOP_*). */
+enum {
+	LINUX64_STOP_SYSCALL   = 1,
+	LINUX64_STOP_PAGEFAULT = 2,
+	LINUX64_STOP_EXCEPTION = 3,
+	LINUX64_STOP_INTERRUPT = 4,
+};
+
+/* User-context execution request for EL0 hosts (LINUX64_CALL_UTCB_RUN). */
+struct linux64_utcb_req {
+	__UINT64_TYPE__ as_handle;
+	__UINT64_TYPE__ thread_id;
+	__UINT64_TYPE__ disable_jop;
+	__UINT64_TYPE__ x[31];
+	__UINT64_TYPE__ sp, pc, pstate, tpidr, tpidrro;
+	__UINT64_TYPE__ neon[64];	/* q0..q31 (512 bytes) */
+	__UINT32_TYPE__ fpsr, fpcr;	/* + 8 bytes = 520 bytes, matches arm_neon_saved_state64 */
+	__UINT32_TYPE__ fpu_dirty;
+	__INT32_TYPE__ stop_kind;
+	__UINT64_TYPE__ fault_addr, fault_ip, esr;
+	__INT64_TYPE__ result;
+};
+
 /* A buffer: bytes to send or room to receive into. */
 struct linux64_buf_req {
 	void *buf;

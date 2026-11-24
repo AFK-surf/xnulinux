@@ -54,6 +54,8 @@ static void *cpu_thread[XNU_MAX_CPUS];
 static volatile int cpu_running[XNU_MAX_CPUS];
 static u64_t a_cpu_entry;			/* XNU's linux64_cpu_entry */
 static int el0_mode;				/* nonzero when host reports FKI_CAP_EL0 */
+static void *cpu_utcb[LINUX64_CPU_SLOTS];	/* per-CPU persistent user execution context (EL0 host) */
+static u64_t cpu_utcb_thread[LINUX64_CPU_SLOTS];
 static inline unsigned this_slot(void)
 {
 	if (el0_mode) {
@@ -716,6 +718,103 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 	}
 	if (call == LINUX64_CALL_KFLUSH) {
 		fki_high_flush();
+		return 0;
+	}
+	if (call == LINUX64_CALL_AS_CREATE) {
+		struct linux64_map_req *q = (struct linux64_map_req *)a1;
+		if (q) {
+			q->as_handle = (u64_t)(unsigned long)fki_as_create();
+			q->result = q->as_handle ? 0 : -12;
+		}
+		return 0;
+	}
+	if (call == LINUX64_CALL_AS_DESTROY) {
+		struct linux64_map_req *q = (struct linux64_map_req *)a1;
+		if (q && q->as_handle) {
+			fki_as_destroy((void *)(unsigned long)q->as_handle);
+			q->as_handle = 0;
+			q->result = 0;
+		}
+		return 0;
+	}
+	if (call == LINUX64_CALL_AS_MAP) {
+		struct linux64_map_req *q = (struct linux64_map_req *)a1;
+		if (q)
+			q->result = fki_as_map((void *)(unsigned long)q->as_handle, (unsigned long)q->va,
+					       q->pa, (unsigned long)q->size, (int)q->prot);
+		return 0;
+	}
+	if (call == LINUX64_CALL_AS_UNMAP) {
+		struct linux64_map_req *q = (struct linux64_map_req *)a1;
+		if (q) {
+			fki_as_unmap((void *)(unsigned long)q->as_handle, (unsigned long)q->va,
+				     (unsigned long)q->size);
+			q->result = 0;
+		}
+		return 0;
+	}
+	if (call == LINUX64_CALL_AS_FLUSH) {
+		struct linux64_map_req *q = (struct linux64_map_req *)a1;
+		if (q) {
+			fki_as_flush((void *)(unsigned long)q->as_handle);
+			q->result = 0;
+		}
+		return 0;
+	}
+	if (call == LINUX64_CALL_UTCB_RUN) {
+		struct linux64_utcb_req *q = (struct linux64_utcb_req *)a1;
+		if (!q || !q->as_handle)
+			return 0;
+		unsigned s = this_slot();
+		void *as = (void *)(unsigned long)q->as_handle;
+		void *utcb = cpu_utcb[s];
+		if (!utcb) {
+			utcb = fki_utcb_create(as);
+			if (!utcb) {
+				q->result = -12;
+				return 0;
+			}
+			cpu_utcb[s] = utcb;
+			cpu_utcb_thread[s] = 0;
+		} else {
+			fki_utcb_set_as(utcb, as);
+		}
+		{
+			struct fki_pac_keys k = xnu_worlds[s]->xnu_keys;
+			if (q->disable_jop)
+				k.sctlr_en &= ~((1ULL << 31) | (1ULL << 27));
+			fki_utcb_set_pac(utcb, &k);
+		}
+		if (q->fpu_dirty || cpu_utcb_thread[s] != q->thread_id) {
+			fki_utcb_fpu_write(utcb, q->neon, 520);
+			cpu_utcb_thread[s] = q->thread_id;
+			q->fpu_dirty = 0;
+		}
+		struct fki_utcb_regs regs;
+		struct fki_utcb_stop stop;
+		for (int i = 0; i < 31; i++)
+			regs.x[i] = q->x[i];
+		regs.sp = q->sp;
+		regs.pc = q->pc;
+		regs.pstate = q->pstate;
+		regs.tpidr = q->tpidr;
+		regs.tpidrro = q->tpidrro;
+		int err = fki_utcb_run(utcb, &regs, &stop);
+		q->result = err;
+		if (err == 0) {
+			for (int i = 0; i < 31; i++)
+				q->x[i] = regs.x[i];
+			q->sp = regs.sp;
+			q->pc = regs.pc;
+			q->pstate = regs.pstate;
+			q->tpidr = regs.tpidr;
+			q->tpidrro = regs.tpidrro;
+			q->stop_kind = stop.kind;
+			q->fault_addr = stop.fault_addr;
+			q->fault_ip = stop.fault_ip;
+			q->esr = stop.esr;
+			fki_utcb_fpu_read(utcb, q->neon, 520);
+		}
 		return 0;
 	}
 	{	/* a call this module does not know (an XNU built against a newer linux64_abi.h): say so once, go on */
@@ -1445,6 +1544,12 @@ static int __init xnu_init(void)
 
 static void __exit xnu_exit(void)
 {
+	for (int i = 0; i < LINUX64_CPU_SLOTS; i++) {
+		if (cpu_utcb[i]) {
+			fki_utcb_destroy(cpu_utcb[i]);
+			cpu_utcb[i] = 0;
+		}
+	}
 	if (window_l1) {
 		int last = -1;
 		for (int i = 0; i < 512; i++) if (window_owned[i]) { window_l1[i] = 0; last = i; }

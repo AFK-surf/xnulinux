@@ -578,7 +578,7 @@ index b65f76c..2d18613 100644
  		max_cpus_initialized = MAX_CPUS_WAIT;
  		lck_mtx_sleep(&max_cpus_lock, LCK_SLEEP_DEFAULT, &max_cpus_initialized, THREAD_UNINT);
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 79d0bc1..97efcfe 100644
+index 79d0bc1..12adbea 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -51,6 +51,7 @@
@@ -631,7 +631,66 @@ index 79d0bc1..97efcfe 100644
  SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = MACH_VM_MAX_ADDRESS;
  #  else
  SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = 0x0;
-@@ -2014,6 +2041,13 @@ pmap_map_bd_with_options(
+@@ -635,6 +662,58 @@ pte_is_xs(const pt_attr_t *pt_attr, pt_entry_t pte)
+ 	arm64_sync_tlb(strong);                                                                               \
+ }
+ 
++static inline void
++linux64_el0_mirror_pte(pmap_t pmap, vm_map_address_t va, pt_entry_t pte, uint64_t size)
++{
++	if (!linux64_el0 || !pmap || !size) {
++		return;
++	}
++	if (pmap == kernel_pmap) {
++		struct linux64_map_req req = { .va = va, .size = size };
++		if (pte_is_valid(pte)) {
++			pmap_paddr_t pa = pte_to_pa(pte);
++			if (pa_valid(pa)) {
++				req.pa = pa;
++				req.prot = LINUX64_PROT_READ;
++				if ((pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RWNA) ||
++				    (pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RWRW) ||
++				    pte_was_writeable(pte)) {
++					req.prot |= LINUX64_PROT_WRITE;
++				}
++				if (!(pte & ARM_PTE_PNX)) {
++					req.prot |= LINUX64_PROT_EXEC;
++				}
++				linux64_call(LINUX64_CALL_KMAP, &req);
++			}
++		} else {
++			linux64_call(LINUX64_CALL_KUNMAP, &req);
++		}
++		return;
++	}
++	if (!pmap->linux64_as) {
++		return;
++	}
++	struct linux64_map_req req = { .as_handle = pmap->linux64_as, .va = va, .size = size };
++	uint64_t ap = pte & ARM_PTE_APMASK;
++	if (pte_is_valid(pte) && (pte & ARM_PTE_AF) &&
++	    (ap == ARM_PTE_AP(AP_RORO) || ap == ARM_PTE_AP(AP_RWRW))) {
++		pmap_paddr_t pa = pte_to_pa(pte);
++		if (pa_valid(pa)) {
++			req.pa = pa;
++			req.prot = LINUX64_PROT_READ;
++			if (ap == ARM_PTE_AP(AP_RWRW)) {
++				req.prot |= LINUX64_PROT_WRITE;
++			}
++			if (!(pte & ARM_PTE_NX)) {
++				req.prot |= LINUX64_PROT_EXEC;
++			}
++			linux64_call(LINUX64_CALL_AS_MAP, &req);
++			return;
++		}
++	}
++	linux64_call(LINUX64_CALL_AS_UNMAP, &req);
++}
++
+ /*
+  * Synchronize updates to PTEs that were previously invalid or had the AF bit cleared,
+  * therefore not requiring TLBI.  Use a store-load barrier to ensure subsequent loads
+@@ -2014,6 +2093,13 @@ pmap_map_bd_with_options(
  
  		assert(!ARM_PTE_IS_COMPRESSED(*ptep, ptep));
  		write_pte_strong(ptep, pte);
@@ -645,7 +704,7 @@ index 79d0bc1..97efcfe 100644
  
  		pte_increment_pa(tmplate);
  		vaddr += PAGE_SIZE;
-@@ -2110,6 +2144,13 @@ scan:
+@@ -2110,6 +2196,13 @@ scan:
  		pte |= ARM_PTE_NG;
  #endif /* __ARM_KERNEL_PROTECT__ */
  		write_pte_strong(ptep, pte);
@@ -659,7 +718,7 @@ index 79d0bc1..97efcfe 100644
  	}
  	PMAP_UPDATE_TLBS(kernel_pmap, va_start, va_start + len, false, true);
  #if KASAN
-@@ -2983,7 +3024,8 @@ pmap_root_alloc_size(pmap_t pmap)
+@@ -2983,7 +3076,8 @@ pmap_root_alloc_size(pmap_t pmap)
  	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
  	unsigned int root_level = pt_attr_root_level(pt_attr);
  	const uint64_t index = pt_attr_va_valid_mask(pt_attr);
@@ -669,7 +728,7 @@ index 79d0bc1..97efcfe 100644
  }
  
  
-@@ -3108,6 +3150,16 @@ pmap_create_options_internal(
+@@ -3108,6 +3202,16 @@ pmap_create_options_internal(
  	}
  
  	p->ttep = ml_static_vtop((vm_offset_t)p->tte);
@@ -686,7 +745,7 @@ index 79d0bc1..97efcfe 100644
  	p->hw_tte = pmap_tt1_allocate(p, pmap_root_alloc_size(p), 0);
  	if (!p->hw_tte) {
  		pmap_tt1_deallocate(p, p->tte, pmap_root_alloc_size(p), 0);
-@@ -3129,6 +3181,7 @@ pmap_create_options_internal(
+@@ -3129,6 +3233,7 @@ pmap_create_options_internal(
  	p->hw_tte[0] = (p->ttep & ARM_TTE_TABLE_MASK) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;
  
  	FLUSH_PTE();
@@ -694,10 +753,28 @@ index 79d0bc1..97efcfe 100644
  
  	/*
  	 *  initialize the rest of the structure
-@@ -3406,6 +3459,10 @@ pmap_destroy_internal(
+@@ -3141,6 +3246,12 @@ pmap_create_options_internal(
+ 	p->nested_no_bounds_ref_state = NESTED_NO_BOUNDS_REF_NONE;
+ 	p->nested_no_bounds_refcnt = 0;
+ 	p->nested_bounds_set = false;
++	p->linux64_as = 0;
++	if (linux64_el0 && p != kernel_pmap && p->type == PMAP_TYPE_USER) {
++		struct linux64_map_req req = {0};
++		linux64_call(LINUX64_CALL_AS_CREATE, &req);
++		p->linux64_as = req.as_handle;
++	}
+ 
+ 
+ #if MACH_ASSERT
+@@ -3406,6 +3517,15 @@ pmap_destroy_internal(
  
  
  
++	if (linux64_el0 && pmap->linux64_as) {
++		struct linux64_map_req req = { .as_handle = pmap->linux64_as };
++		linux64_call(LINUX64_CALL_AS_DESTROY, &req);
++		pmap->linux64_as = 0;
++	}
 +	if (pmap->hw_tte == pmap->tte) {
 +		pmap->hw_tte = (tt_entry_t *) NULL;   /* LINUX64: a level-0 root is both; free it once, below */
 +		pmap->hw_ttep = 0;
@@ -705,49 +782,82 @@ index 79d0bc1..97efcfe 100644
  	if (pmap->tte) {
  		pmap_tt1_deallocate(pmap, pmap->tte, pmap_root_alloc_size(pmap), 0);
  		pmap->tte = (tt_entry_t *) NULL;
-@@ -4126,8 +4183,12 @@ pmap_remove_range(
+@@ -4126,8 +4246,17 @@ pmap_remove_range(
  	int num_changed = pmap_remove_range_options(pmap, va, bpte, epte, NULL,
  	    &need_strong_sync, PMAP_OPTIONS_REMOVE);
  	if (num_changed > 0) {
 -		PMAP_UPDATE_TLBS(pmap, va,
 -		    va + (pt_attr_page_size(pmap_get_pt_attr(pmap)) * (epte - bpte)), need_strong_sync, true);
 +		uint64_t rlen = pt_attr_page_size(pmap_get_pt_attr(pmap)) * (epte - bpte);
-+		if (linux64_el0 && pmap == kernel_pmap) {
-+			struct linux64_map_req req = { .va = va, .size = rlen };
-+			linux64_call(LINUX64_CALL_KUNMAP, &req);
++		if (linux64_el0) {
++			if (pmap == kernel_pmap) {
++				struct linux64_map_req req = { .va = va, .size = rlen };
++				linux64_call(LINUX64_CALL_KUNMAP, &req);
++			} else if (pmap->linux64_as) {
++				struct linux64_map_req req = { .as_handle = pmap->linux64_as, .va = va, .size = rlen };
++				linux64_call(LINUX64_CALL_AS_UNMAP, &req);
++			}
 +		}
 +		PMAP_UPDATE_TLBS(pmap, va, va + rlen, need_strong_sync, true);
  	}
  	return num_changed;
  }
-@@ -5955,6 +6016,26 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
+@@ -4484,6 +4613,16 @@ pmap_remove_options_internal(
+ 		remove_count = pmap_remove_range_options(pmap, start, bpte, epte, &eva,
+ 		    &need_strong_sync, options);
+ 
++		if (linux64_el0 && remove_count > 0 && eva > start) {
++			if (pmap == kernel_pmap) {
++				struct linux64_map_req req = { .va = start, .size = eva - start };
++				linux64_call(LINUX64_CALL_KUNMAP, &req);
++			} else if (pmap->linux64_as) {
++				struct linux64_map_req req = { .as_handle = pmap->linux64_as, .va = start, .size = eva - start };
++				linux64_call(LINUX64_CALL_AS_UNMAP, &req);
++			}
++		}
++
+ 		if ((pmap->type == PMAP_TYPE_USER) && (ptep_get_info(pte_p)->refcnt == 0)) {
+ 			pmap_tte_deallocate(pmap, start, eva, need_strong_sync, tte_p, pt_attr_twig_level(pt_attr));
+ 			remove_count = 0; // pmap_tte_deallocate has flushed the TLB for us
+@@ -5070,6 +5209,9 @@ pmap_page_protect_options_with_flush_range(
+ 
+ 			assert(spte != tmplate);
+ 			write_pte_fast(pte_p, tmplate);
++			if (pmap != kernel_pmap) {
++				linux64_el0_mirror_pte(pmap, va, tmplate, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO);
++			}
+ 			update = true;
+ 			++pass1_updated;
+ 
+@@ -5160,6 +5302,9 @@ pmap_page_protect_options_with_flush_range(
+ 				 */
+ 				pte_set_was_writeable(tmplate, true);
+ 				write_pte_fast(pte_p, tmplate);
++				if (pmap != kernel_pmap) {
++					linux64_el0_mirror_pte(pmap, va, tmplate, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO);
++				}
+ 				update = true;
+ 				++pass1_updated;
+ 			} else if (pte_was_writeable(tmplate)) {
+@@ -5709,6 +5854,9 @@ pmap_protect_options_internal(
+ #endif /* HAS_FEAT_XS */
+ 
+ 			write_pte_fast(pte_p, tmplate);
++			if (pmap != kernel_pmap) {
++				linux64_el0_mirror_pte(pmap, va, tmplate, pmap_page_size);
++			}
+ 
+ 			if (managed) {
+ 				pvh_assert_locked(pai);
+@@ -5955,6 +6103,7 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
  
  	if (success && *old_pte != new_pte) {
  		uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
-+		if (linux64_el0 && pmap == kernel_pmap) {
-+			struct linux64_map_req req = { .va = v, .size = amount };
-+			if (pte_is_valid(new_pte)) {
-+				pmap_paddr_t pa = pte_to_pa(new_pte);
-+				if (pa_valid(pa)) {
-+					req.pa = pa;
-+					req.prot = LINUX64_PROT_READ;
-+					if ((new_pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RWNA) ||
-+					    (new_pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RWRW)) {
-+						req.prot |= LINUX64_PROT_WRITE;
-+					}
-+					if (!(new_pte & ARM_PTE_PNX)) {
-+						req.prot |= LINUX64_PROT_EXEC;
-+					}
-+					linux64_call(LINUX64_CALL_KMAP, &req);
-+				}
-+			} else {
-+				linux64_call(LINUX64_CALL_KUNMAP, &req);
-+			}
-+		}
++		linux64_el0_mirror_pte(pmap, v, new_pte, amount);
  
  		if (pte_is_valid(*old_pte)) {
  			bool need_strong_sync = false;
-@@ -6972,6 +7053,20 @@ pmap_find_phys(
+@@ -6972,6 +7121,126 @@ pmap_find_phys(
   * @return The physical address if the translation was successful, or zero if
   *         no valid mappings were found for the given virtual address.
   */
@@ -765,10 +875,126 @@ index 79d0bc1..97efcfe 100644
 +	return linux64_el0_ptov_vtop(va);
 +}
 +
++uint64_t
++linux64_el0_ensure_as(pmap_t pmap)
++{
++	if (!linux64_el0 || !pmap || pmap == kernel_pmap) {
++		return 0;
++	}
++	if (!pmap->linux64_as) {
++		pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
++		if (!pmap->linux64_as) {
++			struct linux64_map_req req = {0};
++			linux64_call(LINUX64_CALL_AS_CREATE, &req);
++			pmap->linux64_as = req.as_handle;
++		}
++		pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
++	}
++	return pmap->linux64_as;
++}
++
++bool
++linux64_el0_sync_user_pte(pmap_t pmap, vm_offset_t far, uint64_t esr)
++{
++	if (!linux64_el0 || !pmap || pmap == kernel_pmap) {
++		return false;
++	}
++	uint64_t as = linux64_el0_ensure_as(pmap);
++	if (!as) {
++		return false;
++	}
++	uint64_t ufar = (uint64_t)((int64_t)(far << 8) >> 8);
++	if (ufar >= 0x0001000000000000ULL) {
++		return false;
++	}
++	vm_map_address_t va = (vm_map_address_t)(ufar & ~0xfffULL);
++	uint32_t ec = (uint32_t)((esr >> 26) & 0x3f);
++	bool is_exec = (ec == 0x20 || ec == 0x21);
++	bool is_write = (!is_exec) && ((esr & (1u << 6)) != 0) && ((esr & (1u << 8)) == 0);
++
++	pmap_lock(pmap, PMAP_LOCK_SHARED);
++	pt_entry_t *ptep = pmap_pte(pmap, va);
++	pt_entry_t pte = ptep ? *ptep : ARM_PTE_EMPTY;
++	pmap_unlock(pmap, PMAP_LOCK_SHARED);
++
++	if (!pte_is_valid(pte) || !(pte & ARM_PTE_AF)) {
++		return false;
++	}
++	uint64_t ap = pte & ARM_PTE_APMASK;
++	if (ap != ARM_PTE_AP(AP_RORO) && ap != ARM_PTE_AP(AP_RWRW)) {
++		return false;
++	}
++	if (is_write && ap != ARM_PTE_AP(AP_RWRW)) {
++		return false;
++	}
++	if (is_exec && (pte & ARM_PTE_NX)) {
++		return false;
++	}
++	pmap_paddr_t pa = pte_to_pa(pte);
++	if (!pa_valid(pa)) {
++		return false;
++	}
++
++	struct linux64_map_req req = {
++		.as_handle = as,
++		.va = va,
++		.pa = pa,
++		.size = 4096,
++		.prot = LINUX64_PROT_READ |
++		    (ap == ARM_PTE_AP(AP_RWRW) ? LINUX64_PROT_WRITE : 0) |
++		    (!(pte & ARM_PTE_NX) ? LINUX64_PROT_EXEC : 0),
++	};
++	linux64_call(LINUX64_CALL_AS_MAP, &req);
++	return req.result > 0;
++}
++
++bool
++linux64_el0_user_vtop(pmap_t pmap, vm_offset_t va, bool write, pmap_paddr_t *pa_out)
++{
++	if (!pmap || pmap == kernel_pmap) {
++		return false;
++	}
++	vm_map_address_t page_va = (vm_map_address_t)(va & ~0xfffULL);
++	pmap_lock(pmap, PMAP_LOCK_SHARED);
++	pt_entry_t *ptep = pmap_pte(pmap, page_va);
++	pt_entry_t pte = ptep ? *ptep : ARM_PTE_EMPTY;
++	pmap_unlock(pmap, PMAP_LOCK_SHARED);
++
++	if (!pte_is_valid(pte) || !(pte & ARM_PTE_AF)) {
++		return false;
++	}
++	uint64_t ap = pte & ARM_PTE_APMASK;
++	if (write) {
++		if (ap != ARM_PTE_AP(AP_RWRW)) {
++			return false;
++		}
++	} else {
++		if (ap != ARM_PTE_AP(AP_RORO) && ap != ARM_PTE_AP(AP_RWRW)) {
++			return false;
++		}
++	}
++	pmap_paddr_t pa = pte_to_pa(pte);
++	if (!pa_valid(pa)) {
++		return false;
++	}
++	*pa_out = pa + (va & 0xfffULL);
++	return true;
++}
++
  pmap_paddr_t
  kvtophys(vm_offset_t va)
  {
-@@ -8935,6 +9030,15 @@ pmap_map_cpu_windows_copy_internal(
+@@ -8220,6 +8489,9 @@ arm_force_fast_fault_with_flush_range(
+ 				}
+ 			}
+ 			write_pte_fast(pte_p, tmplate);
++			if (pmap != kernel_pmap) {
++				linux64_el0_mirror_pte(pmap, va, tmplate, pt_attr_page_size(pmap_get_pt_attr(pmap)) * PAGE_RATIO);
++			}
+ 		}
+ 
+ fff_skip_pve_pass1:
+@@ -8935,6 +9207,15 @@ pmap_map_cpu_windows_copy_internal(
  	need_strong_sync = pte_is_xs(native_pt_attr, pte);
  #endif
  	write_pte_fast(ptep, pte);
@@ -784,7 +1010,7 @@ index 79d0bc1..97efcfe 100644
  	/*
  	 * Invalidate tlb. Cover nested cpu_copywindow_vaddr usage with the interrupted context
  	 * in pmap_unmap_cpu_windows_copy() after clearing the pte and before tlb invalidate.
-@@ -8977,6 +9081,10 @@ pmap_unmap_cpu_windows_copy_internal(
+@@ -8977,6 +9258,10 @@ pmap_unmap_cpu_windows_copy_internal(
  	__builtin_arm_dsb(DSB_SY);
  	ptep = pmap_pte(kernel_pmap, cpu_copywindow_vaddr);
  	write_pte_strong(ptep, ARM_PTE_EMPTY);
@@ -795,7 +1021,18 @@ index 79d0bc1..97efcfe 100644
  	PMAP_UPDATE_TLBS(kernel_pmap, cpu_copywindow_vaddr, cpu_copywindow_vaddr + PAGE_SIZE, pmap_cpu_data->copywindow_strong_sync[index], true);
  }
  
-@@ -12980,6 +13088,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
+@@ -10442,6 +10727,10 @@ unnest_subord_done:
+ 	}
+ 
+ 	FLUSH_PTE_STRONG();
++	if (linux64_el0 && grand != kernel_pmap && grand->linux64_as && addr > start) {
++		struct linux64_map_req req = { .as_handle = grand->linux64_as, .va = start, .size = addr - start };
++		linux64_call(LINUX64_CALL_AS_UNMAP, &req);
++	}
+ 	PMAP_UPDATE_TLBS(grand, start, addr, false, false);
+ 
+ 	pmap_unlock(grand, PMAP_LOCK_EXCLUSIVE);
+@@ -12980,6 +13269,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
  #if __ARM_MIXED_PAGE_SIZE__
  	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
  	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
@@ -804,6 +1041,51 @@ index 79d0bc1..97efcfe 100644
  #else
  	return 64 - T0SZ_BOOT;
  #endif
+@@ -14853,7 +15144,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+ 
+ 		/* Disable PAN; pmap shouldn't be the kernel pmap. */
+ #if __ARM_PAN_AVAILABLE__
+-		__builtin_arm_wsr("pan", 0);
++		if (!linux64_el0) {
++			__builtin_arm_wsr("pan", 0);
++		}
+ #endif /* __ARM_PAN_AVAILABLE__ */
+ 	}
+ 
+@@ -14872,7 +15165,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+ 
+ 	if (pmap != NULL) {
+ #if __ARM_PAN_AVAILABLE__
+-		__builtin_arm_wsr("pan", 1);
++		if (!linux64_el0) {
++			__builtin_arm_wsr("pan", 1);
++		}
+ #endif /* __ARM_PAN_AVAILABLE__ */
+ 
+ 		pmap_switch(old_pmap, thread);
+diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
+index b236ca6..7c3dea8 100644
+--- a/osfmk/arm/pmap/pmap.h
++++ b/osfmk/arm/pmap/pmap.h
+@@ -350,6 +350,7 @@ struct pmap {
+ 	 */
+ 	tt_entry_t *hw_tte;
+ 	pmap_paddr_t hw_ttep;
++	uint64_t linux64_as;	/* EL0 host: opaque user address space handle */
+ 
+ 	/*
+ 	 * The min and max fields represent the lowest and highest addressable VAs
+@@ -923,4 +924,10 @@ extern kern_return_t pmap_test_text_corruption(pmap_paddr_t);
+ 
+ #endif /* __ARM_KERNEL_PROTECT__ */
+ 
++#if !defined(ASSEMBLER) && !defined(__ASSEMBLER__)
++extern bool linux64_el0_sync_user_pte(pmap_t pmap, vm_offset_t far, uint64_t esr);
++extern bool linux64_el0_user_vtop(pmap_t pmap, vm_offset_t va, bool write, pmap_paddr_t *pa_out);
++extern uint64_t linux64_el0_ensure_as(pmap_t pmap);
++#endif
++
+ #endif /* #ifndef _ARM_PMAP_H_ */
 diff --git a/osfmk/arm/pmap/pmap_internal.h b/osfmk/arm/pmap/pmap_internal.h
 index 2aa40c1..9a4fe53 100644
 --- a/osfmk/arm/pmap/pmap_internal.h
@@ -1168,6 +1450,261 @@ index 58a91a8..758ade8 100644
  #if defined(APPLE_ARM64_ARCH_FAMILY)
  	dsb sy
  	ret
+diff --git a/osfmk/arm64/copyio.c b/osfmk/arm64/copyio.c
+index 506754c..a879e35 100644
+--- a/osfmk/arm64/copyio.c
++++ b/osfmk/arm64/copyio.c
+@@ -37,6 +37,8 @@
+ #include <san/kasan.h>
+ #include <arm/pmap.h>
+ #include <arm64/speculation.h>
++#include <linux64/linux64.h>
++#include <vm/vm_fault.h>
+ 
+ #undef copyin
+ #undef copyout
+@@ -120,6 +122,9 @@ unprivileged_user_access_disable(__unused user_access_direction_t user_access_di
+ static inline void
+ user_access_enable(__unused user_access_direction_t user_access_direction, pmap_t __unused pmap)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ #if __ARM_PAN_AVAILABLE__
+ 	assert(__builtin_arm_rsr("pan") != 0);
+ 	__builtin_arm_wsr("pan", 0);
+@@ -130,12 +135,38 @@ user_access_enable(__unused user_access_direction_t user_access_direction, pmap_
+ static inline void
+ user_access_disable(__unused user_access_direction_t user_access_direction, pmap_t __unused pmap)
+ {
++	if (linux64_el0) {
++		return;
++	}
+ #if __ARM_PAN_AVAILABLE__
+ 	__builtin_arm_wsr("pan", 1);
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
+ }
+ 
++static int
++linux64_el0_resolve_user_page(vm_map_t map, user_addr_t uaddr, bool write, pmap_paddr_t *pa_out)
++{
++	extern kern_return_t arm_fast_fault(pmap_t pmap, vm_map_address_t va,
++	    vm_prot_t fault_type, bool was_af_fault, bool from_user);
++	vm_prot_t fault_type = write ? (VM_PROT_READ | VM_PROT_WRITE) : VM_PROT_READ;
++
++	for (int attempt = 0; attempt < 4; attempt++) {
++		if (linux64_el0_user_vtop(map->pmap, (vm_offset_t)uaddr, write, pa_out)) {
++			return 0;
++		}
++		if (arm_fast_fault(map->pmap, (vm_map_address_t)(uaddr & ~0xfffULL),
++		    fault_type, FALSE, FALSE) == KERN_SUCCESS) {
++			continue;
++		}
++		if (vm_fault(map, (vm_map_offset_t)(uaddr & ~0xfffULL), fault_type,
++		    FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0) != KERN_SUCCESS) {
++			return EFAULT;
++		}
++	}
++	return linux64_el0_user_vtop(map->pmap, (vm_offset_t)uaddr, write, pa_out) ? 0 : EFAULT;
++}
++
+ #if HAS_MTE
+ static inline bool
+ userspace_access_is_tagged(vm_map_t map)
+@@ -422,6 +453,29 @@ copyin(const user_addr_t user_addr, void *kernel_addr, vm_size_t nbytes)
+ 
+ 	guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+ 
++	if (linux64_el0) {
++		char *dst = (char *)kernel_addr;
++		user_addr_t u = guarded_user_addr;
++		vm_size_t rem = nbytes;
++		while (rem > 0) {
++			pmap_paddr_t pa = 0;
++			int err = linux64_el0_resolve_user_page(map, u, false, &pa);
++			if (err) {
++				return err;
++			}
++			vm_size_t off = (vm_size_t)(u & 0xfffULL);
++			vm_size_t chunk = 4096 - off;
++			if (chunk > rem) {
++				chunk = rem;
++			}
++			bcopy((const void *)phystokv(pa), dst, chunk);
++			dst += chunk;
++			u += chunk;
++			rem -= chunk;
++		}
++		return 0;
++	}
++
+ 	return WRAP_COPYIO(USER_ACCESS_READ, map,
+ 	           _bcopyin(guarded_user_addr, kernel_addr, nbytes));
+ }
+@@ -443,6 +497,16 @@ copyin_atomic32(const user_addr_t user_addr, uint32_t *kernel_addr)
+ 
+ 	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+ 
++	if (linux64_el0) {
++		pmap_paddr_t pa = 0;
++		int err = linux64_el0_resolve_user_page(map, guarded_user_addr, false, &pa);
++		if (err) {
++			return err;
++		}
++		*kernel_addr = __atomic_load_n((volatile uint32_t *)phystokv(pa), __ATOMIC_RELAXED);
++		return 0;
++	}
++
+ 	return WRAP_COPYIO(USER_ACCESS_READ, map,
+ 	           _copyin_atomic32(guarded_user_addr, kernel_addr));
+ }
+@@ -495,6 +559,16 @@ copyin_atomic32_wait_if_equals(const user_addr_t user_addr, uint32_t value)
+ 
+ 	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+ 
++	if (linux64_el0) {
++		pmap_paddr_t pa = 0;
++		int err = linux64_el0_resolve_user_page(map, guarded_user_addr, false, &pa);
++		if (err) {
++			return err;
++		}
++		uint32_t cur = __atomic_load_n((volatile uint32_t *)phystokv(pa), __ATOMIC_RELAXED);
++		return (cur == value) ? 0 : ESTALE;
++	}
++
+ 	return WRAP_COPYIO(USER_ACCESS_READ, map,
+ 	           _copyin_atomic32_wait_if_equals(guarded_user_addr, value));
+ }
+@@ -511,6 +585,16 @@ copyin_atomic64(const user_addr_t user_addr, uint64_t *kernel_addr)
+ 
+ 	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+ 
++	if (linux64_el0) {
++		pmap_paddr_t pa = 0;
++		int err = linux64_el0_resolve_user_page(map, guarded_user_addr, false, &pa);
++		if (err) {
++			return err;
++		}
++		*kernel_addr = __atomic_load_n((volatile uint64_t *)phystokv(pa), __ATOMIC_RELAXED);
++		return 0;
++	}
++
+ 	return WRAP_COPYIO(USER_ACCESS_READ, map,
+ 	           _copyin_atomic64(guarded_user_addr, kernel_addr));
+ }
+@@ -527,6 +611,16 @@ copyout_atomic32(uint32_t value, user_addr_t user_addr)
+ 
+ 	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+ 
++	if (linux64_el0) {
++		pmap_paddr_t pa = 0;
++		int err = linux64_el0_resolve_user_page(map, guarded_user_addr, true, &pa);
++		if (err) {
++			return err;
++		}
++		__atomic_store_n((volatile uint32_t *)phystokv(pa), value, __ATOMIC_RELAXED);
++		return 0;
++	}
++
+ 	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
+ 	           _copyout_atomic32(value, guarded_user_addr));
+ }
+@@ -543,6 +637,16 @@ copyout_atomic64(uint64_t value, user_addr_t user_addr)
+ 
+ 	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+ 
++	if (linux64_el0) {
++		pmap_paddr_t pa = 0;
++		int err = linux64_el0_resolve_user_page(map, guarded_user_addr, true, &pa);
++		if (err) {
++			return err;
++		}
++		__atomic_store_n((volatile uint64_t *)phystokv(pa), value, __ATOMIC_RELAXED);
++		return 0;
++	}
++
+ 	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
+ 	           _copyout_atomic64(value, guarded_user_addr));
+ }
+@@ -566,6 +670,36 @@ copyinstr(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes, vm_s
+ 
+ 	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+ 
++	if (linux64_el0) {
++		user_addr_t u = guarded_user_addr;
++		vm_size_t rem = nbytes;
++		while (rem > 0) {
++			pmap_paddr_t pa = 0;
++			int err = linux64_el0_resolve_user_page(map, u, false, &pa);
++			if (err) {
++				return err;
++			}
++			vm_size_t off = (vm_size_t)(u & 0xfffULL);
++			vm_size_t chunk = 4096 - off;
++			if (chunk > rem) {
++				chunk = rem;
++			}
++			const char *src = (const char *)phystokv(pa);
++			for (vm_size_t i = 0; i < chunk; i++) {
++				char c = src[i];
++				kernel_addr[bytes_copied++] = c;
++				if (c == '\0') {
++					*lencopied = bytes_copied;
++					return 0;
++				}
++			}
++			u += chunk;
++			rem -= chunk;
++		}
++		*lencopied = bytes_copied;
++		return ENAMETOOLONG;
++	}
++
+ 	result = WRAP_COPYIO(USER_ACCESS_READ, map,
+ 	    _bcopyinstr(guarded_user_addr, kernel_addr, nbytes, &bytes_copied));
+ 
+@@ -598,6 +732,29 @@ copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
+ 
+ 	guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+ 
++	if (linux64_el0) {
++		const char *src = (const char *)kernel_addr;
++		user_addr_t u = guarded_user_addr;
++		vm_size_t rem = nbytes;
++		while (rem > 0) {
++			pmap_paddr_t pa = 0;
++			int err = linux64_el0_resolve_user_page(map, u, true, &pa);
++			if (err) {
++				return err;
++			}
++			vm_size_t off = (vm_size_t)(u & 0xfffULL);
++			vm_size_t chunk = 4096 - off;
++			if (chunk > rem) {
++				chunk = rem;
++			}
++			bcopy(src, (void *)phystokv(pa), chunk);
++			src += chunk;
++			u += chunk;
++			rem -= chunk;
++		}
++		return 0;
++	}
++
+ 	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
+ 	           _bcopyout(kernel_addr, guarded_user_addr, nbytes));
+ }
+@@ -619,6 +776,10 @@ int
+ verify_write(const void *source, void *dst, size_t size)
+ {
+ 	int rc;
++	if (linux64_el0) {
++		bcopy(source, dst, size);
++		return 0;
++	}
+ 	disable_preemption();
+ 	rc = _bcopyout((const char*)source, (user_addr_t)dst, size);
+ 	enable_preemption();
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
 index d10d7a1..91f6577 100644
 --- a/osfmk/arm64/cpu.c
@@ -1273,7 +1810,7 @@ index d10d7a1..91f6577 100644
  	}
  }
 diff --git a/osfmk/arm64/cswitch.s b/osfmk/arm64/cswitch.s
-index a191eb3..9491d4f 100644
+index a191eb3..1c2b026 100644
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
 @@ -185,7 +185,7 @@
@@ -1353,7 +1890,7 @@ index a191eb3..9491d4f 100644
  	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
  	load_general_registers	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
-@@ -444,3 +442,200 @@ LEXT(machine_set_current_thread)
+@@ -444,3 +442,208 @@ LEXT(machine_set_current_thread)
  
  
  /* vim: set ts=4: */
@@ -1377,6 +1914,14 @@ index a191eb3..9491d4f 100644
 +	ARM64_PROLOG
 +	mrs		x11, TPIDR_EL0						// this CPU's thread
 +	LOAD_KERN_STACK_TOP	dst=x12, src=x11, tmp=x13
++	adrp	x13, _linux64_el0@PAGE
++	add		x13, x13, _linux64_el0@PAGEOFF
++	ldr		w13, [x13]
++	cbz		w13, Llinux64_el0_run_el1
++	mov		sp, x12
++	mov		x29, xzr
++	b		EXT(linux64_el0_utcb_entry)
++Llinux64_el0_run_el1:
 +	sub		x15, x12, #LINUX64_EL0_BLOCK
 +	str		x11, [x15, #0]
 +	mrs		x10, SP_EL0
@@ -2341,7 +2886,7 @@ index 4538d50..9593e08 100644
  	}
  #endif
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index d8f1b19..26e15fa 100644
+index d8f1b19..27a323f 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
 @@ -1,4 +1,5 @@
@@ -2358,7 +2903,7 @@ index d8f1b19..26e15fa 100644
  #endif
  
  #include <prng/entropy.h>
-@@ -3646,3 +3648,301 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+@@ -3646,3 +3648,357 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
  }
  __SECURITY_STACK_DISALLOWED_POP
  #endif /* CONFIG_SPTM */
@@ -2493,10 +3038,6 @@ index d8f1b19..26e15fa 100644
 +			linux64_el0_t0[slot] = 0;
 +		}
 +	}
-+	if (linux64_el0) {
-+		kprintf("linux64: EL0 host reached user-space entry point (pc 0x%llx)\n", get_saved_state_pc(thread->machine.upcb));
-+		linux64_call2(LINUX64_CALL_PANIC, (unsigned long)"EL0 host reached user entry (Phase 3 complete)", 0);
-+	}
 +	linux64_el0_run(thread->machine.upcb, (thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) != 0);
 +}
 +
@@ -2533,7 +3074,7 @@ index d8f1b19..26e15fa 100644
 +	linux64_dbg[LINUX64_CTR_EL0_FAR] = f->far;
 +	linux64_dbg[LINUX64_CTR_EL0_PC] = f->pc;
 +	if (linux64_tracing()) kprintf("linux64: EL0 exception esr 0x%llx far 0x%llx pc 0x%llx x16 %lld ttbr0 0x%llx ttep 0x%llx\n", f->esr, f->far, f->pc, f->x[16],
-+	    __builtin_arm_rsr64("TTBR0_EL1"), (uint64_t)thread->map->pmap->ttep);
++	    linux64_el0 ? 0ULL : __builtin_arm_rsr64("TTBR0_EL1"), (uint64_t)thread->map->pmap->ttep);
 +	/*
 +	 * The whole user state at once, signed once as locore's exception entry does (HAS_APPLE_PAC): the per-field setters
 +	 * each check the old signature and sign again, five times per exception. EL0 runs with IRQ/FIQ masked while hosted
@@ -2659,6 +3200,66 @@ index d8f1b19..26e15fa 100644
 +	}
 +	sleh_synchronous(thread->machine.contextData, f->esr, (vm_offset_t)f->far, false);
 +	thread_exception_return();
++}
++
++void linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop) __attribute__((noreturn));
++void
++linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
++{
++	thread_t thread = current_thread();
++	pmap_t pmap = thread->map->pmap;
++	arm_saved_state64_t *s64 = saved_state64(ss);
++	arm_neon_saved_state_t *ns = thread->machine.uNeon;
++	struct linux64_utcb_req req;
++	struct linux64_el0_frame f;
++
++	req.as_handle = linux64_el0_ensure_as(pmap);
++	if (!req.as_handle) {
++		panic("linux64_el0_utcb_entry: failed to allocate user AS for pmap %p", pmap);
++	}
++	req.thread_id = thread->thread_id;
++	req.disable_jop = disable_jop;
++	for (unsigned i = 0; i < 29; i++) {
++		req.x[i] = s64->x[i];
++	}
++	req.x[29] = s64->fp;
++	req.x[30] = s64->lr;
++	req.sp = s64->sp;
++	req.pc = s64->pc;
++	req.pstate = s64->cpsr;
++	req.tpidr = 0;
++	req.tpidrro = (uint64_t)thread->machine.cthread_self;
++	memcpy(req.neon, &ns->ns_64.v.q[0], sizeof(req.neon));
++	req.fpsr = ns->ns_64.fpsr;
++	req.fpcr = ns->ns_64.fpcr;
++	req.fpu_dirty = 1;
++
++	for (;;) {
++		req.result = 0;
++		linux64_call(LINUX64_CALL_UTCB_RUN, &req);
++		if (req.result != 0) {
++			panic("linux64_el0_utcb_entry: UTCB_RUN failed (%lld)", (long long)req.result);
++		}
++		if (req.stop_kind == LINUX64_STOP_PAGEFAULT &&
++		    linux64_el0_sync_user_pte(pmap, (vm_offset_t)req.fault_addr, req.esr)) {
++			continue;
++		}
++		break;
++	}
++
++	for (unsigned i = 0; i < 31; i++) {
++		f.x[i] = req.x[i];
++	}
++	f.sp = req.sp;
++	f.pc = req.pc;
++	f.cpsr = req.pstate;
++	f.esr = req.esr;
++	f.far = req.fault_addr;
++	memcpy(f.neon, req.neon, sizeof(f.neon));
++	f.fpsr = req.fpsr;
++	f.fpcr = req.fpcr;
++	f.pad = 0;
++	linux64_el0_exception(&f);
 +}
 diff --git a/osfmk/arm64/static_if.c b/osfmk/arm64/static_if.c
 index 22be6f2..ac29c4e 100644
@@ -3460,7 +4061,7 @@ index 44b993c..4ce279b 100644
  
  	return 0;
 diff --git a/osfmk/vm/vm_kern.c b/osfmk/vm/vm_kern.c
-index 4f2045c..f716201 100644
+index 4f2045c..7dbf594 100644
 --- a/osfmk/vm/vm_kern.c
 +++ b/osfmk/vm/vm_kern.c
 @@ -65,6 +65,7 @@
@@ -3481,11 +4082,34 @@ index 4f2045c..f716201 100644
  
  #if DEBUG || DEVELOPMENT
  	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_START,
-@@ -2478,6 +2482,28 @@ alloc_fail:
+@@ -1406,6 +1410,12 @@ mach_vm_allocate_kernel_sanitize(
+ 	return KERN_SUCCESS;
+ }
+ 
++void linux64_el0_prefault_kernel_map(
++	vm_map_t                map,
++	mach_vm_offset_t        addr,
++	mach_vm_size_t          size,
++	vm_prot_t               prot);
++
+ kern_return_t
+ mach_vm_allocate_kernel(
+ 	vm_map_t                map,
+@@ -1467,6 +1477,9 @@ mach_vm_allocate_kernel(
+ 		VM_INHERIT_DEFAULT);
+ 
+ 	if (result == KERN_SUCCESS) {
++		if (linux64_el0 && map->pmap == kernel_pmap) {
++			linux64_el0_prefault_kernel_map(map, map_addr, map_size, VM_PROT_DEFAULT);
++		}
+ #if KASAN
+ 		if (map->pmap == kernel_pmap) {
+ 			kasan_notify_address(map_addr, map_size);
+@@ -2478,6 +2491,28 @@ alloc_fail:
  
  #pragma mark map/remap/wire
  
-+static void
++void
 +linux64_el0_prefault_kernel_map(
 +	vm_map_t                map,
 +	mach_vm_offset_t        addr,
@@ -3510,7 +4134,7 @@ index 4f2045c..f716201 100644
  kern_return_t
  mach_vm_map_kernel(
  	vm_map_t                target_map,
-@@ -2493,7 +2519,7 @@ mach_vm_map_kernel(
+@@ -2493,7 +2528,7 @@ mach_vm_map_kernel(
  	vm_inherit_ut           inheritance)
  {
  	/* range_id is set by vm_map_enter_mem_object */
@@ -3519,7 +4143,7 @@ index 4f2045c..f716201 100644
  	           address,
  	           initial_size,
  	           mask,
-@@ -2506,6 +2532,13 @@ mach_vm_map_kernel(
+@@ -2506,6 +2541,13 @@ mach_vm_map_kernel(
  	           inheritance,
  	           NULL,
  	           0);
@@ -3533,7 +4157,7 @@ index 4f2045c..f716201 100644
  }
  
  kern_return_t
-@@ -2531,7 +2564,7 @@ mach_vm_remap_new_kernel(
+@@ -2531,7 +2573,7 @@ mach_vm_remap_new_kernel(
  	vmk_flags.vmf_return_data_addr = true;
  
  	/* range_id is set by vm_map_remap */
@@ -3542,7 +4166,7 @@ index 4f2045c..f716201 100644
  	           address,
  	           size,
  	           mask,
-@@ -2542,6 +2575,13 @@ mach_vm_remap_new_kernel(
+@@ -2542,6 +2584,13 @@ mach_vm_remap_new_kernel(
  	           cur_protection,
  	           max_protection,
  	           inheritance);
@@ -3556,6 +4180,80 @@ index 4f2045c..f716201 100644
  }
  
  #pragma mark free
+diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
+index fd9e108..ab87dc1 100644
+--- a/osfmk/vm/vm_map.c
++++ b/osfmk/vm/vm_map.c
+@@ -74,6 +74,7 @@
+ #include <mach/port.h>
+ #include <mach/vm_attributes.h>
+ #include <mach/vm_param.h>
++#include <linux64/linux64.h>
+ #include <mach/vm_behavior.h>
+ #include <mach/vm_statistics.h>
+ #include <mach/memory_object.h>
+@@ -103,6 +104,11 @@
+ #include <vm/vm_pageout.h>
+ #include <vm/pmap.h>
+ #include <vm/vm_kern_internal.h>
++extern void linux64_el0_prefault_kernel_map(
++	vm_map_t                map,
++	mach_vm_offset_t        addr,
++	mach_vm_size_t          size,
++	vm_prot_t               prot);
+ #include <ipc/ipc_port.h>
+ #include <kern/sched_prim.h>
+ #include <kern/misc_protos.h>
+@@ -10547,6 +10553,11 @@ vm_map_copyout_kernel_buffer(
+ 		if (kr != KERN_SUCCESS) {
+ 			return kr;
+ 		}
++		if (linux64_el0 && map->pmap == kernel_pmap) {
++			linux64_el0_prefault_kernel_map(map, *addr,
++			    vm_map_round_page(copy_size, VM_MAP_PAGE_MASK(map)),
++			    VM_PROT_DEFAULT);
++		}
+ #if KASAN
+ 		if (map->pmap == kernel_pmap) {
+ 			kasan_notify_address(*addr, copy->size);
+@@ -11091,6 +11102,12 @@ after_adjustments:
+ 
+ 
+ 	vm_map_ilk_unlock(dst_map);
++	if (linux64_el0 && dst_map->pmap == kernel_pmap && size != 0) {
++		linux64_el0_prefault_kernel_map(dst_map,
++		    vm_map_trunc_page(*dst_addr, VM_MAP_PAGE_MASK(dst_map)),
++		    size,
++		    consume_on_success ? VM_PROT_DEFAULT : cur_protection);
++	}
+ 	vmlp_api_end(VM_MAP_COPYOUT_INTERNAL, KERN_SUCCESS);
+ 
+ 	return KERN_SUCCESS;
+@@ -18182,6 +18199,10 @@ vm_map_purgable_control(
+ 	assert(!entry->is_sub_map);
+ 	assert(!entry->use_pmap); /* purgeable has its own accounting */
+ 
++	vm_map_offset_t pf_start = entry->vme_start;
++	vm_map_size_t pf_size = entry->vme_end - entry->vme_start;
++	int req_state = *state;
++
+ 	vm_map_found_entry_sh_unlock(ctx, &map);
+ 
+ 	was_nonvolatile = (object->purgable == VM_PURGABLE_NONVOLATILE);
+@@ -18198,6 +18219,13 @@ vm_map_purgable_control(
+ 
+ 	vm_object_unlock(object);
+ 
++	if (linux64_el0 && kr == KERN_SUCCESS && map->pmap == kernel_pmap &&
++	    control == VM_PURGABLE_SET_STATE &&
++	    (req_state & VM_PURGABLE_STATE_MASK) == VM_PURGABLE_NONVOLATILE &&
++	    (*state & VM_PURGABLE_STATE_MASK) == VM_PURGABLE_EMPTY) {
++		linux64_el0_prefault_kernel_map(map, pf_start, pf_size, VM_PROT_DEFAULT);
++	}
++
+ 	vmlp_api_end(VM_MAP_PURGABLE_CONTROL, kr);
+ 	return kr;
+ }
 diff --git a/osfmk/vm/vm_sanitize.c b/osfmk/vm/vm_sanitize.c
 index d1ff7d0..362f39f 100644
 --- a/osfmk/vm/vm_sanitize.c
@@ -3571,10 +4269,23 @@ index d1ff7d0..362f39f 100644
  		const uint64_t max_va_bits = 48;
  		const mach_vm_offset_t va_range_upper_bound = (1ULL << max_va_bits);
 diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
-index a9b12f4..263775c 100644
+index a9b12f4..fc046dd 100644
 --- a/osfmk/vm/vm_shared_region.c
 +++ b/osfmk/vm/vm_shared_region.c
-@@ -788,7 +788,7 @@ vm_shared_region_create(
+@@ -79,6 +79,12 @@
+ #include <arm/cpu_data_internal.h>
+ #include <arm/misc_protos.h>
+ #endif
++#include <linux64/linux64.h>
++extern void linux64_el0_prefault_kernel_map(
++	vm_map_t                map,
++	mach_vm_offset_t        addr,
++	mach_vm_size_t          size,
++	vm_prot_t               prot);
+ 
+ /*
+  * the following codes are used in the  subclass
+@@ -788,7 +794,7 @@ vm_shared_region_create(
  #endif /* CODE_SIGNING_MONITOR */
  			int vm_map_pageshift = PAGE_SHIFT;
  #if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
@@ -3583,6 +4294,17 @@ index a9b12f4..263775c 100644
  #else
  			if (is_64bit ||
  			    page_shift_user32 == SIXTEENK_PAGE_SHIFT) {
+@@ -1626,6 +1632,10 @@ vm_shared_region_map_file_setup(
+ 			/*
+ 			 * Zero out the object's pages, so we can't leak data.
+ 			 */
++			if (linux64_el0) {
++				linux64_el0_prefault_kernel_map(kernel_map, kaddr, obj_size,
++				    VM_PROT_READ | VM_PROT_WRITE);
++			}
+ 			bzero((void *)kaddr, obj_size);
+ 
+ 			/*
 diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
 index fea9411..cdccb1f 100644
 --- a/pexpert/arm/pe_kprintf.c
