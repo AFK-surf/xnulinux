@@ -80,6 +80,15 @@ static int stop_run;
 module_param(stop_run, int, 0644);
 static int assert_fatal;	/* 1: a failed XNU assert() ends the run; 0: report it and let XNU continue */
 module_param(assert_fatal, int, 0444);
+static int xo_compat;		/* 1: opt-in fallback relaxing --x to r-x when host lacks FKI_CAP_EXEC_ONLY */
+module_param(xo_compat, int, 0444);
+/*
+ * EL0 KTCB lacks EL1 MRS emulation, so el0_patch_image replaces 2 ID_AA64ISAR0/PFR0_EL1
+ * instructions in com.apple.kec.corecrypto, invalidating its static __TEXT HMAC.
+ * Set el0_fips_bypass=0 to preserve the real FIPS integrity failure path.
+ */
+static int el0_fips_bypass = 1;
+module_param(el0_fips_bypass, int, 0444);
 
 static struct xnu_image img;
 static struct fki_pac_keys xnu_user_keys;	/* separate PAC key domain for EL0 user contexts */
@@ -562,9 +571,18 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 			return 0;
 		struct fki_pac_keys uk, saved, tmp;
 		derive_user_pac_keys(0, q->jop_key, 0, &uk);
-		fki_pac_swap(&uk, &saved);
+		int perr = fki_pac_swap(&uk, &saved);
+		if (perr != 0) {
+			q->err = perr;
+			return 0;
+		}
 		q->result = xnu_user_pac_exec(q->value, q->discriminator, q->key, q->is_auth);
-		fki_pac_swap(&saved, &tmp);
+		q->err = 0;
+		int rerr = fki_pac_swap(&saved, &tmp);
+		if (rerr != 0) {
+			logs("xnu: failed to restore kernel PAC keys");
+			return 1;
+		}
 		return 0;
 	}
 	if (call == LINUX64_CALL_UTCB_RUN || call == LINUX64_CALL_UTCB_RESUME) {
@@ -677,13 +695,14 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		    hot->utcb && hot->utcb_thread == q->thread_id && hot->utcb_fpu_live) {
 			if (!q->neon_ptr) {
 				q->result = -22;
-			} else {
-				int ferr = fki_utcb_fpu_read(hot->utcb, (void *)(unsigned long)q->neon_ptr, 520);
-				if (ferr != 0)
-					q->result = ferr;
-				else
-					hot->utcb_fpu_live = 0;
+				return 0;
 			}
+			int ferr = fki_utcb_fpu_read(hot->utcb, (void *)(unsigned long)q->neon_ptr, 520);
+			if (ferr != 0) {
+				q->result = ferr;
+				return 0;
+			}
+			hot->utcb_fpu_live = 0;
 		}
 		if ((q->flags & LINUX64_FPU_INVALIDATE) && hot->utcb_thread == q->thread_id) {
 			hot->utcb_fpu_live = 0;
@@ -907,10 +926,17 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 			unsigned long fp_lo = el0_mode ? (unsigned long)(img.vmlow & ~0x1fffffULL) : 0xffffff8000000000UL;
 			unsigned long fp_hi = 0xfffffffc00000000UL;
 			for (i = 0; i < 24 && fp && !((unsigned long)fp & 15) &&
-			     (unsigned long)fp >= fp_lo && (unsigned long)fp + 16 <= fp_hi &&
-			     (!el0_mode || fki_high_readable((unsigned long)fp, 16)); i++) {
-				unsigned long lr = fp[1] | 0xffffff8000000000ul;
-				unsigned long *next = (unsigned long *)fp[0];
+			     (unsigned long)fp >= fp_lo && (unsigned long)fp + 16 <= fp_hi; i++) {
+				fki_u64 w0, w1;
+				if (el0_mode) {
+					if (fki_high_read_u64x2((unsigned long)fp, &w0, &w1) != 0)
+						break;
+				} else {
+					w0 = fp[0];
+					w1 = fp[1];
+				}
+				unsigned long lr = (unsigned long)w1 | 0xffffff8000000000ul;
+				unsigned long *next = (unsigned long *)w0;
 				logkv("xnu:   frame", lr);
 				if (next <= fp || (unsigned long)next - (unsigned long)fp > 0x100000UL) break;
 				fp = next;
@@ -1307,10 +1333,17 @@ static int monitor_fn(void *arg)
 					logkv("xnu:   its last host call", cpu_hot[s].last_call);
 					logkv("xnu:   still inside it (1) or back in XNU (0)", cpu_hot[s].in_call);
 					logkv("xnu:   lr at that call", w->xnu_regs[11]);
-					for (int f = 0; f < 16 && fp >= XNU_VA_LO && fp < XNU_VA_HI && !(fp & 7) &&
-					     (!el0_mode || fki_high_readable(fp, 16)); f++) {
-						unsigned long next = ((unsigned long *)fp)[0];
-						logkv("xnu:   frame", ((unsigned long *)fp)[1]);
+					for (int f = 0; f < 16 && fp >= XNU_VA_LO && fp < XNU_VA_HI && !(fp & 7); f++) {
+						fki_u64 w0, w1;
+						if (el0_mode) {
+							if (fki_high_read_u64x2(fp, &w0, &w1) != 0)
+								break;
+						} else {
+							w0 = ((unsigned long *)fp)[0];
+							w1 = ((unsigned long *)fp)[1];
+						}
+						unsigned long next = (unsigned long)w0;
+						logkv("xnu:   frame", w1);
 						if (next <= fp || next - fp > 0x100000UL) break;
 						fp = next;
 					}
@@ -1382,10 +1415,55 @@ static int x_str_bounded_eq(const char *s, u64_t max, const char *lit)
 	return 0;
 }
 
-static void el0_patch_macho_sections(const char *file, u64_t file_size, const struct mh64 *mh,
-				     u64_t slide, u64_t cc_lo, u64_t cc_hi,
-				     u64_t *n_ubsan, u64_t *n_idreg, u64_t *n_cc_idreg)
+struct el0_va_span {
+	u64_t lo, hi;
+};
+
+static int va_in_spans(const struct el0_va_span *spans, unsigned nspans, u64_t va, u64_t len)
 {
+	if (!len || va + len < va)
+		return 0;
+	for (unsigned i = 0; i < nspans; i++) {
+		if (va >= spans[i].lo && va + len <= spans[i].hi)
+			return 1;
+	}
+	return 0;
+}
+
+static int va_in_loaded_segs(const struct xnu_image *im, u64_t va, u64_t len)
+{
+	if (!len || va + len < va)
+		return 0;
+	const struct mh64 *mh = (const void *)im->file;
+	const struct lc *l = (const void *)(im->file + sizeof(*mh));
+	const struct lc *end = (const void *)(im->file + sizeof(*mh) + mh->sizeofcmds);
+	for (u32_t ci = 0; ci < mh->ncmds && l < end &&
+	     l->cmdsize >= sizeof(struct lc) &&
+	     (const char *)l + l->cmdsize <= (const char *)end;
+	     ci++, l = (const void *)((const char *)l + l->cmdsize)) {
+		if (l->cmd != LC_SEGMENT_64 || l->cmdsize < sizeof(struct seg64))
+			continue;
+		const struct seg64 *s = (const void *)l;
+		if (!s->filesize)
+			continue;
+		u64_t lo = s->vmaddr + im->slide;
+		u64_t hi = lo + s->filesize;
+		if (lo < s->vmaddr || hi < lo)
+			continue;
+		if (va >= lo && va + len <= hi)
+			return 1;
+	}
+	return 0;
+}
+
+static void el0_patch_macho_sections(const struct xnu_image *im, const struct mh64 *mh,
+				     const struct el0_va_span *cc_sects, unsigned cc_nsects,
+				     u64_t *n_ubsan, u64_t *n_idreg,
+				     u64_t *n_cc_idreg, u64_t *n_cc_ubsan)
+{
+	const char *file = (const char *)im->file;
+	u64_t file_size = im->file_size;
+	u64_t slide = im->slide;
 	u64_t mh_off = (u64_t)((const char *)mh - file);
 	if (mh_off > file_size || file_size - mh_off < sizeof(*mh) ||
 	    mh->magic != MH_MAGIC_64 ||
@@ -1415,15 +1493,19 @@ static void el0_patch_macho_sections(const char *file, u64_t file_size, const st
 				continue;
 			u64_t sec_va = sc[si].addr + slide;
 			if (sec_va < sc[si].addr || (sec_va & 3) ||
-			    sec_va + sc[si].size < sec_va)
+			    sec_va + sc[si].size < sec_va ||
+			    !va_in_loaded_segs(im, sec_va, sc[si].size))
 				continue;
 			u32_t *ins = (u32_t *)sec_va;
 			u64_t cnt = sc[si].size / 4;
 			for (u64_t i = 0; i < cnt; i++) {
 				u32_t w = ins[i];
 				if (w == 0xd43fe000U) {			/* brk #0xff00 */
+					u64_t va = (u64_t)&ins[i];
 					ins[i] = 0xd503201fU;		/* nop */
 					__asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0" : : "r"(&ins[i]) : "memory");
+					if (va_in_spans(cc_sects, cc_nsects, va, 4))
+						(*n_cc_ubsan)++;
 					(*n_ubsan)++;
 				} else if ((w & 0xffffffe0U) == 0xd5380600U ||	/* mrs xN, ID_AA64ISAR0_EL1 */
 					   (w & 0xffffffe0U) == 0xd5380400U) {	/* mrs xN, ID_AA64PFR0_EL1 */
@@ -1431,7 +1513,7 @@ static void el0_patch_macho_sections(const char *file, u64_t file_size, const st
 					u64_t va = (u64_t)&ins[i];
 					ins[i] = 0xd2800000U | rd;	/* movz xN, #0 */
 					__asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0" : : "r"(&ins[i]) : "memory");
-					if (va >= cc_lo && va < cc_hi)
+					if (va_in_spans(cc_sects, cc_nsects, va, 4))
 						(*n_cc_idreg)++;
 					if (*n_idreg < 16) {
 						logkv("xnu: EL0 patched ID-reg mrs at", va);
@@ -1449,13 +1531,16 @@ static void el0_patch_image(struct xnu_image *im)
 	const struct mh64 *mh = (const void *)im->file;
 	const struct lc *l = (const void *)(im->file + sizeof(*mh));
 	const struct lc *end = (const void *)(im->file + sizeof(*mh) + mh->sizeofcmds);
-	u64_t n_ubsan = 0, n_idreg = 0, n_cc_idreg = 0;
-	u64_t cc_lo = ~0ULL, cc_hi = 0;
+	u64_t n_ubsan = 0, n_idreg = 0, n_cc_idreg = 0, n_cc_ubsan = 0;
+	struct el0_va_span cc_sects[8];
+	unsigned cc_nsects = 0;
 	const struct fileset_entry_lc *cc_fe = 0;
 
-	/* Locate com.apple.kec.corecrypto executable section VA span first (for scoped FIPS check). */
+	/* Locate com.apple.kec.corecrypto executable sections (per-section bounds, not min..max). */
 	if (im->filetype == MH_FILESET) {
-		for (const struct lc *fl = l; fl < end; fl = (const void *)((const char *)fl + fl->cmdsize)) {
+		u32_t fi = 0;
+		for (const struct lc *fl = l; fi < mh->ncmds && fl < end;
+		     fi++, fl = (const void *)((const char *)fl + fl->cmdsize)) {
 			if (fl->cmd != LC_FILESET_ENTRY || fl->cmdsize < sizeof(struct fileset_entry_lc))
 				continue;
 			const struct fileset_entry_lc *fe = (const void *)fl;
@@ -1495,10 +1580,14 @@ static void el0_patch_image(struct xnu_image *im)
 						continue;
 					u64_t lo = csc[si].addr + im->slide;
 					u64_t hi = lo + csc[si].size;
-					if (lo < csc[si].addr || hi < lo)
+					if (lo < csc[si].addr || hi < lo ||
+					    !va_in_loaded_segs(im, lo, csc[si].size))
 						continue;
-					if (lo < cc_lo) cc_lo = lo;
-					if (hi > cc_hi) cc_hi = hi;
+					if (cc_nsects < sizeof(cc_sects) / sizeof(cc_sects[0])) {
+						cc_sects[cc_nsects].lo = lo;
+						cc_sects[cc_nsects].hi = hi;
+						cc_nsects++;
+					}
 				}
 			}
 			break;
@@ -1507,21 +1596,21 @@ static void el0_patch_image(struct xnu_image *im)
 
 	/* Scan ONLY executable code sections (S_ATTR_PURE/SOME_INSTRUCTIONS), never data. */
 	if (im->filetype == MH_FILESET) {
-		for (const struct lc *fl = l; fl < end; fl = (const void *)((const char *)fl + fl->cmdsize)) {
+		u32_t fi = 0;
+		for (const struct lc *fl = l; fi < mh->ncmds && fl < end;
+		     fi++, fl = (const void *)((const char *)fl + fl->cmdsize)) {
 			if (fl->cmd != LC_FILESET_ENTRY || fl->cmdsize < sizeof(struct fileset_entry_lc))
 				continue;
 			const struct fileset_entry_lc *fe = (const void *)fl;
 			if (fe->fileoff > im->file_size || im->file_size - fe->fileoff < sizeof(*mh))
 				continue;
-			el0_patch_macho_sections(im->file, im->file_size,
-						 (const void *)(im->file + fe->fileoff),
-						 im->slide, cc_lo, cc_hi,
-						 &n_ubsan, &n_idreg, &n_cc_idreg);
+			el0_patch_macho_sections(im, (const void *)(im->file + fe->fileoff),
+						 cc_sects, cc_nsects,
+						 &n_ubsan, &n_idreg, &n_cc_idreg, &n_cc_ubsan);
 		}
 	} else {
-		el0_patch_macho_sections(im->file, im->file_size, mh,
-					 im->slide, cc_lo, cc_hi,
-					 &n_ubsan, &n_idreg, &n_cc_idreg);
+		el0_patch_macho_sections(im, mh, cc_sects, cc_nsects,
+					 &n_ubsan, &n_idreg, &n_cc_idreg, &n_cc_ubsan);
 	}
 	__asm__ volatile("dsb ish\n\tisb" : : : "memory");
 	logkv("xnu: EL0 patched brk #0xff00 -> nop count", n_ubsan);
@@ -1529,11 +1618,12 @@ static void el0_patch_image(struct xnu_image *im)
 	logkv("xnu: EL0 corecrypto ID-reg patches", n_cc_idreg);
 
 	/*
-	 * Only short-circuit _fipspost_post_integrity -> 0 when EL0 patching actually modified
-	 * executable instructions inside com.apple.kec.corecrypto and the target starts with a
-	 * valid ARM64 function prologue.
+	 * Only short-circuit _fipspost_post_integrity -> 0 when el0_fips_bypass is enabled,
+	 * exactly the 2 expected ID-reg instructions (and 0 other instructions) were patched
+	 * inside com.apple.kec.corecrypto's executable sections, and the target lies in a
+	 * corecrypto executable section + loaded top-level segment with a valid ARM64 prologue.
 	 */
-	if (cc_fe && n_cc_idreg > 0) {
+	if (el0_fips_bypass && cc_fe && n_cc_idreg == 2 && n_cc_ubsan == 0) {
 		const struct mh64 *cmh = (const void *)(im->file + cc_fe->fileoff);
 		const struct lc *cl = (const void *)(cmh + 1);
 		const struct lc *cend = (const void *)((const char *)cl + cmh->sizeofcmds);
@@ -1559,8 +1649,11 @@ static void el0_patch_image(struct xnu_image *im)
 						     "_fipspost_post_integrity")) {
 					u64_t fn_va = nl[j].n_value + im->slide;
 					if (fn_va < nl[j].n_value || (fn_va & 3) ||
-					    fn_va < cc_lo || fn_va + 12 < fn_va || fn_va + 12 > cc_hi)
+					    !va_in_spans(cc_sects, cc_nsects, fn_va, 12) ||
+					    !va_in_loaded_segs(im, fn_va, 12)) {
+						logs("xnu: skipping _fipspost_post_integrity patch (outside corecrypto exec section)");
 						break;
+					}
 					u32_t *fn = (u32_t *)fn_va;
 					u32_t p0 = fn[0];
 					/* Expect bti c (0xd503245f), pacibsp (0xd503237f), stp, or sub sp. */
@@ -1582,6 +1675,9 @@ static void el0_patch_image(struct xnu_image *im)
 			}
 			break;
 		}
+	} else if (cc_fe && (n_cc_idreg > 0 || n_cc_ubsan > 0)) {
+		logkv("xnu: skipping _fipspost_post_integrity patch (el0_fips_bypass)", (u64_t)el0_fips_bypass);
+		logkv("xnu:   corecrypto ubsan patches", n_cc_ubsan);
 	}
 }
 
@@ -1606,14 +1702,29 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		el0_patch_image(&img);
 	u64_t a_init = macho_sym(&img, "_arm_init"), a_hook = macho_sym(&img, "_linux64_hook"),
 	      a_slide = macho_sym(&img, "_linux64_slide"), a_el0 = macho_sym(&img, "_linux64_el0"),
-	      a_el0_caps = macho_sym(&img, "_linux64_el0_caps");
+	      a_el0_caps = macho_sym(&img, "_linux64_el0_caps"),
+	      a_abi = macho_sym(&img, "_linux64_abi_version");
 	logkv("xnu: arm_init at", a_init);
 	if (!a_init || !a_hook || !a_slide) { logs("xnu: arm_init or linux64_hook missing (kernel without the LINUX64 patch?)"); return -2; }
+	if (!a_abi) {
+		logs("xnu: _linux64_abi_version missing (stale kernel incompatible with host ABI)");
+		return -22;
+	}
+	if (*(unsigned int *)a_abi != LINUX64_ABI_VERSION) {
+		logkv("xnu: LINUX64_ABI_VERSION mismatch: kernel has", *(unsigned int *)a_abi);
+		logkv("xnu: LINUX64_ABI_VERSION expected by host", LINUX64_ABI_VERSION);
+		return -22;
+	}
 	if (el0_mode) {
-		if (!a_el0) { logs("xnu: _linux64_el0 missing (kernel without EL0 patch?)"); return -2; }
+		if (!a_el0 || !a_el0_caps) {
+			logs("xnu: _linux64_el0 or _linux64_el0_caps missing (kernel without EL0 patch?)");
+			return -2;
+		}
 		*(unsigned int *)a_el0 = 1;
-		if (a_el0_caps)
-			*(unsigned int *)a_el0_caps = (fki_caps() & FKI_CAP_EXEC_ONLY) ? LINUX64_EL0_CAP_EXEC_ONLY : 0;
+		unsigned int caps = (fki_caps() & FKI_CAP_EXEC_ONLY) ? LINUX64_EL0_CAP_EXEC_ONLY : 0;
+		if (xo_compat)
+			caps |= LINUX64_EL0_CAP_XO_COMPAT;
+		*(unsigned int *)a_el0_caps = caps;
 	}
 	*(u64_t *)a_hook = (u64_t)(el0_mode ? xnu_world_upcall_el0 : xnu_world_upcall);
 	*(u64_t *)a_slide = img.slide;

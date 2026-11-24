@@ -39,8 +39,9 @@ static int cstr_bounded_eq(const char *s, unsigned long max_len, const char *wan
 }
 
 #define FOR_EACH_LC(img, l) \
+	for (u32_t _lci = 0, _ncmds = ((const struct mh64 *)(img)->file)->ncmds; _lci < _ncmds; _lci = _ncmds) \
 	for (const struct lc *l = (const void *)((img)->file + sizeof(struct mh64)), *_e = (const void *)((img)->file + sizeof(struct mh64) + ((const struct mh64 *)(img)->file)->sizeofcmds); \
-	     l < _e; l = (const void *)((const char *)l + l->cmdsize))
+	     _lci < _ncmds && l < _e; _lci++, l = (const void *)((const char *)l + l->cmdsize))
 
 int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsigned long extra)
 {

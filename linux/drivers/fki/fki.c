@@ -18,13 +18,15 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/cpumask.h>
+#include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 #include <asm/arch_timer.h>
 #include <asm/sysreg.h>
 
 int fki_version(void)
 {
-	return FKI_VERSION;
+	/* This minimal in-tree driver implements only the FKI v0 subset; full FKI v1 lives in fki-ko/. */
+	return 0;
 }
 EXPORT_SYMBOL(fki_version);
 
@@ -136,10 +138,11 @@ void fki_leave(unsigned long cookie, const struct fki_pac_keys *saved)
 }
 EXPORT_SYMBOL(fki_leave);
 
-void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save)
+int fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save)
 {
 	keys_read(save);
 	keys_write(load);
+	return 0;
 }
 EXPORT_SYMBOL(fki_pac_swap);
 
@@ -198,11 +201,19 @@ void fki_high_unmap(unsigned long va, unsigned long size) {}
 EXPORT_SYMBOL(fki_high_unmap);
 void fki_high_flush(void) {}
 EXPORT_SYMBOL(fki_high_flush);
-int fki_high_readable(unsigned long va, unsigned long size)
+int fki_high_read_u64x2(unsigned long va, fki_u64 *out0, fki_u64 *out1)
 {
-	return size && va + size >= va && va >= 0xffffff8000000000UL && va + size <= 0xfffffffc00000000UL;
+	fki_u64 pair[2];
+
+	if (!out0 || !out1 || (va & 7UL) || va < 0xffffff8000000000UL || va > 0xfffffffc00000000UL - sizeof(pair))
+		return -EFAULT;
+	if (copy_from_kernel_nofault(pair, (const void *)va, sizeof(pair)) != 0)
+		return -EFAULT;
+	*out0 = pair[0];
+	*out1 = pair[1];
+	return 0;
 }
-EXPORT_SYMBOL(fki_high_readable);
+EXPORT_SYMBOL(fki_high_read_u64x2);
 void fki_icache_flush(unsigned long va, unsigned long size)
 {
 	(void)va;

@@ -81,7 +81,7 @@ void fki_blob_put(void *handle);
 unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved);
 void fki_leave(unsigned long cookie, const struct fki_pac_keys *saved);
 /* Swap PAC keys only (caller already in a foreign context): save current into *save, load *load. */
-void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save);
+int fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save);
 fki_u64 fki_counter_frequency(void);
 fki_u64 fki_counter(void);
 void fki_random(void *buf, unsigned long len);
@@ -108,7 +108,7 @@ void fki_kmem_free(struct fki_region *r);
 int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot);
 void fki_high_unmap(unsigned long va, unsigned long size);
 void fki_high_flush(void);
-int fki_high_readable(unsigned long va, unsigned long size);
+int fki_high_read_u64x2(unsigned long va, fki_u64 *out0, fki_u64 *out1);
 void fki_icache_flush(unsigned long va, unsigned long size);
 /*
  * Host-managed user address spaces and user execution contexts (FKI_CAP_EL0).

@@ -23,7 +23,7 @@
 #ifndef _LINUX64_ABI_H_
 #define _LINUX64_ABI_H_
 
-#define LINUX64_ABI_VERSION 3
+#define LINUX64_ABI_VERSION 4
 
 enum linux64_call {
 	LINUX64_CALL_KERNEL_TABLES  = 210,	/* boot: a1 = XNU's kernel L1 table; the host installs its kernel-range entries */
@@ -72,6 +72,7 @@ enum linux64_call {
 
 /* EL0 host capability bits exported to XNU via linux64_el0_caps. */
 #define LINUX64_EL0_CAP_EXEC_ONLY (1U << 0)	/* host supports execute-only (--x) user mappings */
+#define LINUX64_EL0_CAP_XO_COMPAT (1U << 1)	/* opt-in: relax --x to r-x when host lacks EXEC_ONLY */
 
 /* Kernel/user page mapping request for EL0 hosts (LINUX64_CALL_KMAP/KUNMAP/AS_*). */
 struct linux64_map_req {
@@ -131,6 +132,8 @@ struct linux64_user_pac_req {
 	__UINT64_TYPE__ result;
 	__UINT32_TYPE__ key;		/* LINUX64_PAC_KEY_IA or LINUX64_PAC_KEY_DA */
 	__UINT32_TYPE__ is_auth;	/* 0: sign, 1: auth */
+	__INT32_TYPE__ err;		/* 0 on success, negative Linux errno on PAC swap failure */
+	__UINT32_TYPE__ reserved;
 };
 
 /* A buffer: bytes to send or room to receive into. */

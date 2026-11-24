@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
 # Hosted XNU on several CPUs
 
 Today the hosted XNU runs on one CPU: xnu.ko's loading task, bound to Linux CPU 0, enters the XNU world and stays
