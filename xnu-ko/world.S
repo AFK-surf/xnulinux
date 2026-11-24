@@ -309,6 +309,7 @@ xnu_world_upcall_el0:
 	add	x0, x9, #240		/* load Linux keys */
 	add	x1, x9, #328		/* save XNU keys */
 	bl	fki_pac_swap
+	cbnz	x0, .Lpac_fail_el0
 	mov	x0, x19
 	mov	x1, x20
 	mov	x2, x21
@@ -318,6 +319,7 @@ xnu_world_upcall_el0:
 	add	x0, x9, #328		/* load XNU keys (while Linux TPIDR_EL0 is live) */
 	add	x1, x9, #240		/* save Linux keys */
 	bl	fki_pac_swap
+	cbnz	x0, .Lpac_fail_el0
 	W_EL0(x9)
 	mrs	x10, tpidr_el0
 	str	x10, [x9, #216]
@@ -332,4 +334,6 @@ xnu_world_upcall_el0:
 	ldp	x27, x28, [x9, #176]
 	ldp	x29, x30, [x9, #192]
 	ret
+.Lpac_fail_el0:
+	bl	xnu_world_pac_abort_el0
 	.size	xnu_world_upcall_el0, . - xnu_world_upcall_el0

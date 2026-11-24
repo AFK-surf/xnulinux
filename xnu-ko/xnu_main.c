@@ -85,10 +85,25 @@ module_param(xo_compat, int, 0444);
 /*
  * EL0 KTCB lacks EL1 MRS emulation, so el0_patch_image replaces 2 ID_AA64ISAR0/PFR0_EL1
  * instructions in com.apple.kec.corecrypto, invalidating its static __TEXT HMAC.
- * Set el0_fips_bypass=0 to preserve the real FIPS integrity failure path.
+ * By default (el0_fips_sha256=""), _fipspost_post_integrity is NEVER patched so the real
+ * integrity failure path stays intact. Only when the operator supplies the exact 64-hex
+ * SHA-256 of the unpatched com.apple.kec.corecrypto loaded segments is the integrity check
+ * updated after verifying the digest and that exactly those 2 ID-reg patches were applied.
  */
-static int el0_fips_bypass = 1;
-module_param(el0_fips_bypass, int, 0444);
+static char *el0_fips_sha256 = "";
+module_param(el0_fips_sha256, charp, 0444);
+
+__attribute__((target("branch-protection=none"), noreturn))
+void xnu_world_pac_abort_el0(int err);
+__attribute__((target("branch-protection=none"), noreturn))
+void xnu_world_pac_abort_el0(int err)
+{
+	static const char msg[] = "xnu: FATAL: fki_pac_swap failed in EL0 upcall\n";
+
+	(void)err;
+	fki_log_alert(msg, sizeof(msg) - 1);
+	BUG();
+}
 
 static struct xnu_image img;
 static struct fki_pac_keys xnu_user_keys;	/* separate PAC key domain for EL0 user contexts */
@@ -1430,30 +1445,178 @@ static int va_in_spans(const struct el0_va_span *spans, unsigned nspans, u64_t v
 	return 0;
 }
 
-static int va_in_loaded_segs(const struct xnu_image *im, u64_t va, u64_t len)
+#define XNU_LC_OK(l, end) \
+	((const char *)(end) - (const char *)(l) >= (long)sizeof(struct lc) && \
+	 (l)->cmdsize >= sizeof(struct lc) && \
+	 (l)->cmdsize <= (u64_t)((const char *)(end) - (const char *)(l)))
+
+static int va_in_loaded_segs_prot(const struct xnu_image *im, u64_t va, u64_t len, u32_t req_prot)
 {
 	if (!len || va + len < va)
 		return 0;
 	const struct mh64 *mh = (const void *)im->file;
 	const struct lc *l = (const void *)(im->file + sizeof(*mh));
 	const struct lc *end = (const void *)(im->file + sizeof(*mh) + mh->sizeofcmds);
-	for (u32_t ci = 0; ci < mh->ncmds && l < end &&
-	     l->cmdsize >= sizeof(struct lc) &&
-	     (const char *)l + l->cmdsize <= (const char *)end;
+	for (u32_t ci = 0; ci < mh->ncmds && XNU_LC_OK(l, end);
 	     ci++, l = (const void *)((const char *)l + l->cmdsize)) {
 		if (l->cmd != LC_SEGMENT_64 || l->cmdsize < sizeof(struct seg64))
 			continue;
 		const struct seg64 *s = (const void *)l;
-		if (!s->filesize)
+		/* Writable symbols may reside in zero-filled BSS (vmsize > filesize). */
+		u64_t span = (req_prot & 2) ? s->vmsize : s->filesize;
+		if (!span || (s->initprot & req_prot) != req_prot)
 			continue;
 		u64_t lo = s->vmaddr + im->slide;
-		u64_t hi = lo + s->filesize;
+		u64_t hi = lo + span;
 		if (lo < s->vmaddr || hi < lo)
 			continue;
 		if (va >= lo && va + len <= hi)
 			return 1;
 	}
 	return 0;
+}
+
+static int va_in_loaded_segs(const struct xnu_image *im, u64_t va, u64_t len)
+{
+	return va_in_loaded_segs_prot(im, va, len, 1);
+}
+
+/* Minimal self-contained SHA-256 (FIPS 180-4) for corecrypto pre-patch verification. */
+struct el0_sha256_ctx {
+	u32_t h[8];
+	u64_t bits;
+	unsigned char buf[64];
+	unsigned n;
+};
+
+static inline u32_t sha256_rotr(u32_t x, unsigned r) { return (x >> r) | (x << (32 - r)); }
+
+static void sha256_compress(u32_t h[8], const unsigned char blk[64])
+{
+	static const u32_t K[64] = {
+		0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
+		0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U,
+		0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
+		0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,
+		0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
+		0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
+		0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
+		0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U,
+	};
+	u32_t w[64], a, b, c, d, e, f, g, hh;
+	for (unsigned i = 0; i < 16; i++)
+		w[i] = ((u32_t)blk[i * 4] << 24) | ((u32_t)blk[i * 4 + 1] << 16) |
+		       ((u32_t)blk[i * 4 + 2] << 8) | (u32_t)blk[i * 4 + 3];
+	for (unsigned i = 16; i < 64; i++) {
+		u32_t s0 = sha256_rotr(w[i - 15], 7) ^ sha256_rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+		u32_t s1 = sha256_rotr(w[i - 2], 17) ^ sha256_rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+		w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+	}
+	a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4]; f = h[5]; g = h[6]; hh = h[7];
+	for (unsigned i = 0; i < 64; i++) {
+		u32_t S1 = sha256_rotr(e, 6) ^ sha256_rotr(e, 11) ^ sha256_rotr(e, 25);
+		u32_t ch = (e & f) ^ ((~e) & g);
+		u32_t t1 = hh + S1 + ch + K[i] + w[i];
+		u32_t S0 = sha256_rotr(a, 2) ^ sha256_rotr(a, 13) ^ sha256_rotr(a, 22);
+		u32_t maj = (a & b) ^ (a & c) ^ (b & c);
+		u32_t t2 = S0 + maj;
+		hh = g; g = f; f = e; e = d + t1;
+		d = c; c = b; b = a; a = t1 + t2;
+	}
+	h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+}
+
+static void sha256_init(struct el0_sha256_ctx *ctx)
+{
+	ctx->h[0] = 0x6a09e667U; ctx->h[1] = 0xbb67ae85U; ctx->h[2] = 0x3c6ef372U; ctx->h[3] = 0xa54ff53aU;
+	ctx->h[4] = 0x510e527fU; ctx->h[5] = 0x9b05688cU; ctx->h[6] = 0x1f83d9abU; ctx->h[7] = 0x5be0cd19U;
+	ctx->bits = 0;
+	ctx->n = 0;
+}
+
+static void sha256_update(struct el0_sha256_ctx *ctx, const unsigned char *p, u64_t len)
+{
+	ctx->bits += len * 8;
+	while (len > 0) {
+		unsigned take = (unsigned)(64 - ctx->n);
+		if (take > len)
+			take = (unsigned)len;
+		x_memcpy(ctx->buf + ctx->n, p, take);
+		ctx->n += take;
+		p += take;
+		len -= take;
+		if (ctx->n == 64) {
+			sha256_compress(ctx->h, ctx->buf);
+			ctx->n = 0;
+		}
+	}
+}
+
+static void sha256_final(struct el0_sha256_ctx *ctx, unsigned char out[32])
+{
+	ctx->buf[ctx->n++] = 0x80;
+	if (ctx->n > 56) {
+		while (ctx->n < 64)
+			ctx->buf[ctx->n++] = 0;
+		sha256_compress(ctx->h, ctx->buf);
+		ctx->n = 0;
+	}
+	while (ctx->n < 56)
+		ctx->buf[ctx->n++] = 0;
+	for (unsigned i = 0; i < 8; i++)
+		ctx->buf[56 + i] = (unsigned char)(ctx->bits >> (56 - i * 8));
+	sha256_compress(ctx->h, ctx->buf);
+	for (unsigned i = 0; i < 8; i++) {
+		out[i * 4 + 0] = (unsigned char)(ctx->h[i] >> 24);
+		out[i * 4 + 1] = (unsigned char)(ctx->h[i] >> 16);
+		out[i * 4 + 2] = (unsigned char)(ctx->h[i] >> 8);
+		out[i * 4 + 3] = (unsigned char)(ctx->h[i]);
+	}
+}
+
+static int parse_sha256_hex(const char *s, unsigned char out[32])
+{
+	if (!s)
+		return 0;
+	for (unsigned i = 0; i < 32; i++) {
+		unsigned char v = 0;
+		for (unsigned k = 0; k < 2; k++) {
+			char c = s[i * 2 + k];
+			unsigned char d;
+			if (c >= '0' && c <= '9') d = (unsigned char)(c - '0');
+			else if (c >= 'a' && c <= 'f') d = (unsigned char)(c - 'a' + 10);
+			else if (c >= 'A' && c <= 'F') d = (unsigned char)(c - 'A' + 10);
+			else return 0;
+			v = (unsigned char)((v << 4) | d);
+		}
+		out[i] = v;
+	}
+	return s[64] == '\0';
+}
+
+static int ct_memeq32(const unsigned char a[32], const unsigned char b[32])
+{
+	unsigned char diff = 0;
+	for (unsigned i = 0; i < 32; i++)
+		diff |= (unsigned char)(a[i] ^ b[i]);
+	return diff == 0;
+}
+
+static void log_sha256(const char *prefix, const unsigned char d[32])
+{
+	static const char hex[] = "0123456789abcdef";
+	char line[160];
+	unsigned p = 0;
+	while (prefix[p] && p < 80) {
+		line[p] = prefix[p];
+		p++;
+	}
+	for (unsigned i = 0; i < 32; i++) {
+		line[p++] = hex[d[i] >> 4];
+		line[p++] = hex[d[i] & 0xf];
+	}
+	line[p++] = '\n';
+	fki_log(line, p);
 }
 
 static void el0_patch_macho_sections(const struct xnu_image *im, const struct mh64 *mh,
@@ -1472,9 +1635,7 @@ static void el0_patch_macho_sections(const struct xnu_image *im, const struct mh
 		return;
 	const struct lc *l = (const void *)(mh + 1);
 	const struct lc *end = (const void *)((const char *)l + mh->sizeofcmds);
-	for (u32_t ci = 0; ci < mh->ncmds && l < end &&
-	     l->cmdsize >= sizeof(struct lc) &&
-	     (const char *)l + l->cmdsize <= (const char *)end;
+	for (u32_t ci = 0; ci < mh->ncmds && XNU_LC_OK(l, end);
 	     ci++, l = (const void *)((const char *)l + l->cmdsize)) {
 		if (l->cmd != LC_SEGMENT_64 || l->cmdsize < sizeof(struct seg64))
 			continue;
@@ -1535,11 +1696,13 @@ static void el0_patch_image(struct xnu_image *im)
 	struct el0_va_span cc_sects[8];
 	unsigned cc_nsects = 0;
 	const struct fileset_entry_lc *cc_fe = 0;
+	unsigned char cc_digest[32];
+	int have_cc_digest = 0;
 
-	/* Locate com.apple.kec.corecrypto executable sections (per-section bounds, not min..max). */
+	/* Locate com.apple.kec.corecrypto executable sections & hash unpatched loaded bytes. */
 	if (im->filetype == MH_FILESET) {
 		u32_t fi = 0;
-		for (const struct lc *fl = l; fi < mh->ncmds && fl < end;
+		for (const struct lc *fl = l; fi < mh->ncmds && XNU_LC_OK(fl, end);
 		     fi++, fl = (const void *)((const char *)fl + fl->cmdsize)) {
 			if (fl->cmd != LC_FILESET_ENTRY || fl->cmdsize < sizeof(struct fileset_entry_lc))
 				continue;
@@ -1557,15 +1720,25 @@ static void el0_patch_image(struct xnu_image *im)
 			    cmh->ncmds > cmh->sizeofcmds / sizeof(struct lc))
 				break;
 			cc_fe = fe;
+			struct el0_sha256_ctx sctx;
+			sha256_init(&sctx);
+			int hash_ok = 1;
 			const struct lc *cl = (const void *)(cmh + 1);
 			const struct lc *cend = (const void *)((const char *)cl + cmh->sizeofcmds);
-			for (u32_t ci = 0; ci < cmh->ncmds && cl < cend &&
-			     cl->cmdsize >= sizeof(struct lc) &&
-			     (const char *)cl + cl->cmdsize <= (const char *)cend;
+			for (u32_t ci = 0; ci < cmh->ncmds && XNU_LC_OK(cl, cend);
 			     ci++, cl = (const void *)((const char *)cl + cl->cmdsize)) {
 				if (cl->cmd != LC_SEGMENT_64 || cl->cmdsize < sizeof(struct seg64))
 					continue;
 				const struct seg64 *cs = (const void *)cl;
+				if (cs->filesize) {
+					u64_t seg_va = cs->vmaddr + im->slide;
+					if (seg_va < cs->vmaddr ||
+					    !va_in_loaded_segs(im, seg_va, cs->filesize)) {
+						hash_ok = 0;
+					} else {
+						sha256_update(&sctx, (const unsigned char *)seg_va, cs->filesize);
+					}
+				}
 				if (!(cs->initprot & 4) || !cs->vmsize)
 					continue;
 				if ((u64_t)cs->nsects > (cl->cmdsize - sizeof(*cs)) / sizeof(struct sect64))
@@ -1590,6 +1763,11 @@ static void el0_patch_image(struct xnu_image *im)
 					}
 				}
 			}
+			if (hash_ok) {
+				sha256_final(&sctx, cc_digest);
+				have_cc_digest = 1;
+				log_sha256("xnu: EL0 corecrypto unpatched sha256: ", cc_digest);
+			}
 			break;
 		}
 	}
@@ -1597,7 +1775,7 @@ static void el0_patch_image(struct xnu_image *im)
 	/* Scan ONLY executable code sections (S_ATTR_PURE/SOME_INSTRUCTIONS), never data. */
 	if (im->filetype == MH_FILESET) {
 		u32_t fi = 0;
-		for (const struct lc *fl = l; fi < mh->ncmds && fl < end;
+		for (const struct lc *fl = l; fi < mh->ncmds && XNU_LC_OK(fl, end);
 		     fi++, fl = (const void *)((const char *)fl + fl->cmdsize)) {
 			if (fl->cmd != LC_FILESET_ENTRY || fl->cmdsize < sizeof(struct fileset_entry_lc))
 				continue;
@@ -1618,18 +1796,21 @@ static void el0_patch_image(struct xnu_image *im)
 	logkv("xnu: EL0 corecrypto ID-reg patches", n_cc_idreg);
 
 	/*
-	 * Only short-circuit _fipspost_post_integrity -> 0 when el0_fips_bypass is enabled,
-	 * exactly the 2 expected ID-reg instructions (and 0 other instructions) were patched
-	 * inside com.apple.kec.corecrypto's executable sections, and the target lies in a
-	 * corecrypto executable section + loaded top-level segment with a valid ARM64 prologue.
+	 * Preserve _fipspost_post_integrity failure path by default. Only update it when the
+	 * operator explicitly provides el0_fips_sha256 matching the pre-patch SHA-256 of
+	 * com.apple.kec.corecrypto's loaded segments, exactly 2 approved ID-reg instructions
+	 * (and 0 other instructions) were patched in corecrypto, and the symbol lies in a
+	 * corecrypto executable section + loaded top-level segment with a valid prologue.
 	 */
-	if (el0_fips_bypass && cc_fe && n_cc_idreg == 2 && n_cc_ubsan == 0) {
+	unsigned char want_digest[32];
+	int fips_digest_ok = (have_cc_digest &&
+			      parse_sha256_hex(el0_fips_sha256, want_digest) &&
+			      ct_memeq32(cc_digest, want_digest));
+	if (fips_digest_ok && cc_fe && n_cc_idreg == 2 && n_cc_ubsan == 0) {
 		const struct mh64 *cmh = (const void *)(im->file + cc_fe->fileoff);
 		const struct lc *cl = (const void *)(cmh + 1);
 		const struct lc *cend = (const void *)((const char *)cl + cmh->sizeofcmds);
-		for (u32_t ci = 0; ci < cmh->ncmds && cl < cend &&
-		     cl->cmdsize >= sizeof(struct lc) &&
-		     (const char *)cl + cl->cmdsize <= (const char *)cend;
+		for (u32_t ci = 0; ci < cmh->ncmds && XNU_LC_OK(cl, cend);
 		     ci++, cl = (const void *)((const char *)cl + cl->cmdsize)) {
 			if (cl->cmd != LC_SYMTAB || cl->cmdsize < sizeof(struct symtab_lc))
 				continue;
@@ -1666,7 +1847,7 @@ static void el0_patch_image(struct xnu_image *im)
 						for (int k = 0; k < 3; k++)
 							__asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0" : : "r"(&fn[k]) : "memory");
 						__asm__ volatile("dsb ish\n\tisb" : : : "memory");
-						logkv("xnu: EL0 patched _fipspost_post_integrity at", fn_va);
+						logkv("xnu: EL0 verified sha256 and patched _fipspost_post_integrity at", fn_va);
 					} else {
 						logkv("xnu: unexpected _fipspost_post_integrity prologue", p0);
 					}
@@ -1676,8 +1857,12 @@ static void el0_patch_image(struct xnu_image *im)
 			break;
 		}
 	} else if (cc_fe && (n_cc_idreg > 0 || n_cc_ubsan > 0)) {
-		logkv("xnu: skipping _fipspost_post_integrity patch (el0_fips_bypass)", (u64_t)el0_fips_bypass);
-		logkv("xnu:   corecrypto ubsan patches", n_cc_ubsan);
+		if (!el0_fips_sha256 || !el0_fips_sha256[0])
+			logs("xnu: preserving _fipspost_post_integrity (el0_fips_sha256 not set)");
+		else if (!fips_digest_ok)
+			logs("xnu: preserving _fipspost_post_integrity (el0_fips_sha256 mismatch or invalid hex)");
+		else
+			logkv("xnu: preserving _fipspost_post_integrity (unexpected corecrypto ubsan patches)", n_cc_ubsan);
 	}
 }
 
@@ -1703,11 +1888,18 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 	u64_t a_init = macho_sym(&img, "_arm_init"), a_hook = macho_sym(&img, "_linux64_hook"),
 	      a_slide = macho_sym(&img, "_linux64_slide"), a_el0 = macho_sym(&img, "_linux64_el0"),
 	      a_el0_caps = macho_sym(&img, "_linux64_el0_caps"),
-	      a_abi = macho_sym(&img, "_linux64_abi_version");
+	      a_abi = macho_sym(&img, "_linux64_abi_version"),
+	      a_host_abi = macho_sym(&img, "_linux64_host_abi_version");
 	logkv("xnu: arm_init at", a_init);
 	if (!a_init || !a_hook || !a_slide) { logs("xnu: arm_init or linux64_hook missing (kernel without the LINUX64 patch?)"); return -2; }
-	if (!a_abi) {
-		logs("xnu: _linux64_abi_version missing (stale kernel incompatible with host ABI)");
+	if ((a_init & 3) || !va_in_loaded_segs_prot(&img, a_init, 4, 5) ||
+	    (a_hook & 7) || !va_in_loaded_segs_prot(&img, a_hook, 8, 3) ||
+	    (a_slide & 7) || !va_in_loaded_segs_prot(&img, a_slide, 8, 3)) {
+		logs("xnu: invalid boot symbol address or segment permissions");
+		return -22;
+	}
+	if (!a_abi || (a_abi & 3) || !va_in_loaded_segs_prot(&img, a_abi, 4, 1)) {
+		logs("xnu: _linux64_abi_version missing or invalid (stale kernel incompatible with host ABI)");
 		return -22;
 	}
 	if (*(unsigned int *)a_abi != LINUX64_ABI_VERSION) {
@@ -1715,9 +1907,16 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		logkv("xnu: LINUX64_ABI_VERSION expected by host", LINUX64_ABI_VERSION);
 		return -22;
 	}
+	if (!a_host_abi || (a_host_abi & 3) || !va_in_loaded_segs_prot(&img, a_host_abi, 4, 3)) {
+		logs("xnu: _linux64_host_abi_version missing or invalid (stale kernel incompatible with host ABI)");
+		return -22;
+	}
+	*(unsigned int *)a_host_abi = LINUX64_ABI_VERSION;
 	if (el0_mode) {
-		if (!a_el0 || !a_el0_caps) {
-			logs("xnu: _linux64_el0 or _linux64_el0_caps missing (kernel without EL0 patch?)");
+		if (!a_el0 || !a_el0_caps ||
+		    (a_el0 & 3) || !va_in_loaded_segs_prot(&img, a_el0, 4, 3) ||
+		    (a_el0_caps & 3) || !va_in_loaded_segs_prot(&img, a_el0_caps, 4, 3)) {
+			logs("xnu: _linux64_el0 or _linux64_el0_caps missing or invalid (kernel without EL0 patch?)");
 			return -2;
 		}
 		*(unsigned int *)a_el0 = 1;
@@ -1946,6 +2145,10 @@ static int __init xnu_init(void)
 		return -22;
 	el0_mode = !!(fki_caps() & FKI_CAP_EL0);
 	logkv("xnu: FKI caps", fki_caps());
+	if (el0_mode && !(fki_caps() & FKI_CAP_PAC)) {
+		logs("xnu: EL0 mode requires FKI_CAP_PAC");
+		return -95;
+	}
 	if (ramdisk) {
 		err = fki_blob_get(ramdisk, &rd_data, &rd_size, &rd_blob);
 		if (err) { logkv("xnu: cannot read the RAM disk, err", (u64_t)err); goto fail; }

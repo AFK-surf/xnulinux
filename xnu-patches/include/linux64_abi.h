@@ -35,12 +35,13 @@ enum linux64_call {
 	LINUX64_CALL_AS_MAP         = 222,	/* EL0 host: map pages in user address space */
 	LINUX64_CALL_AS_UNMAP       = 223,	/* EL0 host: unmap pages in user address space */
 	LINUX64_CALL_AS_FLUSH       = 224,	/* EL0 host: flush user address space TLB */
-	LINUX64_CALL_UTCB_RUN       = 225,	/* EL0 host: run user context */
+	/* 225 retired (former LINUX64_CALL_UTCB_RUN before ABI v4 handshake) */
 	LINUX64_CALL_UTCB_FPU_SYNC  = 226,	/* EL0 host: flush/invalidate user FPU state */
 	LINUX64_CALL_UTCB_RESUME    = 227,	/* EL0 host: resume user context with unchanged GP regs after PF */
 	LINUX64_CALL_UTCB_SYNC_REGS = 228,	/* EL0 host: read full GP regs after a lazy PF stop */
 	LINUX64_CALL_ICACHE_FLUSH   = 229,	/* EL0 host: a1 = va, a2 = size: cross-CPU icache flush */
 	LINUX64_CALL_USER_PAC_OP    = 230,	/* EL0 host: a1 = struct linux64_user_pac_req: user JOP key sign/auth */
+	LINUX64_CALL_UTCB_RUN       = 231,	/* EL0 host: run user context */
 	LINUX64_CALL_IDLE           = 810,	/* a1 = nanoseconds to XNU's next timer (0: one is due), a2 = this CPU's pending-IPI word
 					 * (the host does not sleep while it is set); the host runs Linux meanwhile */
 	LINUX64_CALL_PREEMPTED      = 811,	/* a host interrupt is pending: let Linux handle it; a1 = 1 from the kernel, 0 from EL0 */

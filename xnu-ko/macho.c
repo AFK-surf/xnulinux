@@ -38,10 +38,15 @@ static int cstr_bounded_eq(const char *s, unsigned long max_len, const char *wan
 	return 0;
 }
 
+#define LC_OK(l, end) \
+	((const char *)(end) - (const char *)(l) >= (long)sizeof(struct lc) && \
+	 (l)->cmdsize >= sizeof(struct lc) && \
+	 (l)->cmdsize <= (u64_t)((const char *)(end) - (const char *)(l)))
+
 #define FOR_EACH_LC(img, l) \
 	for (u32_t _lci = 0, _ncmds = ((const struct mh64 *)(img)->file)->ncmds; _lci < _ncmds; _lci = _ncmds) \
 	for (const struct lc *l = (const void *)((img)->file + sizeof(struct mh64)), *_e = (const void *)((img)->file + sizeof(struct mh64) + ((const struct mh64 *)(img)->file)->sizeofcmds); \
-	     _lci < _ncmds && l < _e; _lci++, l = (const void *)((const char *)l + l->cmdsize))
+	     _lci < _ncmds && LC_OK(l, _e); _lci++, l = (const void *)((const char *)l + l->cmdsize))
 
 int macho_load(struct xnu_image *img, const void *file, unsigned long size, unsigned long extra)
 {
@@ -215,8 +220,12 @@ u64_t macho_sym(struct xnu_image *img, const char *name)
 	const char *strs = (const char *)img->file + st->stroff;
 	for (u32_t i = 0; i < st->nsyms; i++) {
 		if ((nl[i].n_type & 0x0e) != 0x0e || nl[i].n_strx >= st->strsize) continue;	/* N_SECT */
-		if (cstr_bounded_eq(strs + nl[i].n_strx, st->strsize - nl[i].n_strx, name))
-			return nl[i].n_value + img->slide;
+		if (cstr_bounded_eq(strs + nl[i].n_strx, st->strsize - nl[i].n_strx, name)) {
+			u64_t va = nl[i].n_value + img->slide;
+			if (va < nl[i].n_value)
+				return 0;
+			return va;
+		}
 	}
 	return 0;
 }
@@ -237,7 +246,7 @@ int macho_slide_header(struct xnu_image *img, u64_t *mh_unslid)
 	const struct mh64 *h = (const void *)mh;
 	struct lc *l = (void *)(mh + sizeof(struct mh64)), *e = (void *)(mh + sizeof(struct mh64) + h->sizeofcmds);
 	int n = 0;
-	for (; l < e; l = (void *)((char *)l + l->cmdsize)) {
+	for (u32_t ci = 0; ci < h->ncmds && LC_OK(l, e); ci++, l = (void *)((char *)l + l->cmdsize)) {
 		if (l->cmd != LC_SEGMENT_64) continue;
 		struct seg64 *sg = (void *)l;
 		if (!sg->vmsize) continue;

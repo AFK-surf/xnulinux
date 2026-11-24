@@ -20,6 +20,7 @@
 #include <linux/vmalloc.h>
 #include <asm/arch_timer.h>
 #include <asm/barrier.h>
+#include <asm/cpufeature.h>
 #include <asm/neon.h>
 #include <asm/stacktrace.h>
 #include <asm/sysreg.h>
@@ -27,7 +28,11 @@
 
 unsigned long fki_caps(void)
 {
-	return FKI_CAP_PAC | FKI_CAP_EXEC_ONLY;
+	unsigned long caps = FKI_CAP_EXEC_ONLY;
+
+	if (system_supports_address_auth())
+		caps |= FKI_CAP_PAC;
+	return caps;
 }
 EXPORT_SYMBOL(fki_caps);
 

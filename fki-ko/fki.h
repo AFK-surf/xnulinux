@@ -102,6 +102,8 @@ void fki_window_set(unsigned long long *slot, fki_u64 desc);
  * fki_kmem_alloc allocates backing memory (no multi-GB physical contiguity required), maps it at high_va
  * as RWX, associates synthetic physical addresses starting at pa_base, and binds the high window on all CPUs.
  * fki_high_map/unmap/flush mirror additional kernel-VA mappings backed by xpa in [pa_base, pa_base + size).
+ * fki_high_map only supports new mappings or in-place same-PFN re-protection; cross-PFN replacement
+ * returns -EBUSY and requires the caller to fki_high_unmap while quiescent first.
  */
 int fki_kmem_alloc(unsigned long size, unsigned long high_va, fki_u64 pa_base, struct fki_region *r);
 void fki_kmem_free(struct fki_region *r);
