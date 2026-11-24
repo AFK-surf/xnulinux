@@ -985,29 +985,55 @@ int fki_as_map(void *as_ptr, unsigned long va, fki_u64 xpa, unsigned long size, 
 }
 EXPORT_SYMBOL(fki_as_map);
 
+static void fki_vs_slot_unmap_range(struct fki_vs_slot *slot,
+				    unsigned long va, unsigned long size)
+{
+	unsigned long first_vpn, last_va, last_vpn, vpn;
+	void *e;
+
+	if (!size)
+		return;
+	first_vpn = va >> PAGE_SHIFT;
+	last_va = (size - 1 > ULONG_MAX - va) ? ULONG_MAX : (va + size - 1);
+	last_vpn = last_va >> PAGE_SHIFT;
+	xa_for_each_range(&slot->slots, vpn, e, first_vpn, last_vpn) {
+		unsigned long cptr = fki_as_entry_cptr(e);
+
+		xa_erase(&slot->slots, vpn);
+		if (cptr)
+			l4h_slot_delete(cptr);
+	}
+}
+
 void fki_as_unmap(void *as_ptr, unsigned long va, unsigned long size)
 {
 	struct fki_as *as = as_ptr;
-	unsigned long flags, off;
+	unsigned long flags;
 
-	if (!as || !size)
+	if (!size)
 		return;
-	spin_lock_irqsave(&as->lock, flags);
-	if (as->vs_idx >= 0 && fki_vs_pool) {
-		struct fki_vs_slot *slot = &fki_vs_pool[as->vs_idx];
+	if (!as) {
+		int i;
 
-		for (off = 0; off < size; off += PAGE_SIZE) {
-			unsigned long vpn = (va + off) >> PAGE_SHIFT;
-			void *e = xa_erase(&slot->slots, vpn);
+		if (!fki_vs_pool)
+			return;
+		spin_lock_irqsave(&fki_vs_lock, flags);
+		for (i = 0; i < fki_vs_cap; i++) {
+			struct fki_vs_slot *slot = &fki_vs_pool[i];
+			struct fki_as *owner = slot->owner;
 
-			if (e) {
-				unsigned long cptr = fki_as_entry_cptr(e);
-
-				if (cptr)
-					l4h_slot_delete(cptr);
-			}
+			if (!owner)
+				continue;
+			spin_lock(&owner->lock);
+			fki_vs_slot_unmap_range(slot, va, size);
+			spin_unlock(&owner->lock);
 		}
+		spin_unlock_irqrestore(&fki_vs_lock, flags);
+		return;
 	}
+	spin_lock_irqsave(&as->lock, flags);
+	if (as->vs_idx >= 0 && fki_vs_pool)
+		fki_vs_slot_unmap_range(&fki_vs_pool[as->vs_idx], va, size);
 	spin_unlock_irqrestore(&as->lock, flags);
 }
 EXPORT_SYMBOL(fki_as_unmap);

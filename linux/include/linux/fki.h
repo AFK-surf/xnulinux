@@ -109,6 +109,8 @@ void fki_high_unmap(unsigned long va, unsigned long size);
 void fki_high_flush(void);
 /*
  * Host-managed user address spaces and user execution contexts (FKI_CAP_EL0).
+ * Passing as == NULL to fki_as_unmap() broadcasts the unmap of [va, va + size)
+ * across all active user address spaces (for shared/nested page tables).
  */
 void *fki_as_create(void);
 void fki_as_destroy(void *as);
