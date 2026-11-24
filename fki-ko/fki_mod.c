@@ -29,6 +29,7 @@
 #include <asm/sysreg.h>
 #include <asm/tlbflush.h>
 #include <asm/barrier.h>
+#include <asm/virt.h>
 #include <linux/kprobes.h>
 #include <linux/hrtimer.h>
 #include <linux/kthread.h>
@@ -960,10 +961,41 @@ static void fki_free_alt_stacks(void)
 	}
 }
 
+/*
+ * What the foreign kernel needs of the host CPU and of how Linux runs on it, checked before anything is set up:
+ *  - Linux at EL1. With VHE (a bare-metal host with KVM: Linux itself at EL2, HCR_EL2.E2H) the foreign kernel's EL1
+ *    system register accesses are redirected to EL2 registers and its exception returns go through EL2: not supported.
+ *    Boot with kvm-arm.mode=nvhe (Linux at EL1, KVM's hypervisor alone at EL2) or run Linux in a VM.
+ *  - Pointer authentication (FEAT_PAuth): XNU and Apple's kexts are arm64e and use PAC instructions outside the hint
+ *    space (pacga, blraa, retab ...), which are undefined without it (Neoverse N1 / Graviton2, Ampere Altra).
+ *  - 4 KiB pages (the foreign kernel shares Linux's user page tables): checked at build time below.
+ */
+#if PAGE_SIZE != SZ_4K
+#error "xnulinux needs a host kernel with 4 KiB pages"
+#endif
+static int fki_check_host(void)
+{
+	u64 isar1 = read_sysreg_s(SYS_ID_AA64ISAR1_EL1), isar2 = read_sysreg_s(SYS_ID_AA64ISAR2_EL1);
+
+	if (is_kernel_in_hyp_mode()) {
+		pr_err("fki: Linux runs at EL2 (VHE); the foreign kernel needs Linux at EL1: boot with kvm-arm.mode=nvhe\n");
+		return -EOPNOTSUPP;
+	}
+	if (!(isar1 & (ID_AA64ISAR1_EL1_APA_MASK | ID_AA64ISAR1_EL1_API_MASK)) && !(isar2 & ID_AA64ISAR2_EL1_APA3_MASK)) {
+		pr_err("fki: the CPU has no pointer authentication (FEAT_PAuth), which arm64e code needs\n");
+		return -EOPNOTSUPP;
+	}
+	return 0;
+}
+
 static int __init fki_init(void)
 {
 	struct net_device *dev;
 	int err, cpu;
+
+	err = fki_check_host();
+	if (err)
+		return err;
 
 	for_each_possible_cpu(cpu) {
 		struct page *pg = alloc_pages(GFP_KERNEL, FKI_ALT_STACK_ORDER);

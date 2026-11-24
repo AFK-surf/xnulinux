@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Portability smoke test on an arm64 machine that is neither a Mac VM nor the DGX Spark: GitHub's arm64 runner (an
+# Azure VM, Hyper-V, Azure's kernel). Builds the XNU kernel and the kernel collection from public sources (Apple's
+# kernelcache fetched from Apple's IPSW at run time, nothing of it kept), then boots XNU inside xnu.ko on an empty disk:
+# it should reach "Waiting on <IOMedia UUID>" (no root) and idle, as the DGX Spark smoke test did.
+name: arm64-smoke
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/arm64-portability]
+defaults:
+  run:
+    shell: bash
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host facts
+        run: |
+          set -x
+          uname -a; nproc; free -g; getconf PAGESIZE
+          lscpu
+          grep -m1 Features /proc/cpuinfo
+          cat /sys/kernel/security/lockdown 2>/dev/null || true
+          mokutil --sb-state 2>/dev/null || true
+          sudo dmesg | grep -aiE "EL[12]|VHE|arch_timer|Hyper-V|psci|GIC" | head -30
+          grep -E "CONFIG_(KPROBES|KALLSYMS_ALL|ARM64_PTR_AUTH|ARM64_PTR_AUTH_KERNEL|SHADOW_CALL_STACK|CMA|ARM64_4K_PAGES|RANDOMIZE_BASE|ARM64_VA_BITS|SECURITY_LOCKDOWN_LSM|MODULE_SIG_FORCE)=" /boot/config-$(uname -r) || true
+          grep -E "Cma|MemTotal|MemFree" /proc/meminfo
+          cat /proc/cmdline
+          df -h / /mnt 2>/dev/null
+      - name: Modules against the running kernel
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq linux-headers-$(uname -r) >/dev/null
+          make -C /lib/modules/$(uname -r)/build M=$PWD/fki-ko modules
+          make -C /lib/modules/$(uname -r)/build M=$PWD/xnu-ko KBUILD_EXTRA_SYMBOLS=$PWD/fki-ko/Module.symvers modules
+      - name: fki.ko loads (no carve-out)
+        run: |
+          sudo insmod fki-ko/fki.ko || { sudo dmesg | tail -30; exit 1; }
+          sudo dmesg | grep -a "fki" | tail -20
+          sudo rmmod fki
+      - name: XNU kernel (DroidVM toolchain, xnu-12377)
+        run: |
+          mkdir -p ~/w && ln -sfn $GITHUB_WORKSPACE ~/w/poc
+          sed -i 's/--jobs 12/--jobs 4/g; s/JOBS=12/JOBS=4/g' scripts/vm-xnu-build.sh scripts/vm-xnu-rebuild.sh
+          bash scripts/vm-xnu-build.sh 2>&1 | tail -80
+          test -s ~/w/dvm/out/k27/kernel-k27.macho
+      - name: Kernel collection input (kernelcache.release.vma2 of macOS 27.2 26B123, from Apple)
+        run: |
+          pip install -q --break-system-packages remotezip
+          python3 - <<'PY'
+          from remotezip import RemoteZip
+          url = 'https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw'
+          with RemoteZip(url) as z:
+              z.extract('kernelcache.release.vma2', '/tmp/kc')
+          PY
+          curl -sSL https://github.com/blacktop/ipsw/releases/download/v3.1.749/ipsw_3.1.749_linux_arm64.tar.gz | tar -C /tmp -xz ipsw
+          mkdir -p ~/w/dvm/out/kc
+          /tmp/ipsw img4 im4p extract -o ~/w/dvm/out/kc/kc27.bin /tmp/kc/kernelcache.release.vma2
+          ls -la ~/w/dvm/out/kc/kc27.bin
+      - name: Patched kernel, kexts, collection
+        run: |
+          sudo mkdir -p /lib/firmware/xnu
+          AMFI_PLATFORM=27 bash scripts/vm-xnu-rebuild.sh 2>&1 | tail -60
+          ls -la /lib/firmware/xnu
+      - name: Boot XNU in xnu.ko (empty disk, no root)
+        run: |
+          sudo dmesg -n 1
+          sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
+          sudo insmod fki-ko/fki.ko
+          truncate -s 1G /var/tmp/empty.img
+          : > /var/tmp/console-in; : > /var/tmp/xnu-input; : > /var/tmp/xnu-fb.raw; truncate -s 1M /var/tmp/xnu-keystore.bin
+          U=11111111-2222-3333-4444-555555555555
+          sudo dmesg -C
+          sudo setsid nohup insmod xnu-ko/xnu.ko mode=3 cpus=1 ram_mb=${RAM_MB:-2048} image=xnu/kc.bin disk=/var/tmp/empty.img \
+            root_uuid=$U boot_uuid=$U preboot_uuid=$U console_in=/var/tmp/console-in input_in=/var/tmp/xnu-input \
+            fb_dump=/var/tmp/xnu-fb.raw keystore=/var/tmp/xnu-keystore.bin bootargs='"amfi_get_out_of_my_way=1 lp-sip0=2050"' \
+            > /var/tmp/xnu-insmod.log 2>&1 < /dev/null &
+          ok=0
+          for i in $(seq 1 60); do
+            sleep 5
+            if sudo journalctl -k -q --no-pager | grep -aq "Waiting on"; then ok=1; sleep 20; break; fi
+            pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null || break
+          done
+          echo "--- insmod"; cat /var/tmp/xnu-insmod.log
+          echo "--- kernel log"; sudo journalctl -k -q -o short-monotonic --no-pager | grep -av "audit" | tail -400
+          if [ -d /sys/module/xnu ]; then echo 1 | sudo tee /sys/module/xnu/parameters/stop_run >/dev/null; sleep 10; fi
+          sudo journalctl -k -q -o short-monotonic --no-pager > /tmp/kernel.log || true
+          test $ok = 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-log
+          path: /tmp/kernel.log
+          if-no-files-found: ignore
