@@ -631,7 +631,7 @@ index 79d0bc1..259cc15 100644
  SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = MACH_VM_MAX_ADDRESS;
  #  else
  SECURITY_READ_ONLY_LATE(vm_map_offset_t) arm64_pmap_max_offset_default = 0x0;
-@@ -635,6 +662,64 @@ pte_is_xs(const pt_attr_t *pt_attr, pt_entry_t pte)
+@@ -635,6 +662,62 @@ pte_is_xs(const pt_attr_t *pt_attr, pt_entry_t pte)
  	arm64_sync_tlb(strong);                                                                               \
  }
  
@@ -674,18 +674,16 @@ index 79d0bc1..259cc15 100644
 +	}
 +	struct linux64_map_req req = { .as_handle = pmap->linux64_as, .va = va, .size = size };
 +	uint64_t ap = pte & ARM_PTE_APMASK;
-+	if (pte_is_valid(pte) && (pte & ARM_PTE_AF) &&
-+	    (ap == ARM_PTE_AP(AP_RORO) || ap == ARM_PTE_AP(AP_RWRW))) {
++	bool user_read = (ap == ARM_PTE_AP(AP_RORO) || ap == ARM_PTE_AP(AP_RWRW));
++	bool user_write = (ap == ARM_PTE_AP(AP_RWRW));
++	bool user_exec = !(pte & ARM_PTE_NX);
++	if (pte_is_valid(pte) && (pte & ARM_PTE_AF) && (user_read || user_exec)) {
 +		pmap_paddr_t pa = pte_to_pa(pte);
 +		if (pa_valid(pa)) {
 +			req.pa = pa;
-+			req.prot = LINUX64_PROT_READ;
-+			if (ap == ARM_PTE_AP(AP_RWRW)) {
-+				req.prot |= LINUX64_PROT_WRITE;
-+			}
-+			if (!(pte & ARM_PTE_NX)) {
-+				req.prot |= LINUX64_PROT_EXEC;
-+			}
++			req.prot = (user_read ? LINUX64_PROT_READ : 0) |
++			    (user_write ? LINUX64_PROT_WRITE : 0) |
++			    (user_exec ? LINUX64_PROT_EXEC : 0);
 +			linux64_call(LINUX64_CALL_AS_MAP, &req);
 +			return;
 +		}
@@ -696,7 +694,7 @@ index 79d0bc1..259cc15 100644
  /*
   * Synchronize updates to PTEs that were previously invalid or had the AF bit cleared,
   * therefore not requiring TLBI.  Use a store-load barrier to ensure subsequent loads
-@@ -2014,6 +2099,13 @@ pmap_map_bd_with_options(
+@@ -2014,6 +2097,13 @@ pmap_map_bd_with_options(
  
  		assert(!ARM_PTE_IS_COMPRESSED(*ptep, ptep));
  		write_pte_strong(ptep, pte);
@@ -710,7 +708,7 @@ index 79d0bc1..259cc15 100644
  
  		pte_increment_pa(tmplate);
  		vaddr += PAGE_SIZE;
-@@ -2110,6 +2202,13 @@ scan:
+@@ -2110,6 +2200,13 @@ scan:
  		pte |= ARM_PTE_NG;
  #endif /* __ARM_KERNEL_PROTECT__ */
  		write_pte_strong(ptep, pte);
@@ -724,7 +722,7 @@ index 79d0bc1..259cc15 100644
  	}
  	PMAP_UPDATE_TLBS(kernel_pmap, va_start, va_start + len, false, true);
  #if KASAN
-@@ -2983,7 +3082,8 @@ pmap_root_alloc_size(pmap_t pmap)
+@@ -2983,7 +3080,8 @@ pmap_root_alloc_size(pmap_t pmap)
  	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
  	unsigned int root_level = pt_attr_root_level(pt_attr);
  	const uint64_t index = pt_attr_va_valid_mask(pt_attr);
@@ -734,7 +732,7 @@ index 79d0bc1..259cc15 100644
  }
  
  
-@@ -3108,6 +3208,16 @@ pmap_create_options_internal(
+@@ -3108,6 +3206,16 @@ pmap_create_options_internal(
  	}
  
  	p->ttep = ml_static_vtop((vm_offset_t)p->tte);
@@ -751,7 +749,7 @@ index 79d0bc1..259cc15 100644
  	p->hw_tte = pmap_tt1_allocate(p, pmap_root_alloc_size(p), 0);
  	if (!p->hw_tte) {
  		pmap_tt1_deallocate(p, p->tte, pmap_root_alloc_size(p), 0);
-@@ -3129,6 +3239,7 @@ pmap_create_options_internal(
+@@ -3129,6 +3237,7 @@ pmap_create_options_internal(
  	p->hw_tte[0] = (p->ttep & ARM_TTE_TABLE_MASK) | ARM_TTE_TYPE_TABLE | ARM_TTE_VALID;
  
  	FLUSH_PTE();
@@ -759,7 +757,7 @@ index 79d0bc1..259cc15 100644
  
  	/*
  	 *  initialize the rest of the structure
-@@ -3141,6 +3252,12 @@ pmap_create_options_internal(
+@@ -3141,6 +3250,12 @@ pmap_create_options_internal(
  	p->nested_no_bounds_ref_state = NESTED_NO_BOUNDS_REF_NONE;
  	p->nested_no_bounds_refcnt = 0;
  	p->nested_bounds_set = false;
@@ -772,7 +770,7 @@ index 79d0bc1..259cc15 100644
  
  
  #if MACH_ASSERT
-@@ -3406,6 +3523,24 @@ pmap_destroy_internal(
+@@ -3406,6 +3521,24 @@ pmap_destroy_internal(
  
  
  
@@ -797,7 +795,7 @@ index 79d0bc1..259cc15 100644
  	if (pmap->tte) {
  		pmap_tt1_deallocate(pmap, pmap->tte, pmap_root_alloc_size(pmap), 0);
  		pmap->tte = (tt_entry_t *) NULL;
-@@ -4126,8 +4261,22 @@ pmap_remove_range(
+@@ -4126,8 +4259,22 @@ pmap_remove_range(
  	int num_changed = pmap_remove_range_options(pmap, va, bpte, epte, NULL,
  	    &need_strong_sync, PMAP_OPTIONS_REMOVE);
  	if (num_changed > 0) {
@@ -822,7 +820,7 @@ index 79d0bc1..259cc15 100644
  	}
  	return num_changed;
  }
-@@ -4484,6 +4633,21 @@ pmap_remove_options_internal(
+@@ -4484,6 +4631,21 @@ pmap_remove_options_internal(
  		remove_count = pmap_remove_range_options(pmap, start, bpte, epte, &eva,
  		    &need_strong_sync, options);
  
@@ -844,7 +842,7 @@ index 79d0bc1..259cc15 100644
  		if ((pmap->type == PMAP_TYPE_USER) && (ptep_get_info(pte_p)->refcnt == 0)) {
  			pmap_tte_deallocate(pmap, start, eva, need_strong_sync, tte_p, pt_attr_twig_level(pt_attr));
  			remove_count = 0; // pmap_tte_deallocate has flushed the TLB for us
-@@ -5070,6 +5234,7 @@ pmap_page_protect_options_with_flush_range(
+@@ -5070,6 +5232,7 @@ pmap_page_protect_options_with_flush_range(
  
  			assert(spte != tmplate);
  			write_pte_fast(pte_p, tmplate);
@@ -852,7 +850,7 @@ index 79d0bc1..259cc15 100644
  			update = true;
  			++pass1_updated;
  
-@@ -5160,6 +5325,9 @@ pmap_page_protect_options_with_flush_range(
+@@ -5160,6 +5323,9 @@ pmap_page_protect_options_with_flush_range(
  				 */
  				pte_set_was_writeable(tmplate, true);
  				write_pte_fast(pte_p, tmplate);
@@ -862,7 +860,7 @@ index 79d0bc1..259cc15 100644
  				update = true;
  				++pass1_updated;
  			} else if (pte_was_writeable(tmplate)) {
-@@ -5709,6 +5877,9 @@ pmap_protect_options_internal(
+@@ -5709,6 +5875,9 @@ pmap_protect_options_internal(
  #endif /* HAS_FEAT_XS */
  
  			write_pte_fast(pte_p, tmplate);
@@ -872,7 +870,7 @@ index 79d0bc1..259cc15 100644
  
  			if (managed) {
  				pvh_assert_locked(pai);
-@@ -5955,6 +6126,10 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
+@@ -5955,6 +6124,10 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
  
  	if (success && *old_pte != new_pte) {
  		uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
@@ -883,7 +881,7 @@ index 79d0bc1..259cc15 100644
  
  		if (pte_is_valid(*old_pte)) {
  			bool need_strong_sync = false;
-@@ -6972,6 +7147,139 @@ pmap_find_phys(
+@@ -6972,6 +7145,146 @@ pmap_find_phys(
   * @return The physical address if the translation was successful, or zero if
   *         no valid mappings were found for the given virtual address.
   */
@@ -947,17 +945,24 @@ index 79d0bc1..259cc15 100644
 +		return false;
 +	}
 +	uint64_t ap = pte & ARM_PTE_APMASK;
-+	if (ap != ARM_PTE_AP(AP_RORO) && ap != ARM_PTE_AP(AP_RWRW)) {
-+		pmap_unlock(pmap, PMAP_LOCK_SHARED);
-+		return false;
-+	}
-+	if (is_write && ap != ARM_PTE_AP(AP_RWRW)) {
-+		pmap_unlock(pmap, PMAP_LOCK_SHARED);
-+		return false;
-+	}
-+	if (is_exec && (pte & ARM_PTE_NX)) {
-+		pmap_unlock(pmap, PMAP_LOCK_SHARED);
-+		return false;
++	bool user_read = (ap == ARM_PTE_AP(AP_RORO) || ap == ARM_PTE_AP(AP_RWRW));
++	bool user_write = (ap == ARM_PTE_AP(AP_RWRW));
++	bool user_exec = !(pte & ARM_PTE_NX);
++	if (is_exec) {
++		if (!user_exec) {
++			pmap_unlock(pmap, PMAP_LOCK_SHARED);
++			return false;
++		}
++	} else if (is_write) {
++		if (!user_write) {
++			pmap_unlock(pmap, PMAP_LOCK_SHARED);
++			return false;
++		}
++	} else {
++		if (!user_read) {
++			pmap_unlock(pmap, PMAP_LOCK_SHARED);
++			return false;
++		}
 +	}
 +	pmap_paddr_t pa = pte_to_pa(pte);
 +	if (!pa_valid(pa)) {
@@ -970,9 +975,9 @@ index 79d0bc1..259cc15 100644
 +		.va = va,
 +		.pa = pa,
 +		.size = 4096,
-+		.prot = LINUX64_PROT_READ |
-+		    (ap == ARM_PTE_AP(AP_RWRW) ? LINUX64_PROT_WRITE : 0) |
-+		    (!(pte & ARM_PTE_NX) ? LINUX64_PROT_EXEC : 0),
++		.prot = (user_read ? LINUX64_PROT_READ : 0) |
++		    (user_write ? LINUX64_PROT_WRITE : 0) |
++		    (user_exec ? LINUX64_PROT_EXEC : 0),
 +	};
 +	linux64_call(LINUX64_CALL_AS_MAP, &req);
 +	__builtin_arm_dmb(DMB_ISH);
@@ -1023,7 +1028,7 @@ index 79d0bc1..259cc15 100644
  pmap_paddr_t
  kvtophys(vm_offset_t va)
  {
-@@ -8220,6 +8528,9 @@ arm_force_fast_fault_with_flush_range(
+@@ -8220,6 +8533,9 @@ arm_force_fast_fault_with_flush_range(
  				}
  			}
  			write_pte_fast(pte_p, tmplate);
@@ -1033,7 +1038,7 @@ index 79d0bc1..259cc15 100644
  		}
  
  fff_skip_pve_pass1:
-@@ -8500,6 +8811,7 @@ arm_clear_fast_fault(
+@@ -8500,6 +8816,7 @@ arm_clear_fast_fault(
  				tlb_flush_needed = true;
  			}
  			write_pte_fast(pte_p, tmplate);
@@ -1041,7 +1046,7 @@ index 79d0bc1..259cc15 100644
  			result = TRUE;
  		}
  
-@@ -8935,6 +9247,15 @@ pmap_map_cpu_windows_copy_internal(
+@@ -8935,6 +9252,15 @@ pmap_map_cpu_windows_copy_internal(
  	need_strong_sync = pte_is_xs(native_pt_attr, pte);
  #endif
  	write_pte_fast(ptep, pte);
@@ -1057,7 +1062,7 @@ index 79d0bc1..259cc15 100644
  	/*
  	 * Invalidate tlb. Cover nested cpu_copywindow_vaddr usage with the interrupted context
  	 * in pmap_unmap_cpu_windows_copy() after clearing the pte and before tlb invalidate.
-@@ -8977,6 +9298,10 @@ pmap_unmap_cpu_windows_copy_internal(
+@@ -8977,6 +9303,10 @@ pmap_unmap_cpu_windows_copy_internal(
  	__builtin_arm_dsb(DSB_SY);
  	ptep = pmap_pte(kernel_pmap, cpu_copywindow_vaddr);
  	write_pte_strong(ptep, ARM_PTE_EMPTY);
@@ -1068,7 +1073,7 @@ index 79d0bc1..259cc15 100644
  	PMAP_UPDATE_TLBS(kernel_pmap, cpu_copywindow_vaddr, cpu_copywindow_vaddr + PAGE_SIZE, pmap_cpu_data->copywindow_strong_sync[index], true);
  }
  
-@@ -9159,6 +9484,11 @@ pmap_set_nested_internal(
+@@ -9159,6 +9489,11 @@ pmap_set_nested_internal(
  	}
  
  	pmap_get_pt_ops(pmap)->free_id(pmap);
@@ -1080,7 +1085,7 @@ index 79d0bc1..259cc15 100644
  }
  
  __mockable void
-@@ -10442,6 +10772,10 @@ unnest_subord_done:
+@@ -10442,6 +10777,10 @@ unnest_subord_done:
  	}
  
  	FLUSH_PTE_STRONG();
@@ -1091,7 +1096,7 @@ index 79d0bc1..259cc15 100644
  	PMAP_UPDATE_TLBS(grand, start, addr, false, false);
  
  	pmap_unlock(grand, PMAP_LOCK_EXCLUSIVE);
-@@ -12980,6 +13314,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
+@@ -12980,6 +13319,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
  #if __ARM_MIXED_PAGE_SIZE__
  	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
  	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
@@ -1100,7 +1105,7 @@ index 79d0bc1..259cc15 100644
  #else
  	return 64 - T0SZ_BOOT;
  #endif
-@@ -14853,7 +15189,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+@@ -14853,7 +15194,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
  
  		/* Disable PAN; pmap shouldn't be the kernel pmap. */
  #if __ARM_PAN_AVAILABLE__
@@ -1111,7 +1116,7 @@ index 79d0bc1..259cc15 100644
  #endif /* __ARM_PAN_AVAILABLE__ */
  	}
  
-@@ -14872,7 +15210,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+@@ -14872,7 +15215,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
  
  	if (pmap != NULL) {
  #if __ARM_PAN_AVAILABLE__
@@ -4256,7 +4261,7 @@ index 4f2045c..7dbf594 100644
  
  #pragma mark free
 diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
-index fd9e108..ab87dc1 100644
+index fd9e108..c700ba5 100644
 --- a/osfmk/vm/vm_map.c
 +++ b/osfmk/vm/vm_map.c
 @@ -74,6 +74,7 @@
@@ -4315,14 +4320,13 @@ index fd9e108..ab87dc1 100644
  	vm_map_found_entry_sh_unlock(ctx, &map);
  
  	was_nonvolatile = (object->purgable == VM_PURGABLE_NONVOLATILE);
-@@ -18198,6 +18219,13 @@ vm_map_purgable_control(
+@@ -18198,6 +18219,12 @@ vm_map_purgable_control(
  
  	vm_object_unlock(object);
  
 +	if (linux64_el0 && kr == KERN_SUCCESS && map->pmap == kernel_pmap &&
 +	    control == VM_PURGABLE_SET_STATE &&
-+	    (req_state & VM_PURGABLE_STATE_MASK) == VM_PURGABLE_NONVOLATILE &&
-+	    (*state & VM_PURGABLE_STATE_MASK) == VM_PURGABLE_EMPTY) {
++	    (req_state & VM_PURGABLE_STATE_MASK) == VM_PURGABLE_NONVOLATILE) {
 +		linux64_el0_prefault_kernel_map(map, pf_start, pf_size, VM_PROT_DEFAULT);
 +	}
 +
@@ -4411,3 +4415,53 @@ index fea9411..cdccb1f 100644
  	if (!disable_serial_output && !disable_kprintf_output) {
  		va_start(listp, fmt);
  		va_copy(listp2, listp);
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 2bf34ab..69bf95f 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8491,10 +8491,21 @@ execargs_lock_sleep(void)
+ static kern_return_t
+ execargs_purgeable_allocate(char **execarg_address)
+ {
++	extern unsigned int linux64_el0;
+ 	mach_vm_offset_t addr = 0;
+ 	kern_return_t kr = mach_vm_allocate_kernel(bsd_pageable_map, &addr,
+ 	    BSD_PAGEABLE_SIZE_PER_EXEC,
+-	    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmf_purgeable = true));
++	    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmf_purgeable = !linux64_el0));
++	if (kr == KERN_SUCCESS && linux64_el0) {
++		kr = vm_map_wire_kernel(bsd_pageable_map, addr,
++		    addr + BSD_PAGEABLE_SIZE_PER_EXEC,
++		    VM_PROT_READ | VM_PROT_WRITE, VM_KERN_MEMORY_BSD, FALSE);
++		if (kr != KERN_SUCCESS) {
++			(void)mach_vm_deallocate_kernel(bsd_pageable_map, addr,
++			    BSD_PAGEABLE_SIZE_PER_EXEC);
++			addr = 0;
++		}
++	}
+ 	*execarg_address = (char *)addr;
+ 	assert(kr == KERN_SUCCESS);
+ 	return kr;
+@@ -8503,6 +8514,10 @@ execargs_purgeable_allocate(char **execarg_address)
+ static kern_return_t
+ execargs_purgeable_reference(void *execarg_address)
+ {
++	extern unsigned int linux64_el0;
++	if (linux64_el0) {
++		return KERN_SUCCESS;
++	}
+ 	int state = VM_PURGABLE_NONVOLATILE;
+ 	kern_return_t kr = vm_map_purgable_control(bsd_pageable_map,
+ 	    (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
+@@ -8514,6 +8529,10 @@ execargs_purgeable_reference(void *execarg_address)
+ static kern_return_t
+ execargs_purgeable_volatilize(void *execarg_address)
+ {
++	extern unsigned int linux64_el0;
++	if (linux64_el0) {
++		return KERN_SUCCESS;
++	}
+ 	int state = VM_PURGABLE_VOLATILE | VM_PURGABLE_ORDERING_OBSOLETE;
+ 	kern_return_t kr;
+ 	kr = vm_map_purgable_control(bsd_pageable_map,
