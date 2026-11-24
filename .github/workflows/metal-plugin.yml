@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Build gpu/xnu-cpu-metal (XnuCpuMetal.bundle, arm64 + arm64e, lavapipe only) on a macOS runner; the arm64e LLVM is cached.
+# Build gpu/xnu-cpu-metal (XnuCpuMetal.bundle, arm64 + arm64e, with lavapipe and the Venus driver of gpu/venus) on a macOS
+# runner; the arm64e LLVM is cached.
 name: metal-plugin
 on:
   workflow_dispatch:
@@ -8,6 +9,8 @@ on:
     paths:
       - .github/workflows/metal-plugin.yml
       - gpu/xnu-cpu-metal/**
+      - gpu/venus/**
+      - gpu/xnu-drm/**
 jobs:
   bundle:
     runs-on: macos-latest
@@ -66,6 +69,10 @@ jobs:
         run: scripts/build-lavapipe-arm64e.sh
       - name: metal2vulkan bridge (arm64e)
         run: scripts/build-m2v-arm64e.sh
+      - name: Venus driver (arm64, arm64e)
+        run: |
+          W="$PWD/build/venus-darwin" bash ../venus/build-darwin.sh
+          echo "VENUS_DYLIB=$PWD/build/venus-darwin/out/lib/libvulkan_virtio.dylib" >> "$GITHUB_ENV"
       - name: Bundle
         run: |
           scripts/build-bundle-universal.sh
@@ -75,6 +82,7 @@ jobs:
               if nm -arch $a -u "$f" | grep -E '^_spv'; then echo "$f ($a): undefined SPIRV-Tools symbols"; exit 1; fi
             done
           done
+          lipo -info dist/XnuCpuMetal.bundle/Contents/Frameworks/libvulkan_virtio.dylib
           tar -C dist -czf "$RUNNER_TEMP/XnuCpuMetal.bundle.tar.gz" XnuCpuMetal.bundle
           shasum -a 256 "$RUNNER_TEMP/XnuCpuMetal.bundle.tar.gz"
       - uses: actions/upload-artifact@v4
