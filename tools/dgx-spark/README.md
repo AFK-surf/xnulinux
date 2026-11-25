@@ -37,6 +37,9 @@ NVIDIA's driver (580) on this machine, measured natively:
 - `vkCreateDevice` takes 0.33 s with one queue and 0.15 s more for each further one (16 queues: 2.6 s; destroying
   them 0.6 s). The Venus driver offers one queue of a family (`gpu/venus/patches/0007`): a Metal device is made in
   every application, with its main thread waiting.
+- A host image copy (`VK_EXT_host_image_copy`) maps the whole memory object the image is in, 64 MB in 13 ms, and
+  unmaps it again. The Metal layer read every frame WindowServer drew back that way: 9 to 23 frames a second with the
+  GPU 2% busy. The Venus driver does not offer the feature (`gpu/venus/patches/0008`): about 50.
 
 ## In a KVM guest
 
