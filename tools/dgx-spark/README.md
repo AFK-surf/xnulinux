@@ -1,26 +1,36 @@
-# xnulinux on an NVIDIA DGX Spark (GB10), without a Mac
+# xnulinux on an NVIDIA DGX Spark (GB10)
 
-The scripts as they ran, except that the vmapple stack's locations now come from the environment (not rerun since):
-work paths (`~/xnuvm`, `~/xnuhost`) and volume UUIDs are that machine's. Details: `NOTES.md`.
+What was set on that machine (Ubuntu 24.04.5, Linux `7.0.0-1025-nvidia`), bare metal and in a KVM guest. The addresses
+and CPU numbers are that machine's.
 
-- `guest/`: an arm64 Ubuntu guest under KVM (QEMU from a container); `hcmd.sh` runs commands on the hosted console.
-- `disk/`: the system disk, in place of `scripts/mk-macvm-disk.sh`, in this order:
-  `mac-restore.sh`, `trustcache-from-ipsw.py`, `hboot.sh` + `1-cryptex.cmds`, `tboot.sh` + `2-tar-data.cmds`,
-  `overlay.py`, `hboot.sh` + `3-new-data.cmds`, `apsb.py IMAGE NEW_UUID --apply`.
-  A vmapple restore encrypts the Data volume with that VM's keys, so a new unencrypted one is made.
-- `qemu/`: `QEMU_VMAPPLE_LP_SIP0=<flags>` turns SIP off in a vmapple guest (a patch on the vmapple QEMU in use).
+## Bare metal
 
-Bare metal: Secure Boot off; `kvm-arm.mode=nvhe mem=112G nokaslr`;
-`insmod fki.ko carve_base=0x1E00000000 carve_mb=8156 cpu_list=5,6,7,8,9`; NetworkManager off `xnu0`;
-`/etc/xnulinux.conf`: `GPU=off CPUS=4`.
+- Secure Boot off: with it the kernel is locked down, which refuses unsigned modules and the kprobes fki needs.
+- Kernel command line: `kvm-arm.mode=nvhe mem=112G nokaslr log_buf_len=128M`. `nvhe` keeps Linux at EL1; `mem=` leaves
+  the RAM above it for the carve-out; with `nokaslr` the kernel image stays out of it.
+- `insmod fki.ko carve_base=0x1E00000000 carve_mb=8156 cpu_list=5,6,7,8,9`. The NVMe has 15 I/O queues for 20 CPUs, so
+  some CPUs share a queue's interrupt, and two XNU CPUs on such a pair deadlock: `cpu_list` gives XNU CPUs that each
+  have a queue of their own (here the X925 cores; the one after the last XNU CPU is the monitor thread's).
+- NetworkManager takes `xnu0` and removes its address unless told not to:
+  `unmanaged-devices=interface-name:xnu0` in `/etc/NetworkManager/conf.d/`.
+- The counter runs at 1 GHz: xnu.ko has XNU scale it to 24 MHz, which Apple's user space assumes.
 
-- `gpu/`: `build-virglrenderer.sh` installs virglrenderer 1.2.0 with Venus, which `gpu/xnu-drm/xnudrmd` then serves the
-  hosted system's Vulkan from (NVIDIA's render node is not virtio-gpu). Written and tested off the machine only
-  (`make -C gpu/xnu-drm test-virgl`); not yet run on NVIDIA's driver.
+## GPU
 
-With `GPU=auto` and the Venus driver in `/Library/GPUBundles/XnuCpuMetal.bundle` Metal and WindowServer run on the GB10
-(`Virtio-GPU Venus (NVIDIA GB10)`), the Dock with its icons. The counter here runs at 1 GHz: xnu.ko has XNU scale it to
-Apple's 24 MHz (user space assumes it).
+The render node is NVIDIA's driver, not virtio-gpu, so `xnudrmd` serves the hosted system's Venus driver from
+virglrenderer on the machine's Vulkan driver (`gpu/xnu-drm/xnudrmd_virgl.c`). Ubuntu 24.04's virglrenderer 1.0.0 fails
+`vkCreateDevice` there; `gpu/build-virglrenderer.sh` builds and installs 1.2.0 with Venus. With `GPU=auto` and the
+Venus driver in `/Library/GPUBundles/XnuCpuMetal.bundle`, Metal and WindowServer run on `Virtio-GPU Venus (NVIDIA GB10)`.
 
-Open: without a GPU `iconservicesagent` crashes in lavapipe; stopping a run takes minutes; one boot in three takes the
-leftover encrypted Data volume for the root device.
+## In a KVM guest
+
+`guest/`: an arm64 Ubuntu guest under KVM, QEMU run from a container (`Dockerfile`, `run-vm.sh`, `vm.sh`); KVM on the
+GB10 gives the guest pointer authentication. `hcmd.sh` runs commands in the hosted system's console shell and returns
+their output over the `xnu0` link, for when the kernel log is flooded.
+
+## Open
+
+- Without the GPU bridge `iconservicesagent` crashes in lavapipe (a JIT-compiled fragment shader reads a missing
+  sampler entry); the Dock then has no icons.
+- A system disk restored by a virtual Mac has its Data volume encrypted with that VM's keys: the hosted system cannot
+  open it, and the volume has to be made again unencrypted.
