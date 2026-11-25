@@ -3557,7 +3557,7 @@ index 13d2819..71b1e19 100644
  
  	mrs		x1, MPIDR_EL1
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index f456377..0d5795b 100644
+index f456377..805c3b4 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
 @@ -27,6 +27,7 @@
@@ -3658,7 +3658,21 @@ index f456377..0d5795b 100644
  	MRS(aidr_el1_value, "AIDR_EL1");
  
  #ifdef APPLEAVALANCHE
-@@ -1365,9 +1395,9 @@ ml_parse_cpu_topology(void)
+@@ -934,6 +964,13 @@ halt_all_cpus(boolean_t reboot)
+ 		printf("CPU halted\n");
+ 		PEHaltRestart(kPEHaltCPU);
+ 	}
++	if (linux64_hook) {
++		/*
++		 * LINUX64 (xnulinux): hosted, spinning here keeps this Linux CPU with its interrupts masked for good (Linux
++		 * soft-locks). The host ends the run instead and says whether the system asked for a restart.
++		 */
++		linux64_call2(LINUX64_CALL_HALT, reboot ? 1 : 0, 0);
++	}
+ 	while (1) {
+ 		;
+ 	}
+@@ -1365,9 +1402,9 @@ ml_parse_cpu_topology(void)
  	    ((boot_cpu->cluster_id << MACHDEP_TPIDR_CLUSTERID_SHIFT) & MACHDEP_TPIDR_CLUSTERID_MASK);
  	assert(((tpidr_el0 & MACHDEP_TPIDR_CPUNUM_MASK) >> MACHDEP_TPIDR_CPUNUM_SHIFT) == boot_cpu->cpu_id);
  	assert(((tpidr_el0 & MACHDEP_TPIDR_CLUSTERID_MASK) >> MACHDEP_TPIDR_CLUSTERID_SHIFT) == boot_cpu->cluster_id);
@@ -3671,7 +3685,7 @@ index f456377..0d5795b 100644
  }
  
  const ml_topology_info_t *
-@@ -1460,8 +1490,13 @@ ml_get_cpu_number_local(void)
+@@ -1460,8 +1497,13 @@ ml_get_cpu_number_local(void)
  	uint64_t mpidr_el1_value = 0;
  	unsigned cpu_id;
  
@@ -3687,7 +3701,7 @@ index f456377..0d5795b 100644
  	cpu_id = ml_get_cpu_number((uint32_t)mpidr_el1_value);
  
  	assert(cpu_id <= (unsigned int)ml_get_max_cpu_number());
-@@ -1475,8 +1510,13 @@ ml_get_cluster_number_local()
+@@ -1475,8 +1517,13 @@ ml_get_cluster_number_local()
  	uint64_t mpidr_el1_value = 0;
  	unsigned cluster_id;
  
@@ -3703,7 +3717,7 @@ index f456377..0d5795b 100644
  	cluster_id = ml_get_cluster_number((uint32_t)mpidr_el1_value);
  
  	assert(cluster_id <= (unsigned int)ml_get_max_cluster_number());
-@@ -2529,6 +2569,12 @@ ml_set_decrementer(uint32_t dec_value)
+@@ -2529,6 +2576,12 @@ ml_set_decrementer(uint32_t dec_value)
  		}
  	}
  
@@ -3716,7 +3730,7 @@ index f456377..0d5795b 100644
  	if (cdp->cpu_set_decrementer_func) {
  		cdp->cpu_set_decrementer_func((uint32_t)counter_value);
  	} else {
-@@ -2657,6 +2703,9 @@ ml_get_timebase_entropy(void)
+@@ -2657,6 +2710,9 @@ ml_get_timebase_entropy(void)
  uint32_t
  ml_get_decrementer(void)
  {
@@ -3726,7 +3740,7 @@ index f456377..0d5795b 100644
  	cpu_data_t *cdp = getCpuDatap();
  	uint32_t dec;
  
-@@ -2683,6 +2732,9 @@ ml_get_decrementer(void)
+@@ -2683,6 +2739,9 @@ ml_get_decrementer(void)
  boolean_t
  ml_get_timer_pending(void)
  {
@@ -3736,7 +3750,7 @@ index f456377..0d5795b 100644
  	uint64_t cntv_ctl = __builtin_arm_rsr64(KERNEL_CNTV_CTL_EL0);
  	return ((cntv_ctl & CNTV_CTL_EL0_ISTATUS) != 0) ? TRUE : FALSE;
  }
-@@ -2729,6 +2781,9 @@ platform_syscall(arm_saved_state_t *state)
+@@ -2729,6 +2788,9 @@ platform_syscall(arm_saved_state_t *state)
  static void
  _enable_timebase_event_stream(uint32_t bit_index)
  {
@@ -3746,7 +3760,7 @@ index f456377..0d5795b 100644
  	if (bit_index >= 64) {
  		panic("%s: invalid bit index (%u)", __FUNCTION__, bit_index);
  	}
-@@ -2764,6 +2819,9 @@ _enable_timebase_event_stream(uint32_t bit_index)
+@@ -2764,6 +2826,9 @@ _enable_timebase_event_stream(uint32_t bit_index)
  static void
  _enable_virtual_timer(void)
  {
@@ -3756,7 +3770,7 @@ index f456377..0d5795b 100644
  	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
  
  	__builtin_arm_wsr64(KERNEL_CNTV_CTL_EL0, cntvctl);
-@@ -3381,10 +3439,14 @@ ml_task_post_signature_processing_hook(__unused task_t task)
+@@ -3381,10 +3446,14 @@ ml_task_post_signature_processing_hook(__unused task_t task)
  	uint32_t flags = thread->machine.arm_machine_flags;
  
  	if (flags & (ARM_MACHINE_THREAD_PRESERVE_X18_SAVE | ARM_MACHINE_THREAD_PRESERVE_X18_INITIAL)) {

@@ -129,8 +129,8 @@ done
 echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB_DUMP"
 [ $WAIT = 1 ] || exit 0
 
-# --wait: until the run ends (insmod returns), then keep its kernel log and say how it ended: 0 a halt or a stop asked for,
-# 2 an XNU panic, 3 the run ended otherwise
+# --wait: until the run ends (insmod returns), then keep its kernel log and say how it ended: 0 a halt (from inside, or
+# a stop asked for), 2 an XNU panic, 4 a restart the hosted system asked for, 3 the run ended otherwise
 collect() {	# the run's kernel log, kept; the status says how it ended
   local LOGDIR=/var/log/xnulinux LOG
   # insmod has returned but xnu.ko stays loaded after a run that ended by itself (a panic, a halt): unload it, or the
@@ -143,6 +143,10 @@ collect() {	# the run's kernel log, kept; the status says how it ended
     sudo tee "$LOG" >/dev/null
   ls -1t "$LOGDIR"/run-*.log | tail -n +21 | xargs -r sudo rm -f	# the last 20 runs
   if grep -aq "XNU panic" "$LOG"; then echo "the hosted system panicked: $LOG" >&2; return 2; fi
+  # shut down from inside (shutdown -h, the Apple menu): a halt is a clean end; a restart ends with 4 for systemd to start it again
+  # (checked before the stop: the other CPUs log "run stopped by the host" as they leave after it)
+  if grep -aq "xnu: the hosted system halted" "$LOG"; then echo "the hosted system shut down: $LOG"; return 0; fi
+  if grep -aq "xnu: the hosted system asked for a restart" "$LOG"; then echo "the hosted system restarts: $LOG"; return 4; fi
   if [ "${1:-}" = stopped ] || grep -aq "run stopped by the host" "$LOG"; then echo "the hosted system stopped: $LOG"; return 0; fi
   echo "the run ended: $LOG" >&2; return 3
 }
