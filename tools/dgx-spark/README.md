@@ -14,6 +14,9 @@ and CPU numbers are that machine's.
 - NetworkManager takes `xnu0` and removes its address unless told not to:
   `unmanaged-devices=interface-name:xnu0` in `/etc/NetworkManager/conf.d/`.
 - The counter runs at 1 GHz: xnu.ko has XNU scale it to 24 MHz, which Apple's user space assumes.
+- `xnulinux-boot.sh` keeps XNU's CPUs out of Linux's deep idle state (`LPI-1`, 133 us nominal): a hosted CPU with
+  nothing to run sleeps in Linux, and a thread woken on one took 0.6 ms on average (144 ms at worst) to run, 19 us
+  without it.
 
 ## GPU
 
@@ -25,6 +28,15 @@ Venus driver in `/Library/GPUBundles/XnuCpuMetal.bundle`, Metal and WindowServer
 The backend's shared memory is Linux's 4 KB pages, not contiguous, and XnuDrm cannot map those into a task with 16 KB VM
 pages (`map handle ...: 0xe00002bd`; every client then falls back to the software renderer): `xnulinux-boot.sh` starts
 XNU with `vm16k=0` when xnudrmd serves this backend.
+
+NVIDIA's driver (580) on this machine, measured natively:
+
+- One process gets about 512 open device files and a context with a device holds 10 to 75, so the render server runs
+  a process for each context (`-Drender-server-worker=process`). With every context in one process `vkCreateDevice`
+  failed from about the twentieth client on and the Metal layer took the next device, the host's llvmpipe.
+- `vkCreateDevice` takes 0.33 s with one queue and 0.15 s more for each further one (16 queues: 2.6 s; destroying
+  them 0.6 s). The Venus driver offers one queue of a family (`gpu/venus/patches/0007`): a Metal device is made in
+  every application, with its main thread waiting.
 
 ## In a KVM guest
 
