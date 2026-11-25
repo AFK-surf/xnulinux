@@ -38,7 +38,7 @@ MAC_CONF=${MAC_CONF:-/var/tmp/mac.conf}	# the disk's UUIDs: mk-macvm-disk.sh's, 
 DISK=${DISK:-/var/tmp/mac.img}; RAM_MB=${RAM_MB:-7900}; GPU=${GPU:-auto}; CPUS=${CPUS:-1}
 CONSOLE_IN=${CONSOLE_IN:-/var/tmp/console-in}; INPUT_IN=${INPUT_IN:-/var/tmp/xnu-input}; FB_DUMP=${FB_DUMP:-/var/tmp/xnu-fb.raw}
 KEYSTORE=${KEYSTORE:-/var/tmp/xnu-keystore.bin}; TRUSTCACHE=${TRUSTCACHE-xnu/trustcache-mac.bin}; IMAGE=${IMAGE:-xnu/kc.bin}
-BOOTARGS=${BOOTARGS:-amfi_get_out_of_my_way=1 lp-sip0=2050}
+BOOTARGS=${BOOTARGS:-amfi_get_out_of_my_way=1 lp-sip0=2050 bt-transport-override=10}
 : "${ROOT_UUID:?no ROOT_UUID (/var/tmp/mac.conf from mk-macvm-disk.sh)}" "${BOOT_UUID:?no BOOT_UUID}"
 lsmod | grep -q '^xnu ' && { echo "xnu.ko is loaded: a hosted system is running (sudo rmmod xnu first)" >&2; exit 1; }
 
