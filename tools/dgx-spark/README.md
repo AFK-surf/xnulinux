@@ -34,6 +34,10 @@ NVIDIA's driver (580) on this machine, measured natively:
 - One process gets about 512 open device files and a context with a device holds 10 to 75, so the render server runs
   a process for each context (`-Drender-server-worker=process`). With every context in one process `vkCreateDevice`
   failed from about the twentieth client on and the Metal layer took the next device, the host's llvmpipe.
+  Memory, with 24 contexts (a desktop after login): 4.7 GB in all as PSS, about 190 MB a process (2.7 GB anonymous,
+  2.0 GB mapped files). The RSS figures add up to 9.4 GB (about 350 MB a process, 610 MB for WindowServer's) because
+  each counts the driver's libraries again. One process with about 20 contexts as threads was 3.5 to 4.9 GB. The
+  contexts hold 4.6 GB of GPU memory besides, either way.
 - `vkCreateDevice` takes 0.33 s with one queue and 0.15 s more for each further one (16 queues: 2.6 s; destroying
   them 0.6 s). The Venus driver offers one queue of a family (`gpu/venus/patches/0007`): a Metal device is made in
   every application, with its main thread waiting.
