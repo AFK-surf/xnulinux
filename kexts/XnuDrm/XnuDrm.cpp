@@ -146,8 +146,9 @@ IOReturn AGXDeviceUserClient::doMap(IOExternalMethodArguments *a)
 	long n = hostcall(sizeof(*h));
 	xnudrm_hdr *r = (xnudrm_hdr *)gOut;
 	if (n < (long)sizeof(xnudrm_hdr) || r->status) {
+		int rstatus = (n >= (long)sizeof(xnudrm_hdr)) ? r->status : 0;
 		IOLockUnlock(gCallLock);
-		IOLog("XnuDrm: map of handle %llu failed (%ld, %d)\n", handle, n, n < (long)sizeof(xnudrm_hdr) ? 0 : r->status);
+		IOLog("XnuDrm: map of handle %llu failed (%ld, %d)\n", handle, n, rstatus);
 		return kIOReturnNoMemory;
 	}
 	uint64_t id = r->arg0;

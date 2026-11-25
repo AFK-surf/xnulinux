@@ -1112,26 +1112,25 @@ static void fki_high_unmap_km(struct fki_kmem *km, unsigned long va, unsigned lo
 			struct fki_high_txn *txn = fki_high_txn_find_locked(km, cur_va, &idx);
 
 			if (txn) {
-				void *old = xa_load(&km->dyn_slots, vpn);
+				if (txn->pages[idx].stashed) {
+					void *old = xa_load(&km->dyn_slots, vpn);
 
-				if (!txn->pages[idx].stashed) {
 					if (old) {
 						unsigned long old_slot = fki_as_entry_cptr(old);
 
-						if (old_slot && l4h_page_unmap(old_slot) == 0) {
-							txn->pages[idx].cptr = old_slot;
-							txn->pages[idx].pfn = fki_as_entry_pfn(old);
-							txn->pages[idx].prot = (u8)fki_as_entry_prot(old);
-							txn->pages[idx].stashed = true;
-							xa_store(&km->dyn_slots, vpn, XA_ZERO_ENTRY, GFP_ATOMIC);
-						}
+						if (old_slot)
+							l4h_slot_delete(old_slot);
+						xa_store(&km->dyn_slots, vpn, XA_ZERO_ENTRY, GFP_ATOMIC);
 					}
-				} else if (old) {
-					unsigned long old_slot = fki_as_entry_cptr(old);
+				} else {
+					void *old = xa_erase(&km->dyn_slots, vpn);
 
-					if (old_slot)
-						l4h_slot_delete(old_slot);
-					xa_store(&km->dyn_slots, vpn, XA_ZERO_ENTRY, GFP_ATOMIC);
+					if (old) {
+						unsigned long old_slot = fki_as_entry_cptr(old);
+
+						if (old_slot)
+							l4h_slot_delete(old_slot);
+					}
 				}
 			} else {
 				void *old = xa_erase(&km->dyn_slots, vpn);
