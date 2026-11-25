@@ -760,6 +760,8 @@ struct fki_hm_page {
 	u8 kind;
 };
 
+static void fki_high_unmap_km(struct fki_kmem *km, unsigned long va, unsigned long size);
+
 int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 {
 	struct fki_kmem *km = fki_kmem_get();
@@ -800,8 +802,8 @@ int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 		return -EBUSY;
 	}
 	if (!eff_lprot) {
+		fki_high_unmap_km(km, va, size);
 		fki_kmem_put(km);
-		fki_high_unmap(va, size);
 		return 0;
 	}
 
@@ -972,45 +974,55 @@ out_free:
 }
 EXPORT_SYMBOL(fki_high_map);
 
-void fki_high_unmap(unsigned long va, unsigned long size)
+static void fki_high_unmap_km(struct fki_kmem *km, unsigned long va, unsigned long size)
 {
-	struct fki_kmem *km = fki_kmem_get();
-	unsigned long flags, off, va_end, km_va_end, ap_lo, ap_hi;
+	unsigned long flags, va_end, km_va_end, ap_lo, ap_hi;
+	unsigned long lo[2], hi[2];
+	int i;
 
-	if (!km || !size) {
-		fki_kmem_put(km);
+	if (!km || !size || ((va | size) & ~PAGE_MASK))
 		return;
-	}
-	if ((va | size) & ~PAGE_MASK) {
-		fki_kmem_put(km);
-		return;
-	}
 	if (check_add_overflow(va, size, &va_end) ||
-	    check_add_overflow(km->high_va, km->size, &km_va_end)) {
-		fki_kmem_put(km);
+	    check_add_overflow(km->high_va, km->size, &km_va_end))
 		return;
-	}
 	ap_lo = round_down(km->high_va, SZ_2M);
 	ap_hi = round_up(km_va_end, SZ_2M);
+	if (ap_hi < km_va_end)
+		ap_hi = ULONG_MAX;
+
+	lo[0] = va;
+	hi[0] = min(va_end, ap_lo);
+	lo[1] = max(va, ap_hi);
+	hi[1] = va_end;
+	if (lo[0] >= hi[0] && lo[1] >= hi[1])
+		return;
+
 	spin_lock_irqsave(&km->lock, flags);
-	for (off = 0; off < size; off += PAGE_SIZE) {
-		unsigned long cur_va = va + off;
-		unsigned long vpn;
-		void *old;
+	for (i = 0; i < 2; i++) {
+		unsigned long cur_va;
 
-		if (cur_va >= ap_lo && cur_va < ap_hi)
-			continue;
-		vpn = cur_va >> PAGE_SHIFT;
-		old = xa_erase(&km->dyn_slots, vpn);
+		for (cur_va = lo[i]; cur_va < hi[i]; cur_va += PAGE_SIZE) {
+			unsigned long vpn = cur_va >> PAGE_SHIFT;
+			void *old = xa_erase(&km->dyn_slots, vpn);
 
-		if (old) {
-			unsigned long old_slot = fki_as_entry_cptr(old);
+			if (old) {
+				unsigned long old_slot = fki_as_entry_cptr(old);
 
-			if (old_slot)
-				l4h_slot_delete(old_slot);
+				if (old_slot)
+					l4h_slot_delete(old_slot);
+			}
 		}
 	}
 	spin_unlock_irqrestore(&km->lock, flags);
+}
+
+void fki_high_unmap(unsigned long va, unsigned long size)
+{
+	struct fki_kmem *km = fki_kmem_get();
+
+	if (!km)
+		return;
+	fki_high_unmap_km(km, va, size);
 	fki_kmem_put(km);
 }
 EXPORT_SYMBOL(fki_high_unmap);
@@ -1267,13 +1279,20 @@ static void fki_vs_pool_fini(void)
 		return;
 	for (i = 0; i < fki_vs_cap; i++) {
 		struct fki_vs_slot *slot = &fki_vs_pool[i];
+		struct fki_as *owner = slot->owner;
 
-		if (slot->owner) {
-			slot->owner->vs_idx = -1;
-			slot->owner->gen++;
+		if (owner) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&owner->lock, flags);
+			WRITE_ONCE(owner->vs_idx, -1);
+			owner->gen++;
+			spin_unlock_irqrestore(&owner->lock, flags);
 			slot->owner = NULL;
 		}
 		fki_vs_slot_reset(slot);
+		if (owner)
+			fki_as_put(owner);
 		if (slot->root)
 			l4h_vspace_put(slot->root);
 	}
@@ -1343,22 +1362,27 @@ void fki_as_destroy(void *as_ptr)
 	struct fki_kmem *km;
 	struct fki_vs_slot *slot = NULL;
 	unsigned long flags;
-	bool drop_owner;
+	bool drop_owner, drop_slot_ref = false;
 
 	if (!as)
 		return;
 	km = fki_kmem_get();
+	if (!km)
+		return;
 	spin_lock_irqsave(&fki_vs_lock, flags);
 	drop_owner = !list_empty(&as->kmem_node);
 	if (drop_owner)
 		list_del_init(&as->kmem_node);
 	spin_lock(&as->lock);
 	WRITE_ONCE(as->dead, true);
-	if (km && as->vs_idx >= 0 && fki_vs_pool) {
+	if (as->vs_idx >= 0 && fki_vs_pool) {
 		slot = &fki_vs_pool[as->vs_idx];
 		WRITE_ONCE(as->vs_idx, -1);
 		as->gen++;
-		slot->owner = NULL;
+		if (slot->owner == as) {
+			slot->owner = NULL;
+			drop_slot_ref = true;
+		}
 		list_del_init(&slot->lru);
 		fki_vs_resetting++;
 	}
@@ -1377,6 +1401,8 @@ void fki_as_destroy(void *as_ptr)
 		spin_unlock_irqrestore(&fki_vs_lock, flags);
 	}
 	fki_kmem_put(km);
+	if (drop_slot_ref)
+		fki_as_put(as);
 	if (drop_owner)
 		fki_as_put(as);
 }
@@ -1406,6 +1432,9 @@ static int map_user_frame(struct fki_vs_slot *slot, unsigned long cptr,
 	}
 	return err ? -EIO : 0;
 }
+
+static void fki_as_unmap_km(struct fki_kmem *km, struct fki_as *as,
+			    unsigned long va, unsigned long size);
 
 int fki_as_map(void *as_ptr, unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 {
@@ -1442,8 +1471,8 @@ int fki_as_map(void *as_ptr, unsigned long va, fki_u64 xpa, unsigned long size, 
 	}
 	lprot = fki_eff_prot(prot_to_l4h(prot));
 	if (!lprot) {
+		fki_as_unmap_km(km, as, va, size);
 		fki_kmem_put(km);
-		fki_as_unmap(as, va, size);
 		return 0;
 	}
 
@@ -1537,28 +1566,22 @@ static void fki_vs_slot_unmap_range(struct fki_vs_slot *slot,
 	}
 }
 
-void fki_as_unmap(void *as_ptr, unsigned long va, unsigned long size)
+static void fki_as_unmap_km(struct fki_kmem *km, struct fki_as *as,
+			    unsigned long va, unsigned long size)
 {
-	struct fki_as *as = as_ptr;
-	struct fki_kmem *km;
 	unsigned long flags, va_end;
 
-	if (!size)
+	if (!km || !size)
 		return;
 	if ((va | size) & ~PAGE_MASK)
 		return;
 	if (check_add_overflow(va, size, &va_end))
 		return;
-	km = fki_kmem_get();
-	if (!km)
-		return;
 	if (!as) {
 		int i;
 
-		if (!fki_vs_pool) {
-			fki_kmem_put(km);
+		if (!fki_vs_pool)
 			return;
-		}
 		spin_lock_irqsave(&fki_vs_lock, flags);
 		for (i = 0; i < fki_vs_cap; i++) {
 			struct fki_vs_slot *slot = &fki_vs_pool[i];
@@ -1571,13 +1594,21 @@ void fki_as_unmap(void *as_ptr, unsigned long va, unsigned long size)
 			spin_unlock(&owner->lock);
 		}
 		spin_unlock_irqrestore(&fki_vs_lock, flags);
-		fki_kmem_put(km);
 		return;
 	}
 	spin_lock_irqsave(&as->lock, flags);
 	if (as->vs_idx >= 0 && fki_vs_pool)
 		fki_vs_slot_unmap_range(&fki_vs_pool[as->vs_idx], va, size);
 	spin_unlock_irqrestore(&as->lock, flags);
+}
+
+void fki_as_unmap(void *as_ptr, unsigned long va, unsigned long size)
+{
+	struct fki_kmem *km = fki_kmem_get();
+
+	if (!km)
+		return;
+	fki_as_unmap_km(km, as_ptr, va, size);
 	fki_kmem_put(km);
 }
 EXPORT_SYMBOL(fki_as_unmap);
@@ -1631,6 +1662,12 @@ static struct fki_vs_slot *fki_vs_activate(struct fki_as *as, u64 *gen_out)
 			slot = list_first_entry(&fki_vs_free, struct fki_vs_slot, lru);
 			list_del_init(&slot->lru);
 			spin_lock(&as->lock);
+			if (!fki_as_get(as)) {
+				spin_unlock(&as->lock);
+				list_add(&slot->lru, &fki_vs_free);
+				spin_unlock_irqrestore(&fki_vs_lock, flags);
+				return NULL;
+			}
 			slot->owner = as;
 			as->gen = (u64)atomic64_inc_return(&fki_vs_gen);
 			*gen_out = as->gen;
@@ -1669,6 +1706,7 @@ static struct fki_vs_slot *fki_vs_activate(struct fki_as *as, u64 *gen_out)
 			spin_unlock(&vas->lock);
 			spin_unlock_irqrestore(&fki_vs_lock, flags);
 
+			fki_as_put(vas);
 			fki_vs_slot_reset(victim);
 
 			spin_lock_irqsave(&fki_vs_lock, flags);

@@ -887,7 +887,7 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		logkv("xnu: probe Mach-O magic", *(volatile unsigned int *)diag_va[1]);
 		logkv("xnu: probe boot args Version", ((volatile struct boot_args_v2 *)diag_va[2])->Version);
 		logkv("xnu: probe ADT word", *(volatile unsigned int *)diag_va[3]);
-		if (diag_va[4]) { volatile unsigned int *pc = (void *)diag_va[4]; unsigned v = *pc; *pc = v; logkv("xnu: probe port_crumb (rw)", v); }
+		if (diag_va[4]) { volatile u64_t *pc = (void *)diag_va[4]; u64_t v = *pc; *pc = v; logkv("xnu: probe port_crumb (rw)", v); }
 		if (diag_va[5]) { unsigned long l = ((unsigned long (*)(const char *))diag_va[5])("xnulinux"); logkv("xnu: probe exec strlen through XNU tables", l); }
 		logs("xnu: probes done");
 	}
@@ -931,10 +931,8 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		logs_alert("xnu: XNU panic:");
 		logs_alert(m);
 		logkv("xnu: panic caller", a2);
-		{
-			u64_t pc_sym = macho_sym(&img, "_port_crumb");
-			if (pc_sym) logkv("xnu: port_crumb", *(volatile u64_t *)pc_sym);
-		}
+		if (diag_va[4])
+			logkv("xnu: port_crumb", *(volatile u64_t *)diag_va[4]);
 		{	/* the frame-pointer chain from here through XNU's frames (the hook runs on XNU's stack); return addresses
 			 * with their pointer-authentication bits replaced by the kernel's all-ones top */
 			unsigned long *fp = el0_mode ? (unsigned long *)xnu_worlds[this_slot()]->xnu_regs[10] : __builtin_frame_address(0);
@@ -1937,7 +1935,7 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 
 	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba; diag_va[3] = (u64_t)ba->deviceTreeP;
 	diag_va[4] = macho_sym(&img, "_port_crumb");
-	if (diag_va[4] && ((diag_va[4] & 3) || !va_in_loaded_segs_prot(&img, diag_va[4], 4, 1))) {
+	if (diag_va[4] && ((diag_va[4] & 7) || !va_in_loaded_segs_prot(&img, diag_va[4], 8, 3))) {
 		logs("xnu: ignoring invalid _port_crumb symbol");
 		diag_va[4] = 0;
 	}
