@@ -53,7 +53,9 @@ ls $A/apple-tools/Library/Developer/CommandLineTools/usr/lib/clang/*/lib/darwin/
 # in a char, so EOF never matches where char is unsigned (aarch64) and it spins forever
 python3 -c "import importlib.util as u; s = u.spec_from_file_location('setup_env', 'scripts/setup-env.py'); m = u.module_from_spec(s); s.loader.exec_module(m); m.kernel_tree()"
 D=out/k27/xnu/SETUP/decomment/decomment.c
-sed -i 's/^\tchar bufchar;/\tint bufchar;/' $D && grep -n 'int bufchar;' $D && rm -f out/x12377/build/xnu/hdrs-obj/SETUP/decomment/decomment
+sed -i -E 's/^([[:space:]]*)char([[:space:]]+bufchar;)/\1int\2/' $D
+grep -qE '^[[:space:]]*int[[:space:]]+bufchar;' $D || { echo "decomment.c: no int bufchar after the patch" >&2; exit 1; }
+rm -f out/x12377/build/xnu/hdrs-obj/SETUP/decomment/decomment
 python3 scripts/setup-env.py x12377 --jobs 12
 # the first kernel build is the rebuild's: xnu-patches and xnulinux's corecrypto go into the tree before anything of it
 # is compiled (XNU's own corecrypto never is)
