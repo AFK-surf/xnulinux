@@ -13,6 +13,7 @@
 #undef munmap
 #undef stat
 #undef poll
+#undef os_dupfd_cloexec
 #endif
 #include <errno.h>
 #include <fcntl.h>
@@ -44,7 +45,23 @@ static struct xmap { void *va; size_t len; uint64_t id; io_connect_t conn; } *ma
 static unsigned nmaps;
 static struct xfence { dev_t dev; ino_t ino; int wfd; uint64_t id; io_connect_t conn; } *fences;
 static unsigned nfences;
+struct xsfence { uint64_t id; io_connect_t conn; unsigned refs; };
+static struct xsfd { int fd; struct xsfence *f; } *sfds;	/* sandbox fences (when SYS_pipe is denied) */
+static unsigned nsfds;
 static uint8_t *buf;			/* message, then reply */
+
+extern int os_dupfd_cloexec(int fd);
+
+/* Open a harmless placeholder fd for a render node or sandbox fence.
+ * Strict sandboxes (e.g. com.apple.WebKit.GPUProcess.sb) deny open("/dev/null")
+ * with EPERM while allowing read-only opens of /private/etc/passwd. */
+static int open_dummy_fd(void)
+{
+	int fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+	if (fd < 0 && errno == EPERM)
+		fd = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
+	return fd;
+}
 
 static int debug(void) { static int d = -1; if (d < 0) d = getenv("XNUDRM_DEBUG") != NULL; return d; }
 
@@ -95,7 +112,7 @@ int xnudrm_open(const char *path, int flags, ...)
 		io_connect_t c = 0;
 		pthread_mutex_lock(&lk);
 		int r = nnodes < sizeof(nodes) / sizeof(nodes[0]) ? open_conn(&c) : -EMFILE;
-		int fd = r ? -1 : open("/dev/null", O_RDWR | O_CLOEXEC);
+		int fd = r ? -1 : open_dummy_fd();
 		if (!r && fd < 0) { IOServiceClose(c); r = -errno; }
 		if (!r) nodes[nnodes++] = (struct xnode){ fd, c };
 		pthread_mutex_unlock(&lk);
@@ -118,13 +135,68 @@ int xnudrm_close(int fd)
 			io_connect_t c = nodes[i].conn;
 			nodes[i] = nodes[--nnodes];
 			for (unsigned j = 0; j < nmaps; ) { if (maps[j].conn == c) maps[j] = maps[--nmaps]; else j++; }
-			for (unsigned j = 0; j < nfences; j++) if (fences[j].conn == c && fences[j].id) fences[j].id = 0;
+			for (unsigned j = 0; j < nfences; j++) {
+				if (fences[j].conn == c && fences[j].id) {
+					fences[j].id = 0;
+					if (fences[j].wfd >= 0) {
+						(void)!write(fences[j].wfd, "s", 1);
+						close(fences[j].wfd);
+						fences[j].wfd = -1;
+					}
+				}
+			}
+			for (unsigned j = 0; j < nsfds; j++)
+				if (sfds[j].f->conn == c) sfds[j].f->id = 0;
 			IOServiceClose(c);
+			break;
+		}
+	}
+	for (unsigned i = 0; i < nsfds; i++) {
+		if (sfds[i].fd == fd) {
+			struct xsfence *sf = sfds[i].f;
+			sfds[i] = sfds[--nsfds];
+			if (--sf->refs == 0) {
+				if (sf->id) {
+					conn = sf->conn;
+					hdr(XNUDRM_FENCE_CLOSE, sf->id, 0);
+					call(0);
+				}
+				free(sf);
+			}
 			break;
 		}
 	}
 	pthread_mutex_unlock(&lk);
 	return close(fd);
+}
+
+int xnudrm_dupfd_cloexec(int fd)
+{
+	int nfd = os_dupfd_cloexec(fd);
+	/* Strict sandboxes (e.g. com.apple.WebKit.GPUProcess.sb) deny fcntl(F_DUPFD_CLOEXEC)
+	 * with EPERM while allowing SYS_dup. Note: dup() drops FD_CLOEXEC and minfd=3. */
+	if (nfd < 0 && errno == EPERM)
+		nfd = dup(fd);
+	if (nfd < 0) return -1;
+	pthread_mutex_lock(&lk);
+	for (unsigned i = 0; i < nsfds; i++) {
+		if (sfds[i].fd == fd) {
+			struct xsfence *sf = sfds[i].f;
+			struct xsfd *ns = realloc(sfds, (nsfds + 1) * sizeof(*sfds));
+			if (!ns) {
+				pthread_mutex_unlock(&lk);
+				close(nfd);
+				errno = ENOMEM;
+				return -1;
+			}
+			sfds = ns;
+			sf->refs++;
+			sfds[nsfds++] = (struct xsfd){ nfd, sf };
+			break;
+		}
+	}
+	pthread_mutex_unlock(&lk);
+	return nfd;
 }
 
 int xnudrm_stat(const char *path, struct stat *st)
@@ -156,24 +228,37 @@ static int put(uint32_t *plen, uint64_t *field, const void *p, uint64_t len)
 static int new_fence(uint64_t id)	/* for conn */
 {
 	int p[2];
-	if (pipe(p)) return -1;
-	fcntl(p[0], F_SETFD, FD_CLOEXEC); fcntl(p[1], F_SETFD, FD_CLOEXEC);
-	struct stat st; fstat(p[0], &st);
-	/* a pipe's inode number is reused once every descriptor of an earlier pipe is closed: an entry for that dead pipe
-	 * would answer for this one */
-	for (unsigned i = 0; i < nfences; ) {
-		if (fences[i].ino == st.st_ino && fences[i].dev == st.st_dev) {
-			/* (an unsignalled one's fence stays with xnudrmd until the node closes: no host call here, buf holds the
-			 * reply being copied out) */
-			if (fences[i].wfd >= 0) close(fences[i].wfd);
-			fences[i] = fences[--nfences];
-		} else i++;
+	if (pipe(p) == 0) {
+		fcntl(p[0], F_SETFD, FD_CLOEXEC); fcntl(p[1], F_SETFD, FD_CLOEXEC);
+		struct stat st; fstat(p[0], &st);
+		/* a pipe's inode number is reused once every descriptor of an earlier pipe is closed: an entry for that dead pipe
+		 * would answer for this one */
+		for (unsigned i = 0; i < nfences; ) {
+			if (fences[i].ino == st.st_ino && fences[i].dev == st.st_dev) {
+				/* (an unsignalled one's fence stays with xnudrmd until the node closes: no host call here, buf holds the
+				 * reply being copied out) */
+				if (fences[i].wfd >= 0) close(fences[i].wfd);
+				fences[i] = fences[--nfences];
+			} else i++;
+		}
+		struct xfence *nf = realloc(fences, (nfences + 1) * sizeof(*fences));
+		if (!nf) { close(p[0]); close(p[1]); return -1; }
+		fences = nf;
+		fences[nfences++] = (struct xfence){ st.st_dev, st.st_ino, p[1], id, conn };
+		return p[0];
 	}
-	struct xfence *nf = realloc(fences, (nfences + 1) * sizeof(*fences));
-	if (!nf) { close(p[0]); close(p[1]); return -1; }
-	fences = nf;
-	fences[nfences++] = (struct xfence){ st.st_dev, st.st_ino, p[1], id, conn };
-	return p[0];
+	if (errno != EPERM) return -1;
+	/* Strict sandboxes (e.g. com.apple.WebKit.GPUProcess.sb) deny SYS_pipe:
+	 * use a dummy fd and track fence identity and readiness in userspace. */
+	int fd = open_dummy_fd();
+	if (fd < 0) return -1;
+	struct xsfence *sf = malloc(sizeof(*sf));
+	struct xsfd *ns = sf ? realloc(sfds, (nsfds + 1) * sizeof(*sfds)) : NULL;
+	if (!ns) { free(sf); close(fd); return -1; }
+	sfds = ns;
+	*sf = (struct xsfence){ id, conn, 1 };
+	sfds[nsfds++] = (struct xsfd){ fd, sf };
+	return fd;
 }
 
 static int do_ioctl(unsigned long request, void *arg)
@@ -356,22 +441,37 @@ static struct xfence *fence_of(int fd)
 	return NULL;
 }
 
-/* 1 signalled, 0 not yet, <0 error. Called with lk held. */
-static int fence_check(struct xfence *f)
+static struct xsfence *sfd_of(int fd)
 {
-	if (!f->id) return 1;
-	conn = f->conn;
-	hdr(XNUDRM_FENCE_WAIT, f->id, 0);
+	for (unsigned i = 0; i < nsfds; i++)
+		if (sfds[i].fd == fd) return sfds[i].f;
+	return NULL;
+}
+
+/* 1 signalled, 0 not yet, <0 error. Called with lk held. */
+static int fence_wait_id(uint64_t *id, io_connect_t c)
+{
+	if (!*id) return 1;
+	conn = c;
+	hdr(XNUDRM_FENCE_WAIT, *id, 0);
 	int r = call(0);
 	if (r == -XNUDRM_ETIME) return 0;
-	if (debug() && r) fprintf(stderr, "xnudrm: fence %llu wait: %d\n", (unsigned long long)f->id, r);
-	hdr(XNUDRM_FENCE_CLOSE, f->id, 0);
+	if (debug() && r) fprintf(stderr, "xnudrm: fence %llu wait: %d\n", (unsigned long long)*id, r);
+	hdr(XNUDRM_FENCE_CLOSE, *id, 0);
 	call(0);
-	f->id = 0;
-	(void)!write(f->wfd, "s", 1);	/* signalled for good */
-	close(f->wfd);
-	f->wfd = -1;
+	*id = 0;
 	return r ? r : 1;
+}
+
+static int fence_check(struct xfence *f)
+{
+	int r = fence_wait_id(&f->id, f->conn);
+	if (r && f->wfd >= 0) {
+		(void)!write(f->wfd, "s", 1);	/* signalled for good */
+		close(f->wfd);
+		f->wfd = -1;
+	}
+	return r;
 }
 
 int xnudrm_poll(struct pollfd *fds, nfds_t n, int timeout)
@@ -380,22 +480,52 @@ int xnudrm_poll(struct pollfd *fds, nfds_t n, int timeout)
 	long delay_ns = 100000;	/* 100 us -> 2 ms */
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (;;) {
-		int pending = 0;
+		int pending = 0, n_sf = 0, n_valid = 0;
 		pthread_mutex_lock(&lk);
 		for (nfds_t i = 0; i < n; i++) {
+			if (fds[i].fd < 0) continue;
+			n_valid++;
+			struct xsfence *sf = nsfds ? sfd_of(fds[i].fd) : NULL;
+			if (sf) {
+				n_sf++;
+				if (sf->id && fence_wait_id(&sf->id, sf->conn) == 0) pending = 1;
+				continue;
+			}
 			struct xfence *f = nfences ? fence_of(fds[i].fd) : NULL;
 			if (f && f->id && fence_check(f) == 0) pending = 1;
 		}
-		pthread_mutex_unlock(&lk);
 		if (debug()) {
 			fprintf(stderr, "xnudrm: poll %u fds, timeout %d: %s;", (unsigned)n, timeout, pending ? "pending" : "ready");
-			for (nfds_t i = 0; i < n; i++) { struct xfence *f = nfences ? fence_of(fds[i].fd) : NULL; fprintf(stderr, " fd %d -> %s id %llu", fds[i].fd, f ? "fence" : "other", f ? (unsigned long long)f->id : 0ull); }
+			for (nfds_t i = 0; i < n; i++) {
+				struct xsfence *sf = nsfds ? sfd_of(fds[i].fd) : NULL;
+				struct xfence *f = (!sf && nfences) ? fence_of(fds[i].fd) : NULL;
+				uint64_t id = sf ? sf->id : (f ? f->id : 0);
+				fprintf(stderr, " fd %d -> %s id %llu", fds[i].fd, (sf || f) ? "fence" : "other", (unsigned long long)id);
+			}
 			fprintf(stderr, "\n");
 		}
-		if (!pending) return poll(fds, n, timeout);	/* signalled fences are readable pipes now */
+		pthread_mutex_unlock(&lk);
+		if (!pending) {
+			if (n_sf > 0 && n_sf == n_valid) {
+				/* All non-negative fds are sandbox fences; SYS_poll is denied in strict sandboxes. */
+				int ready = 0;
+				for (nfds_t i = 0; i < n; i++) {
+					fds[i].revents = (fds[i].fd >= 0) ? (fds[i].events & (POLLIN | POLLRDNORM)) : 0;
+					if (fds[i].revents) ready++;
+				}
+				return ready;
+			}
+			return poll(fds, n, timeout);	/* signalled pipe fences are readable now */
+		}
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
-		if (timeout >= 0 && ms >= timeout) return poll(fds, n, 0);
+		if (timeout >= 0 && ms >= timeout) {
+			if (n_sf > 0 && n_sf == n_valid) {
+				for (nfds_t i = 0; i < n; i++) fds[i].revents = 0;
+				return 0;
+			}
+			return poll(fds, n, 0);
+		}
 		/* each check stops the hosted CPU for one host call: back off exponentially up to 2 ms */
 		struct timespec d = { 0, delay_ns };
 		nanosleep(&d, NULL);
