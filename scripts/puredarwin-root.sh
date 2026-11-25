@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-only
-# On a Linux host: PureDarwin's arm64 root file system as a tarball, from one of its disk images (Nix: .#image-arm64-virt-minimal,
-# or the release puredarwin-arm64-virt-minimal-*.img.zst from hydra.lab004.dev). The image's root is the GPT partition
+# On a Linux host: PureDarwin's arm64 root file system as a tarball, from one of its disk images (Nix: .#image-arm64-virt-minimal
+# of the fork AFK-surf/PureDarwin, docs/free-kc.md; hydra.lab004.dev's release images are upstream's, without its fixes). The image's root is the GPT partition
 # "Darwin ext4 Root"; owners and modes are kept.
 #   puredarwin-root.sh IMAGE OUT.tar.gz
 set -euo pipefail

@@ -4,7 +4,11 @@
 The kernel collection `scripts/vm-xnu-rebuild.sh` links is the source-built XNU and xnulinux's own kexts, plus Apple's
 kexts from a macOS kernelcache (APFS, AMFI, IOKit families...). `scripts/free-kc/build.sh` links one with none of
 Apple's kexts. That collection boots [PureDarwin](https://github.com/PureDarwin/PureDarwin)'s arm64 userland (its own
-dyld, libSystem, launchd, zsh and toybox) to its console shell.
+dyld, libSystem, launchd, zsh and toybox) to its console shell. xnulinux takes PureDarwin from its fork
+[AFK-surf/PureDarwin](https://github.com/AFK-surf/PureDarwin), which has what this kernel needs of the userland:
+`posix_spawnattr_init` zeroes the attributes (otherwise launchd's children come up with the resource limits `malloc` left
+in them, a file descriptor hard limit of a few, and are killed when they pass it), and ICU's libraries are signed after
+their install names change (otherwise their first page fails validation in every process that maps them).
 
 ## What is in it
 
@@ -35,8 +39,10 @@ kernel has; and a kext's load tag.
 
 ## Using it
 
-1. `scripts/puredarwin-root.sh IMAGE root.tar.gz` (Linux) unpacks the root of a PureDarwin arm64 image, for example
-   `nix build github:PureDarwin/PureDarwin#image-arm64-virt-minimal`.
+1. `scripts/puredarwin-root.sh IMAGE root.tar.gz` (Linux) unpacks the root of a PureDarwin arm64 image:
+   `nix build 'git+https://github.com/AFK-surf/PureDarwin?submodules=1&rev=b3b4b2812fdd1c5c251dc3089b5a1a9e00d29970#image-arm64-virt-minimal'` (PureDarwin's
+   binary cache, https://hydra.lab004.dev, has its toolchain and what the fork did not change; the images there are
+   upstream's).
 2. `scripts/mk-puredarwin-disk.sh root.tar.gz pd.img > pd.conf` (Mac) makes the HFS+ disk and prints its UUIDs.
 3. In the VM, after `scripts/vm-xnu-rebuild.sh`: `scripts/free-kc/build.sh`, which writes `/lib/firmware/xnu/kc-free.bin`.
 4. Boot it: `MAC_CONF=pd.conf DISK=pd.img IMAGE=xnu/kc-free.bin TRUSTCACHE= GPU=off scripts/xnulinux-boot.sh`. The console
