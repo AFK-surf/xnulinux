@@ -145,19 +145,20 @@ IOReturn AGXDeviceUserClient::doMap(IOExternalMethodArguments *a)
 	*h = (xnudrm_hdr){ .magic = XNUDRM_MAGIC, .op = XNUDRM_MAP, .client = fClient, .arg0 = handle, .arg1 = size };
 	long n = hostcall(sizeof(*h));
 	xnudrm_hdr *r = (xnudrm_hdr *)gOut;
-	if (n < 0 || r->status) {
+	if (n < (long)sizeof(xnudrm_hdr) || r->status) {
 		IOLockUnlock(gCallLock);
-		IOLog("XnuDrm: map of handle %llu failed (%ld, %d)\n", handle, n, n < 0 ? 0 : r->status);
+		IOLog("XnuDrm: map of handle %llu failed (%ld, %d)\n", handle, n, n < (long)sizeof(xnudrm_hdr) ? 0 : r->status);
 		return kIOReturnNoMemory;
 	}
 	uint64_t id = r->arg0;
-	uint32_t nr = r->payload_len / sizeof(xnudrm_range);
-	if (nr == 0) {
+	size_t avail = (size_t)n - sizeof(xnudrm_hdr);
+	if (r->payload_len != avail || r->payload_len == 0 || (r->payload_len % sizeof(xnudrm_range)) != 0) {
 		IOLockUnlock(gCallLock);
 		xnudrm_hdr ur;
 		simple(XNUDRM_UNMAP, id, 0, &ur);
 		return kIOReturnBadArgument;
 	}
+	uint32_t nr = r->payload_len / sizeof(xnudrm_range);
 	IOAddressRange *ranges = (IOAddressRange *)IOMallocData(nr * sizeof(IOAddressRange));
 	if (!ranges) {
 		IOLockUnlock(gCallLock);
