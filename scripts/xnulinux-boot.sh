@@ -28,6 +28,7 @@ if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced fi
   for _ in $(seq 1 600); do pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null || break; sleep 0.2; done
   if [ -d /sys/module/xnu ]; then sudo rmmod xnu; fi
   sudo systemctl stop xnudrmd 2>/dev/null || true
+  for f in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do [ -e "$f" ] && echo 0 | sudo tee "$f" >/dev/null 2>&1 || true; done	# XNU's CPUs are Linux's again
   echo "hosted system stopped"
   exit
 fi
@@ -88,6 +89,12 @@ print(format(m, 'x'))")
   for f in /proc/irq/*/smp_affinity; do echo "$MASK" | sudo tee "$f" >/dev/null 2>&1 || true; done
   HOSTCPUS=$(python3 -c "print(','.join(str(c) for c in range($NCPU) if 0x$MASK >> c & 1))")
 fi
+# XNU's CPUs stay out of Linux's deep idle states: a hosted CPU with nothing to run sleeps in Linux, and waking it from
+# one (a thread made runnable on another CPU: every Mach message) took 0.6 ms on average on a DGX Spark, 10 us without.
+XLIST=$(python3 -c "print(' '.join(str(c) for c in ([int(c) for c in '$(cat /sys/module/fki/parameters/cpu_list 2>/dev/null | tr -d '\n')'.split(',') if c][:$CPUS] or list(range($CPUS)))))")
+for c in $XLIST; do
+  for f in /sys/devices/system/cpu/cpu$c/cpuidle/state[1-9]*/disable; do [ -e "$f" ] && echo 1 | sudo tee "$f" >/dev/null 2>&1 || true; done
+done
 # Start xnudrmd BEFORE insmod xnu.ko and wait until it has opened /dev/xnu-hostcall and is serving:
 # fast-booting guests (e.g. 16K pages) can open XnuDrm within ~4-5 s of insmod; restarting xnudrmd after
 # insmod kills live DRM/Venus clients out from under WindowServer. Never restart xnudrmd while XNU runs.

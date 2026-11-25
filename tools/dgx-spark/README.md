@@ -14,6 +14,9 @@ and CPU numbers are that machine's.
 - NetworkManager takes `xnu0` and removes its address unless told not to:
   `unmanaged-devices=interface-name:xnu0` in `/etc/NetworkManager/conf.d/`.
 - The counter runs at 1 GHz: xnu.ko has XNU scale it to 24 MHz, which Apple's user space assumes.
+- `xnulinux-boot.sh` keeps XNU's CPUs out of Linux's deep idle state (`LPI-1`, 133 us nominal): a hosted CPU with
+  nothing to run sleeps in Linux, and a thread woken on one took 0.6 ms on average (144 ms at worst) to run, 19 us
+  without it.
 
 ## GPU
 
@@ -25,6 +28,22 @@ Venus driver in `/Library/GPUBundles/XnuCpuMetal.bundle`, Metal and WindowServer
 The backend's shared memory is Linux's 4 KB pages, not contiguous, and XnuDrm cannot map those into a task with 16 KB VM
 pages (`map handle ...: 0xe00002bd`; every client then falls back to the software renderer): `xnulinux-boot.sh` starts
 XNU with `vm16k=0` when xnudrmd serves this backend.
+
+NVIDIA's driver (580) on this machine, measured natively:
+
+- One process gets about 512 open device files and a context with a device holds 10 to 75, so the render server runs
+  a process for each context (`-Drender-server-worker=process`). With every context in one process `vkCreateDevice`
+  failed from about the twentieth client on and the Metal layer took the next device, the host's llvmpipe.
+  Memory, with 24 contexts (a desktop after login): 4.7 GB in all as PSS, about 190 MB a process (2.7 GB anonymous,
+  2.0 GB mapped files). The RSS figures add up to 9.4 GB (about 350 MB a process, 610 MB for WindowServer's) because
+  each counts the driver's libraries again. One process with about 20 contexts as threads was 3.5 to 4.9 GB. The
+  contexts hold 4.6 GB of GPU memory besides, either way.
+- `vkCreateDevice` takes 0.33 s with one queue and 0.15 s more for each further one (16 queues: 2.6 s; destroying
+  them 0.6 s). The Venus driver offers one queue of a family (`gpu/venus/patches/0007`): a Metal device is made in
+  every application, with its main thread waiting.
+- A host image copy (`VK_EXT_host_image_copy`) maps the whole memory object the image is in, 64 MB in 13 ms, and
+  unmaps it again. The Metal layer read every frame WindowServer drew back that way: 9 to 23 frames a second with the
+  GPU 2% busy. The Venus driver does not offer the feature (`gpu/venus/patches/0008`): about 50.
 
 ## In a KVM guest
 
