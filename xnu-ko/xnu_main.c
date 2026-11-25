@@ -207,8 +207,9 @@ module_param(gpu_model, charp, 0444);
 static const char *cmdline = "debug=0x8 -v -noprogress serial=0 startup_debug=1";
 static const char *cmdline_4k = " vm_compression_limit=1572864";
 static const char *cmdline_16k = " vm_compression_limit=393216 linux64_vm16k=1";
-/* vm16k=1: XNU's VM pages are 16 KB over the host's 4 KB translation granule (XNU's PAGE_RATIO 4) */
-static int vm16k;
+/* vm16k=1 (the default): XNU's VM pages are 16 KB, as on a Mac, over the host's 4 KB translation granule (XNU's
+ * PAGE_RATIO 4): a quarter of the page faults of 4 KB pages; vm16k=0 gives 4 KB VM pages */
+static int vm16k = 1;
 module_param(vm16k, int, 0444);
 
 
@@ -643,7 +644,14 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		return 0;
 	}
 	if (call == LINUX64_CALL_KERNEL_TABLES && window_l1) {	/* install XNU's kernel L1 entries (the kernel VA range only) */
-		const unsigned long long *tte = (const unsigned long long *)a1;
+		/*
+		 * XNU's L1 table (cpu_tte) is read through the bootstrap window, and installing XNU's entry for the window's
+		 * own slot replaces that window: XNU's tables need not map cpu_tte at this stage (L3 0 here), so the rest of
+		 * the table is read from a copy taken first, never through the slot being replaced (it faulted in Linux's
+		 * context, an oops, whenever the TLB no longer held the bootstrap entry).
+		 */
+		static unsigned long long tte[512];
+		x_memcpy(tte, (const void *)a1, sizeof(tte));
 		walk_log("xnu: XNU table walk for arm_init (text)", diag_va[0], tte);
 		walk_log("xnu: XNU table walk for the Mach-O header", diag_va[1], tte);
 		walk_log("xnu: XNU table walk for boot args", diag_va[2], tte);
@@ -698,9 +706,8 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		logkv("xnu: XNU enters user space (EL0); user pc", a1);
 		return 0;
 	}
-	if (call == LINUX64_CALL_HALT) {		/* shutdown or reboot inside the hosted system */
-		logs(a1 ? "xnu: the hosted system restarts: the run ends (the host starts it again if it is set up to)" :
-		    "xnu: the hosted system halted: the run ends");
+	if (call == LINUX64_CALL_HALT) {	/* the hosted system shut down: XNU would spin with this CPU's interrupts masked */
+		logs(a1 ? "xnu: the hosted system asked for a restart: run ended" : "xnu: the hosted system halted: run ended");
 		return 1;
 	}
 	if (call == LINUX64_CALL_PANIC) {

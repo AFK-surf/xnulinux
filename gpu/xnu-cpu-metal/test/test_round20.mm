@@ -163,44 +163,53 @@ static int test4_AliasAndFallbackAndLifetime(id<MTLDevice> dev) {
     size_t pageSz = (size_t)vm_page_size;
     NSDictionary *s0 = getStats(dev);
     uint64_t aliased0 = [s0[@"aliased"] unsignedLongLongValue];
+    uint64_t noDealloc0 = [s0[@"fallbackNoDeallocator"] unsignedLongLongValue];
     uint64_t ro0 = [s0[@"fallbackReadOnly"] unsignedLongLongValue];
     uint64_t unal0 = [s0[@"fallbackUnaligned"] unsignedLongLongValue];
     uint64_t copies0 = [s0[@"commitSyncCopies"] unsignedLongLongValue];
 
-    // 4a. Read-only PROT_READ mmap -> must NOT remap, must increment fallbackReadOnly, must NOT crash
+    // 4a. Read-only PROT_READ mmap with deallocator!=nil -> must NOT remap, must increment fallbackReadOnly, must NOT crash
     void *roMem = mmap(nullptr, pageSz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     for (size_t i = 0; i < 64; i++) ((uint32_t *)roMem)[i] = (uint32_t)(100 + i);
     mprotect(roMem, pageSz, PROT_READ);
 
-    // 4b. Page-aligned RW mmap with deallocator==nil -> must alias, preserve final GPU bytes after MTLBuffer release!
-    void *rwMem = mmap(nullptr, pageSz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    memset(rwMem, 0, pageSz);
-    ((uint32_t *)rwMem)[100] = 0xDEADBEEFu; // pre-existing data must survive initial copy + remap
+    // 4b. Page-aligned RW mmap with deallocator==nil -> must NOT remap (safe bounded fallback, never touches caller VA in dealloc)
+    void *noDeallocMem = mmap(nullptr, pageSz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    memset(noDeallocMem, 0, pageSz);
+    ((uint32_t *)noDeallocMem)[0] = 0xCAFEBABEu;
 
-    // 4c. Unaligned pointer -> must increment fallbackUnaligned
+    // 4c. Unaligned pointer with deallocator!=nil -> must increment fallbackUnaligned
     void *rawUnal = mmap(nullptr, pageSz * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     void *unalPtr = (uint8_t *)rawUnal + 64;
     ((uint32_t *)unalPtr)[0] = 0x13572468u;
 
-    // 4d. Page-aligned RW mmap with deallocator!=nil -> must alias and invoke deallocator cleanly
+    // 4d. Page-aligned RW mmap with deallocator!=nil -> must alias, preserve initial bytes, see GPU writes, and invoke deallocator cleanly
     void *ownedMem = mmap(nullptr, pageSz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    memset(ownedMem, 0, pageSz);
+    ((uint32_t *)ownedMem)[100] = 0xDEADBEEFu;
     __block int deallocFired = 0;
     @autoreleasepool {
-        id<MTLBuffer> roBuf = [dev newBufferWithBytesNoCopy:roMem length:pageSz options:MTLResourceStorageModeShared deallocator:nil];
-        id<MTLBuffer> rwBuf = [dev newBufferWithBytesNoCopy:rwMem length:pageSz options:MTLResourceStorageModeShared deallocator:nil];
-        id<MTLBuffer> unalBuf = [dev newBufferWithBytesNoCopy:unalPtr length:4096 options:MTLResourceStorageModeShared deallocator:nil];
+        id<MTLBuffer> roBuf = [dev newBufferWithBytesNoCopy:roMem length:pageSz options:MTLResourceStorageModeShared
+                                                deallocator:^(void *p, NSUInteger l) { munmap(p, l); }];
+        id<MTLBuffer> noDeallocBuf = [dev newBufferWithBytesNoCopy:noDeallocMem length:pageSz options:MTLResourceStorageModeShared deallocator:nil];
+        id<MTLBuffer> unalBuf = [dev newBufferWithBytesNoCopy:unalPtr length:4096 options:MTLResourceStorageModeShared
+                                                  deallocator:^(void *p, NSUInteger l) { (void)p; (void)l; munmap(rawUnal, pageSz * 2); }];
         id<MTLBuffer> ownedBuf = [dev newBufferWithBytesNoCopy:ownedMem length:pageSz options:MTLResourceStorageModeShared
                                                    deallocator:^(void *p, NSUInteger l) {
             munmap(p, l);
             deallocFired++;
         }];
-        if (!roBuf || !rwBuf || !unalBuf || !ownedBuf) { fprintf(stderr, "FAIL [4/7]: alloc nil\n"); return 1; }
-        if (rwBuf.contents != rwMem || ownedBuf.contents != ownedMem) {
-            fprintf(stderr, "FAIL [4/7]: aliased contents != caller ptr\n");
+        if (!roBuf || !noDeallocBuf || !unalBuf || !ownedBuf) { fprintf(stderr, "FAIL [4/8]: alloc nil\n"); return 1; }
+        if (ownedBuf.contents != ownedMem) {
+            fprintf(stderr, "FAIL [4/8]: aliased ownedBuf.contents != ownedMem\n");
             return 1;
         }
-        if (((uint32_t *)rwMem)[100] != 0xDEADBEEFu) {
-            fprintf(stderr, "FAIL [4/7]: initial data lost after remap\n");
+        if (noDeallocBuf.contents == noDeallocMem) {
+            fprintf(stderr, "FAIL [4/8]: deallocator==nil buffer must not alias caller VA\n");
+            return 1;
+        }
+        if (((uint32_t *)ownedMem)[100] != 0xDEADBEEFu) {
+            fprintf(stderr, "FAIL [4/8]: initial data lost after remap\n");
             return 1;
         }
 
@@ -215,46 +224,38 @@ static int test4_AliasAndFallbackAndLifetime(id<MTLDevice> dev) {
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         [enc setComputePipelineState:pso];
         [enc setBuffer:roBuf offset:0 atIndex:0];
-        [enc setBuffer:rwBuf offset:0 atIndex:1];
+        [enc setBuffer:ownedBuf offset:0 atIndex:1];
         [enc dispatchThreads:MTLSizeMake(64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
 
-        if (((uint32_t *)rwMem)[0] != 101 || ((uint32_t *)rwMem)[63] != 164 || ((uint32_t *)rwMem)[100] != 0xDEADBEEFu) {
-            fprintf(stderr, "FAIL [4/7]: GPU output not visible in aliased rwMem\n");
+        if (((uint32_t *)ownedMem)[0] != 101 || ((uint32_t *)ownedMem)[63] != 164 || ((uint32_t *)ownedMem)[100] != 0xDEADBEEFu) {
+            fprintf(stderr, "FAIL [4/8]: GPU output not visible in aliased ownedMem\n");
             return 1;
         }
         (void)unalBuf;
     } // buffers released here!
 
-    // After rwBuf dealloc (deallocator==nil), rwMem MUST still contain GPU output and remain writable!
-    if (((uint32_t *)rwMem)[0] != 101 || ((uint32_t *)rwMem)[63] != 164) {
-        fprintf(stderr, "FAIL [4/7]: rwMem data lost after MTLBuffer release (deallocator==nil)\n");
-        return 1;
-    }
-    ((uint32_t *)rwMem)[0] = 0x55AA55AAu;
     if (deallocFired != 1) {
-        fprintf(stderr, "FAIL [4/7]: deallocator not invoked (count=%d)\n", deallocFired);
+        fprintf(stderr, "FAIL [4/8]: deallocator not invoked (count=%d)\n", deallocFired);
         return 1;
     }
+    munmap(noDeallocMem, pageSz);
 
     NSDictionary *s1 = getStats(dev);
     uint64_t dAliased = [s1[@"aliased"] unsignedLongLongValue] - aliased0;
+    uint64_t dNoDealloc = [s1[@"fallbackNoDeallocator"] unsignedLongLongValue] - noDealloc0;
     uint64_t dRo = [s1[@"fallbackReadOnly"] unsignedLongLongValue] - ro0;
     uint64_t dUnal = [s1[@"fallbackUnaligned"] unsignedLongLongValue] - unal0;
     uint64_t dCopies = [s1[@"commitSyncCopies"] unsignedLongLongValue] - copies0;
 
-    munmap(roMem, pageSz);
-    munmap(rwMem, pageSz);
-    munmap(rawUnal, pageSz * 2);
-
-    if (dAliased != 2 || dRo != 1 || dUnal != 1 || dCopies != 0) {
-        fprintf(stderr, "FAIL [4/7]: stats dAliased=%llu(exp 2) dRo=%llu(exp 1) dUnal=%llu(exp 1) dCopies=%llu(exp 0)\n",
-                (unsigned long long)dAliased, (unsigned long long)dRo, (unsigned long long)dUnal, (unsigned long long)dCopies);
+    if (dAliased != 1 || dNoDealloc != 1 || dRo != 1 || dUnal != 1 || dCopies != 0) {
+        fprintf(stderr, "FAIL [4/8]: stats dAliased=%llu(exp 1) dNoDealloc=%llu(exp 1) dRo=%llu(exp 1) dUnal=%llu(exp 1) dCopies=%llu(exp 0)\n",
+                (unsigned long long)dAliased, (unsigned long long)dNoDealloc, (unsigned long long)dRo, (unsigned long long)dUnal, (unsigned long long)dCopies);
         return 1;
     }
-    printf("PASS [4/7]: mach_vm_remap aliasing (2), PROT_READ fallback (1), unaligned fallback (1), 0 commit copies, dealloc lifetime OK\n");
+    printf("PASS [4/8]: mach_vm_remap aliasing (deallocator!=nil: 1), noDealloc fallback (1), PROT_READ fallback (1), unaligned fallback (1), 0 commit copies\n");
     return 0;
 }
 
@@ -268,8 +269,10 @@ static int test5_RingBufferConcurrent(id<MTLDevice> dev) {
     memset(ringMem, 0, totalSz);
     memset(outMem, 0, totalSz);
 
-    id<MTLBuffer> ringBuf = [dev newBufferWithBytesNoCopy:ringMem length:totalSz options:MTLResourceStorageModeShared deallocator:nil];
-    id<MTLBuffer> outBuf = [dev newBufferWithBytesNoCopy:outMem length:totalSz options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> ringBuf = [dev newBufferWithBytesNoCopy:ringMem length:totalSz options:MTLResourceStorageModeShared
+                                              deallocator:^(void *p, NSUInteger l) { munmap(p, l); }];
+    id<MTLBuffer> outBuf = [dev newBufferWithBytesNoCopy:outMem length:totalSz options:MTLResourceStorageModeShared
+                                             deallocator:^(void *p, NSUInteger l) { munmap(p, l); }];
 
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\n"
                      "kernel void scale_slice(device const uint *inS [[buffer(0)]], device uint *outS [[buffer(1)]], uint g [[thread_position_in_grid]]) {\n"
@@ -301,16 +304,13 @@ static int test5_RingBufferConcurrent(id<MTLDevice> dev) {
         for (int i = 0; i < 256; i++) {
             uint32_t exp = (uint32_t)(s * 1000 + i) * 3 + 7;
             if (outSlice[i] != exp) {
-                fprintf(stderr, "FAIL [5/7]: ring slice %d idx %d got=%u exp=%u\n", s, i, outSlice[i], exp);
-                munmap(ringMem, totalSz); munmap(outMem, totalSz);
+                fprintf(stderr, "FAIL [5/8]: ring slice %d idx %d got=%u exp=%u\n", s, i, outSlice[i], exp);
                 return 1;
             }
         }
     }
     ringBuf = nil; outBuf = nil;
-    munmap(ringMem, totalSz);
-    munmap(outMem, totalSz);
-    printf("PASS [5/7]: ring buffer concurrent CPU write (slice N+1) + GPU compute (slice N) across %d slices OK\n", N);
+    printf("PASS [5/8]: ring buffer concurrent CPU write (slice N+1) + GPU compute (slice N) across %d slices OK\n", N);
     return 0;
 }
 
@@ -318,7 +318,8 @@ static int test6_ContentsNeverBlocks(id<MTLDevice> dev) {
     size_t pageSz = (size_t)vm_page_size;
     void *mem = mmap(nullptr, pageSz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     ((uint32_t *)mem)[0] = 42;
-    id<MTLBuffer> buf = [dev newBufferWithBytesNoCopy:mem length:pageSz options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> buf = [dev newBufferWithBytesNoCopy:mem length:pageSz options:MTLResourceStorageModeShared
+                                          deallocator:^(void *p, NSUInteger l) { munmap(p, l); }];
 
     id<MTLCommandQueue> q = [dev newCommandQueue];
     id<MTLCommandBuffer> cb = [q commandBuffer];
@@ -328,7 +329,7 @@ static int test6_ContentsNeverBlocks(id<MTLDevice> dev) {
 
     // 6a. Calling [buf contents] BEFORE commit must not block!
     void *pBefore = buf.contents;
-    if (pBefore != mem) { fprintf(stderr, "FAIL [6/7]: contents before commit != mem\n"); return 1; }
+    if (pBefore != mem) { fprintf(stderr, "FAIL [6/8]: contents before commit != mem\n"); return 1; }
 
     // 6b. Calling [buf contents] INSIDE addCompletedHandler: must not deadlock!
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -342,12 +343,11 @@ static int test6_ContentsNeverBlocks(id<MTLDevice> dev) {
     [cb commit];
     long timedOut = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
     if (timedOut != 0 || observedInHandler != 0x7F7F7F7Fu) {
-        fprintf(stderr, "FAIL [6/7]: handler timedOut=%ld observed=0x%x\n", timedOut, observedInHandler);
+        fprintf(stderr, "FAIL [6/8]: handler timedOut=%ld observed=0x%x\n", timedOut, observedInHandler);
         return 1;
     }
     buf = nil;
-    munmap(mem, pageSz);
-    printf("PASS [6/7]: [buf contents] before commit & inside completedHandler never blocks/deadlocks\n");
+    printf("PASS [6/8]: [buf contents] before commit & inside completedHandler never blocks/deadlocks\n");
     return 0;
 }
 
@@ -355,7 +355,7 @@ static int test7_Wallpaper33MBZeroCopy(id<MTLDevice> dev) {
     // 33 MB (33 * 1024 * 1024 = 34603008 bytes, multiple of 16KB & 4KB) submitted across 10 commits -> 0 per-commit copies!
     const size_t sz = 33 * 1024 * 1024;
     void *wpMem = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (wpMem == MAP_FAILED) { fprintf(stderr, "FAIL [7/7]: mmap 33MB failed\n"); return 1; }
+    if (wpMem == MAP_FAILED) { fprintf(stderr, "FAIL [7/8]: mmap 33MB failed\n"); return 1; }
     ((uint32_t *)wpMem)[0] = 0x11111111u;
     ((uint32_t *)wpMem)[sz / 4 - 1] = 0x99999999u;
 
@@ -364,8 +364,9 @@ static int test7_Wallpaper33MBZeroCopy(id<MTLDevice> dev) {
     uint64_t copies0 = [s0[@"commitSyncCopies"] unsignedLongLongValue];
     uint64_t bytes0 = [s0[@"commitSyncBytes"] unsignedLongLongValue];
 
-    id<MTLBuffer> wpBuf = [dev newBufferWithBytesNoCopy:wpMem length:sz options:MTLResourceStorageModeShared deallocator:nil];
-    if (!wpBuf || wpBuf.contents != wpMem) { fprintf(stderr, "FAIL [7/7]: 33MB NoCopy alias failed\n"); return 1; }
+    id<MTLBuffer> wpBuf = [dev newBufferWithBytesNoCopy:wpMem length:sz options:MTLResourceStorageModeShared
+                                            deallocator:^(void *p, NSUInteger l) { munmap(p, l); }];
+    if (!wpBuf || wpBuf.contents != wpMem) { fprintf(stderr, "FAIL [7/8]: 33MB NoCopy alias failed\n"); return 1; }
 
     id<MTLBuffer> readback = [dev newBufferWithLength:8 options:MTLResourceStorageModeShared];
     id<MTLCommandQueue> q = [dev newCommandQueue];
@@ -382,7 +383,7 @@ static int test7_Wallpaper33MBZeroCopy(id<MTLDevice> dev) {
         [cb waitUntilCompleted];
         uint32_t *rb = (uint32_t *)readback.contents;
         if (rb[0] != (uint32_t)(0x2000 + iter) || rb[1] != (uint32_t)(0x8000 + iter)) {
-            fprintf(stderr, "FAIL [7/7]: iter %d got (%u,%u)\n", iter, rb[0], rb[1]);
+            fprintf(stderr, "FAIL [7/8]: iter %d got (%u,%u)\n", iter, rb[0], rb[1]);
             return 1;
         }
     }
@@ -393,14 +394,48 @@ static int test7_Wallpaper33MBZeroCopy(id<MTLDevice> dev) {
     uint64_t dBytes = [s1[@"commitSyncBytes"] unsignedLongLongValue] - bytes0;
 
     wpBuf = nil;
-    munmap(wpMem, sz);
 
     if (dAliased != 1 || dCopies != 0 || dBytes != 0) {
-        fprintf(stderr, "FAIL [7/7]: 33MB wallpaper stats dAliased=%llu dCopies=%llu dBytes=%llu\n",
+        fprintf(stderr, "FAIL [7/8]: 33MB wallpaper stats dAliased=%llu dCopies=%llu dBytes=%llu\n",
                 (unsigned long long)dAliased, (unsigned long long)dCopies, (unsigned long long)dBytes);
         return 1;
     }
-    printf("PASS [7/7]: 33 MB wallpaper buffer aliased (1) across 10 commits with commitSyncCopies=0, commitSyncBytes=0\n");
+    printf("PASS [7/8]: 33 MB wallpaper buffer aliased (1) across 10 commits with commitSyncCopies=0, commitSyncBytes=0\n");
+    return 0;
+}
+
+static int test8_NoDeallocatorConcurrentUnmapNoGuardCrash(id<MTLDevice> dev) {
+    // Adversarial regression for WindowServer EXC_GUARD / GUARD_TYPE_VIRT_MEMORY / DEALLOC_GAP:
+    // Enable fatal VM EXC_GUARD and race concurrent munmap() against async MTLBuffer release
+    // (mirroring CA::OGL::MetalContext::delete_image on com.apple.coreanimation.mtl_dealloc).
+    kern_return_t kr = task_set_exc_guard_behavior(
+        mach_task_self(), TASK_EXC_GUARD_VM_DELIVER | TASK_EXC_GUARD_VM_FATAL);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "FAIL [8/8]: task_set_exc_guard_behavior failed (%d)\n", kr);
+        return 1;
+    }
+    size_t pageSz = (size_t)vm_page_size;
+    dispatch_queue_t deallocQ = dispatch_queue_create("com.xnu.test.mtl_dealloc", DISPATCH_QUEUE_SERIAL);
+    const int kIters = 1000;
+    for (int i = 0; i < kIters; i++) {
+        void *mem = mmap(nullptr, pageSz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (mem == MAP_FAILED) { fprintf(stderr, "FAIL [8/8]: mmap failed at %d\n", i); return 1; }
+        ((uint32_t *)mem)[0] = (uint32_t)(0x1000 + i);
+        id<MTLBuffer> buf = [dev newBufferWithBytesNoCopy:mem length:pageSz
+                                                  options:MTLResourceStorageModeShared
+                                              deallocator:nil];
+        if (!buf) { munmap(mem, pageSz); fprintf(stderr, "FAIL [8/8]: nil buffer at %d\n", i); return 1; }
+        __block id<MTLBuffer> captured = buf;
+        buf = nil;
+        dispatch_async(deallocQ, ^{ captured = nil; });
+        if (i & 1) {
+            std::atomic<int> spin{0};
+            for (int k = 0; k < (i % 64) * 8; k++) spin.fetch_add(1, std::memory_order_relaxed);
+        }
+        munmap(mem, pageSz);
+    }
+    dispatch_sync(deallocQ, ^{});
+    printf("PASS [8/8]: %d iterations of deallocator==nil concurrent munmap + async release under TASK_EXC_GUARD_VM_FATAL OK\n", kIters);
     return 0;
 }
 
@@ -419,6 +454,7 @@ int main(int argc, char **argv) {
         rc |= test5_RingBufferConcurrent(dev);
         rc |= test6_ContentsNeverBlocks(dev);
         rc |= test7_Wallpaper33MBZeroCopy(dev);
+        rc |= test8_NoDeallocatorConcurrentUnmapNoGuardCrash(dev);
         if (rc == 0) printf("ALL ROUND 20 TESTS PASSED!\n");
         return rc;
     }

@@ -102,5 +102,5 @@ records, hosted, the caller where interrupts are re-enabled for kernel samples.
 
 | Now | Replace with |
 |---|---|
-| 4 KB VM pages: four times the page faults of a native (16 KB) macOS; process spawn about 3x | `vm16k=1` (16 KB VM pages over the 4 KB granule, XNU's PAGE_RATIO 4) boots to the desktop with a quarter of the faults, but WindowServer aborts once per boot waiting in `MTLRegisterDevices`, and a boot has hung once in early VM setup: fix both, then make it the default |
+| Done: 16 KB VM pages by default (`xnu.ko vm16k=1`, over the 4 KB granule, XNU's PAGE_RATIO 4): a quarter of the page faults, the desktop ~30% sooner, fork 2-3x faster than 4 KB; the WindowServer abort it seemed to cause was a start-up race with `xnudrmd` (fixed), and the early hang seen once did not come back in ~30 boots | The host's own 16 KB granule (a 16 KB Linux kernel) for the TLB reach native macOS has: memory-bound code is still up to 1.6x slower |
 | The system disk keeps hardware daemons that crash or retry without their hardware | No crash reports after a boot: each crashing daemon fixed (a stand-in service or property) or disabled with a reason |
