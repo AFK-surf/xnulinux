@@ -13,7 +13,7 @@
 set -euo pipefail
 POC=$(cd "$(dirname "$0")/../.." && pwd)
 DVM=${DVM:-$HOME/w/dvm}; W=${FREE_KC_WORK:-$HOME/w/free-kc}; OUT=${OUT:-/lib/firmware/xnu/kc-free.bin}
-PD_URL=https://github.com/PureDarwin/PureDarwin PD_REV=0c1990c803c13b68cad4df3f6dc34ba4306fc789
+PD_URL=https://github.com/AFK-surf/PureDarwin PD_REV=b3b4b2812fdd1c5c251dc3089b5a1a9e00d29970
 MBEDTLS_URL=https://github.com/Mbed-TLS/mbedtls MBEDTLS_REV=$(sed -n 's/^MBEDTLS_REV=//p' $POC/kexts/free/corecrypto/mbedtls.rev)
 export DVM NETINC=${NETINC:-$POC/build/netinc}
 K="python3 $POC/scripts/free-kc/kcc.py --macos"; O=$W/obj; S=$W/src; F=$POC/kexts/free
