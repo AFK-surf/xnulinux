@@ -547,7 +547,12 @@ void fki_high_unmap(unsigned long va, unsigned long size) {}
 EXPORT_SYMBOL(fki_high_unmap);
 void fki_high_flush(void) {}
 EXPORT_SYMBOL(fki_high_flush);
-void *fki_high_txn_begin(unsigned long va, unsigned long size) { return NULL; }
+int fki_high_txn_begin(unsigned long va, unsigned long size, void **handle_out)
+{
+	if (handle_out)
+		*handle_out = NULL;
+	return -EOPNOTSUPP;
+}
 EXPORT_SYMBOL(fki_high_txn_begin);
 void fki_high_txn_restore(void *txn) {}
 EXPORT_SYMBOL(fki_high_txn_restore);

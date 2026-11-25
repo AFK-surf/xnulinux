@@ -1105,9 +1105,10 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		struct linux64_map_req *q = (struct linux64_map_req *)a1;
 		if (q) {
 			if (q->prot == LINUX64_KMAP_TXN_BEGIN) {
-				void *txn = fki_high_txn_begin((unsigned long)q->va, (unsigned long)q->size);
+				void *txn = NULL;
+				int err = fki_high_txn_begin((unsigned long)q->va, (unsigned long)q->size, &txn);
 				q->as_handle = (u64_t)(unsigned long)txn;
-				q->result = txn ? 0 : -12; /* -ENOMEM */
+				q->result = err;
 			} else if (q->prot == LINUX64_KMAP_TXN_RESTORE) {
 				fki_high_txn_restore((void *)(unsigned long)q->as_handle);
 				q->result = 0;

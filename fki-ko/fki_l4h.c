@@ -1147,20 +1147,30 @@ static void fki_high_unmap_km(struct fki_kmem *km, unsigned long va, unsigned lo
 	spin_unlock_irqrestore(&km->lock, flags);
 }
 
-void *fki_high_txn_begin(unsigned long va, unsigned long size)
+int fki_high_txn_begin(unsigned long va, unsigned long size, void **handle_out)
 {
-	struct fki_kmem *km = fki_kmem_get();
+	struct fki_kmem *km;
 	struct fki_high_txn *txn, *cur;
 	unsigned long high_vs = L4H_CPTR(L4H_SLOT_HIGH_VSPACE);
 	unsigned long va_end, km_va_end, ap_lo, ap_hi, npages, flags, idx, j;
 
+	if (!handle_out)
+		return -EINVAL;
+	*handle_out = NULL;
+	if (!size || ((va | size) & ~PAGE_MASK) ||
+	    check_add_overflow(va, size, &va_end))
+		return -EINVAL;
+
+	km = fki_kmem_get();
 	if (!km)
-		return NULL;
-	if (READ_ONCE(km->dead) || !size || ((va | size) & ~PAGE_MASK) ||
-	    check_add_overflow(va, size, &va_end) ||
-	    check_add_overflow(km->high_va, km->size, &km_va_end)) {
+		return -ENODEV;
+	if (READ_ONCE(km->dead)) {
 		fki_kmem_put(km);
-		return NULL;
+		return -ENODEV;
+	}
+	if (check_add_overflow(km->high_va, km->size, &km_va_end)) {
+		fki_kmem_put(km);
+		return -EINVAL;
 	}
 	ap_lo = round_down(km->high_va, SZ_2M);
 	ap_hi = round_up(km_va_end, SZ_2M);
@@ -1171,7 +1181,7 @@ void *fki_high_txn_begin(unsigned long va, unsigned long size)
 	txn = kzalloc(struct_size(txn, pages, npages), GFP_ATOMIC);
 	if (!txn) {
 		fki_kmem_put(km);
-		return NULL;
+		return -ENOMEM;
 	}
 	txn->km = km;
 	txn->va = va;
@@ -1183,14 +1193,14 @@ void *fki_high_txn_begin(unsigned long va, unsigned long size)
 		spin_unlock_irqrestore(&km->lock, flags);
 		kfree(txn);
 		fki_kmem_put(km);
-		return NULL;
+		return -ENODEV;
 	}
 	list_for_each_entry(cur, &km->high_txns, list) {
 		if (va < cur->va + cur->size && cur->va < va_end) {
 			spin_unlock_irqrestore(&km->lock, flags);
 			kfree(txn);
 			fki_kmem_put(km);
-			return NULL;
+			return -EBUSY;
 		}
 	}
 	for (idx = 0; idx < npages; idx++) {
@@ -1228,7 +1238,7 @@ void *fki_high_txn_begin(unsigned long va, unsigned long size)
 				spin_unlock_irqrestore(&km->lock, flags);
 				kfree(txn);
 				fki_kmem_put(km);
-				return NULL;
+				return -EIO;
 			}
 			txn->pages[idx].cptr = old_slot;
 			txn->pages[idx].pfn = fki_as_entry_pfn(old);
@@ -1240,7 +1250,8 @@ void *fki_high_txn_begin(unsigned long va, unsigned long size)
 	list_add(&txn->list, &km->high_txns);
 	spin_unlock_irqrestore(&km->lock, flags);
 	fki_kmem_put(km);
-	return txn;
+	*handle_out = txn;
+	return 0;
 }
 EXPORT_SYMBOL(fki_high_txn_begin);
 
