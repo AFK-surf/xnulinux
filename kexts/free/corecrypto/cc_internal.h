@@ -42,6 +42,9 @@
 #include <stdlib.h>
 #define xc_panic(...) do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); abort(); } while (0)
 void xc_random(void *buf, size_t nbytes);
+/* the tests' allocator: each free must name the size its allocation had, as IOFreeData does */
+void xc_test_alloc(void *p, size_t bytes);
+void xc_test_free(void *p, size_t bytes);
 #else
 #include <kern/debug.h>
 #include <linux64/linux64.h>
@@ -123,6 +126,9 @@ int xc_rsa_verify_pkcs1v15(ccrsa_pub_ctx_t key, const uint8_t *oid, size_t diges
 
 struct ccrng_state *xc_rng(int *error);
 int xc_rng_uniform(struct ccrng_state *rng, uint64_t bound, uint64_t *rand);
+/* kmem's generator, a ccrng that takes no lock once initialized (crypto_random_kmem_*) */
+size_t xc_kmem_rng_size(void);
+void xc_kmem_rng_init(void *ctx);
 
 /* known-answer tests of every primitive, through the interface (cc_selftest.c): 0 when all pass */
 int xc_selftest(void);

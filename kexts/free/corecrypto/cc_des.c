@@ -129,13 +129,17 @@ int
 xc_des_key_is_weak(void *key, unsigned long length)
 {
 	const uint8_t *k = key;
+	unsigned char b[MBEDTLS_DES_KEY_SIZE];
+	int weak = 0;
 
-	for (unsigned long i = 0; i + 8 <= length; i += 8) {
-		if (mbedtls_des_key_check_weak(k + i)) {
-			return 1;
-		}
+	/* the table holds the keys with odd parity, and the parity bits are not part of the key */
+	for (unsigned long i = 0; !weak && i + 8 <= length; i += 8) {
+		memcpy(b, k + i, sizeof(b));
+		mbedtls_des_key_set_parity(b);
+		weak = mbedtls_des_key_check_weak(b);
 	}
-	return 0;
+	mbedtls_platform_zeroize(b, sizeof(b));
+	return weak != 0;
 }
 
 void

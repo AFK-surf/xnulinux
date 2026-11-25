@@ -229,6 +229,7 @@ xc_digest_init(const struct ccdigest_info *di, ccdigest_ctx_t ctx)
 {
 	memcpy(ccdigest_state(di, ctx), di->initial_state, di->state_size);
 	ccdigest_nbits(di, ctx) = 0;
+	memset(ccdigest_data(di, ctx), 0, di->block_size);	/* MD5Init and SHA1Init copy the whole block out */
 	ccdigest_num(di, ctx) = 0;
 }
 

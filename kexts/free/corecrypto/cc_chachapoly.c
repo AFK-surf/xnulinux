@@ -38,12 +38,17 @@ xc_ccp_init(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *
 	return mbedtls_chachapoly_setkey(C(ctx), key) ? CCERR_PARAMETER : 0;
 }
 
-/* the key kept; the next message starts with setnonce */
+/* the key kept, the message dropped: nothing but setnonce goes on from here (Mbed TLS's state 0, before a nonce) */
 int
 xc_ccp_reset(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx)
 {
+	mbedtls_chachapoly_context *c = C(ctx);
+
 	(void)info;
-	(void)ctx;
+	mbedtls_platform_zeroize(&c->poly1305_ctx, sizeof(c->poly1305_ctx));
+	c->aad_len = 0;
+	c->ciphertext_len = 0;
+	c->state = 0;
 	return 0;
 }
 
@@ -54,7 +59,7 @@ xc_ccp_setnonce(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_c
 	return mbedtls_chachapoly_starts(C(ctx), nonce, MBEDTLS_CHACHAPOLY_ENCRYPT) ? CCERR_PARAMETER : 0;
 }
 
-/* not provided: nothing in this kernel derives nonces this way */
+/* not provided: XNU's interface (libkern/crypto/chacha20poly1305.h) has no call that reaches it */
 int
 xc_ccp_incnonce(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, uint8_t *nonce)
 {

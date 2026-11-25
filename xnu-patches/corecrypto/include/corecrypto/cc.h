@@ -55,10 +55,10 @@ typedef enum cc_impl {
 #else
 #define CC_MAX_ALIGNMENT ((size_t)16)
 #endif
-#define cc_pad_align(_size_) ((_size_ + CC_MAX_ALIGNMENT - 1) & (~(CC_MAX_ALIGNMENT - 1)))
+#define cc_pad_align(_size_) (((_size_) + CC_MAX_ALIGNMENT - 1) & (~(CC_MAX_ALIGNMENT - 1)))
 
 /* how many _type_ hold _size_ bytes, and their size */
-#define cc_ctx_n(_type_, _size_) ((_size_ + sizeof(_type_) - 1) / sizeof(_type_))
+#define cc_ctx_n(_type_, _size_) (((_size_) + sizeof(_type_) - 1) / sizeof(_type_))
 
 #define CC_IGNORE_VLA_WARNINGS     _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wvla\"")
 #define CC_RESTORE_VLA_WARNINGS    _Pragma("GCC diagnostic pop")

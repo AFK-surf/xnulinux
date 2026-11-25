@@ -6,10 +6,13 @@ set -euo pipefail
 D=$(cd "$(dirname "$0")" && pwd); K=$D/..; I=$(cd "$K/../../../xnu-patches/corecrypto/include" && pwd)
 MBEDTLS_REV=$(sed -n 's/^MBEDTLS_REV=//p' "$K/mbedtls.rev")
 W=${W:-$D/build}; mkdir -p "$W"
-M=${MBEDTLS:-$W/mbedtls}
-if [ ! -d "$M/library" ]; then
-	git init -q "$M" && git -C "$M" fetch -q --depth 1 https://github.com/Mbed-TLS/mbedtls "$MBEDTLS_REV" && git -C "$M" checkout -q FETCH_HEAD
+M=${MBEDTLS:-$W/mbedtls-$MBEDTLS_REV}	# the cache is per pinned commit
+if [ ! -d "$M/library" ] && [ -z "${MBEDTLS:-}" ]; then
+	rm -rf "$M"; git init -q "$M" && git -C "$M" fetch -q --depth 1 https://github.com/Mbed-TLS/mbedtls "$MBEDTLS_REV" &&
+		git -C "$M" checkout -q FETCH_HEAD
 fi
+HEAD=$(git -C "$M" rev-parse HEAD 2>/dev/null || echo "(not a git checkout)")
+[ "$HEAD" = "$MBEDTLS_REV" ] || { echo "Mbed TLS at $M is $HEAD, mbedtls.rev pins $MBEDTLS_REV"; exit 1; }
 LIB=$(sed -n 's/^MBEDTLS_SOURCES=//p' "$K/mbedtls.rev")
 CC=${CC:-clang}
 $CC -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wall -Wextra -Wno-unused-parameter \

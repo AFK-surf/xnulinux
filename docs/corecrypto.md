@@ -9,7 +9,7 @@ it is used here:
 |---|---|---|
 | The interface (types, layouts, declarations) | `EXTERNAL_HEADERS/corecrypto` (42 headers) | `xnu-patches/corecrypto/include/corecrypto` (written for xnulinux, APSL-2.0) |
 | The kernel's side | `osfmk/corecrypto`: SHA-2, HMAC, HKDF, HMAC-DRBG, GCM and CBC code | `xnu-patches/corecrypto/kernel` (`osfmk/xnulinux_crypto`): no algorithm; digests and HMAC go to the registered provider, modes through their tables |
-| Early random numbers (`early_random`, `read_erandom`) | an HMAC-DRBG seeded with HMAC-SHA-512 of the booter's seed | the host's generator (Linux's `get_random_bytes`, `LINUX64_CALL_RANDOM`); the boot seeds are the booter's 256 bytes as they are (`xnu-patches/0008`) |
+| Early random numbers (`early_random`, `read_erandom`) | an HMAC-DRBG seeded with HMAC-SHA-512 of the booter's seed | the host's generator (Linux's `get_random_bytes`, `LINUX64_CALL_RANDOM`); the boot seeds are the booter's 256 bytes as they are (`xnu-patches/0008`). `xnu.ko` waits for Linux's generator to be seeded before it takes any (`fki_random_wait`) |
 | The provider (`com.apple.kec.corecrypto`) in `kc-free.bin` | (Apple's kext, in `kc-apple.bin` only) | `kexts/free/corecrypto`: Mbed TLS behind the interface |
 
 `scripts/vm-xnu-rebuild.sh` removes XNU's three directories and copies xnulinux's in; `0008` takes the built-in files out of
@@ -22,8 +22,9 @@ hosted only.
 `register_and_init_prng`): the structures and context layouts in the new headers are the ones that kext and the kernel's
 callers agree on. `scripts/corecrypto-abi-check.sh` checks it: every kernel source that includes `<corecrypto/...>` is
 compiled twice with its own recipe, once with XNU's headers (read from the k27 tree's history into a temporary directory,
-never kept) and once with xnulinux's, and the objects' code, data, relocations and section sizes must be the same. All 19
-such sources this configuration builds are (the two others, NFS's Kerberos and `IOKitBSDInit.cpp`, are not built).
+never kept) and once with xnulinux's, and the objects' code, data, relocations and section sizes must be the same. All 22
+such sources this configuration builds are, C and C++, xnulinux's kernel side and the PRNG's registration among them (the
+one other, NFS's Kerberos, is not built). The check fails when it finds no objects to compare.
 
 ## The provider
 
@@ -37,7 +38,7 @@ such sources this configuration builds are (the two others, NFS's Kerberos and `
 | DES, triple DES | ECB, CBC; weak keys and parity; CBC-CS3 (RFC 3962) over any CBC mode |
 | ChaCha20-Poly1305 | Mbed TLS's (RFC 8439) |
 | RSA | PKCS #1 v1.5 signature verification (Mbed TLS's) |
-| Random numbers | the kernel PRNG, `ccrng` and `crypto_random_*`: the host's generator; the kext has none of its own |
+| Random numbers | the kernel PRNG and `ccrng`: the host's generator. kmem's (`crypto_random_kmem_*`, which must take no lock once set up): ChaCha20 with fast key erasure, keyed from the host when kmem sets it up |
 
 Mbed TLS is fetched at build time at the release `kexts/free/corecrypto/mbedtls.rev` pins (Apache-2.0); its configuration is
 `mbedtls_config_xnulinux.h`. The kext runs known-answer tests when it starts and panics when one fails.
@@ -46,7 +47,7 @@ Mbed TLS is fetched at build time at the release `kexts/free/corecrypto/mbedtls.
 UndefinedBehaviorSanitizer and tests them through the interface's calls against OpenSSL on random keys, lengths and call
 splits: every digest and HMAC, AES in every mode and key size (GCM with random IV lengths, pieces of AAD and text, forged
 tags; IPsec's `init_with_iv`, `reset`, `inc_iv` sequence), DES and triple DES, RFC 3962's CTS vectors, ChaCha20-Poly1305,
-RSA signatures of 1024 to 4096 bits, and the uniformity of the random numbers.
+RSA signatures of 1024 to 4096 bits, and the uniformity of the random numbers; the edge cases (XTS key sizes, unknown digest OIDs, DES weak keys of either parity, ChaCha20-Poly1305 dropped halfway, a fresh digest context's block), and that each free names its allocation's size.
 
 Tested in the krunkit VM: PureDarwin on `kc-free.bin` (the kext's self tests pass, the root mounts, its shell runs), and
 macOS on the kernel with Apple's corecrypto kext (`kc-apple.bin`): the desktop in 36 s, `codesign -v` of an app.

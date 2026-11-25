@@ -40,6 +40,38 @@ xc_random(void *buf, size_t n)
 	}
 }
 
+/* the allocations live now and their sizes: a free of another size fails the test, as IOFreeData's size must match */
+static struct { void *p; size_t n; } live[4096];
+static int frees_wrong;
+void
+xc_test_alloc(void *p, size_t n)
+{
+	for (size_t i = 0; i < sizeof(live) / sizeof(live[0]); i++) {
+		if (live[i].p == NULL) {
+			live[i].p = p, live[i].n = n;
+			return;
+		}
+	}
+	abort();
+}
+void
+xc_test_free(void *p, size_t n)
+{
+	for (size_t i = 0; i < sizeof(live) / sizeof(live[0]); i++) {
+		if (live[i].p == p) {
+			frees_wrong += live[i].n != n;
+			live[i].p = NULL;
+			free(p);
+			return;
+		}
+	}
+	abort();
+}
+
+/* the context macros take expressions as sizes */
+_Static_assert(cc_ctx_n(ccecb_ctx, 1 ? 17 : 32) == 2, "cc_ctx_n with a conditional size");
+_Static_assert(cc_pad_align(1 ? 1 : 2) == CC_MAX_ALIGNMENT, "cc_pad_align with a conditional size");
+
 static uint64_t seed = 0x9e3779b97f4a7c15ull;
 static uint64_t
 rnd(void)
@@ -83,7 +115,10 @@ test_digests(void)
 			fill(data, len);
 			fill(key, klen);
 			ccdigest_di_decl(di, ctx);
+			memset(ctx, 0xa5, ccdigest_di_size(di));
 			xc_digest_init(di, ctx);
+			/* MD5Init and SHA1Init copy the whole pending block out of a fresh context */
+			CHECK(memcmp(ccdigest_data(di, ctx), (uint8_t[128]){0}, di->block_size) == 0, "%s init leaves the block", d[a].name);
 			while (off < len) {
 				size_t n = 1 + rndn(len - off);
 				xc_digest_update(di, ctx, n, data + off);
@@ -186,6 +221,18 @@ test_aes(void)
 				CHECK(memcmp(back, pt, n) == 0, "%s decrypt", name);
 			}
 		}
+	}
+	/* XTS takes 16- and 32-byte keys, and two different ones */
+	{
+		const struct ccmode_xts *xe = xc_aes_xts_encrypt();
+		ccxts_ctx_decl(xe->size, cx);
+		uint8_t k1[32], k2[32];
+		fill(k1, 32), fill(k2, 32);
+		CHECK(xe->init(xe, cx, 24, k1, k2) != 0, "XTS with 24-byte keys accepted");
+		CHECK(xe->init(xe, cx, (size_t)-16, k1, k2) != 0, "XTS with a negative key length accepted");
+		CHECK(xe->init(xe, cx, 0, k1, k2) != 0, "XTS with no key accepted");
+		CHECK(xe->init(xe, cx, 32, k1, k1) == CCERR_XTS_KEYS_EQUAL, "XTS with equal keys accepted");
+		CHECK(xe->init(xe, cx, 32, k1, k2) == 0, "XTS-256 init");
 	}
 }
 
@@ -300,6 +347,16 @@ test_des(void)
 	static const uint8_t weak[8] = { 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };
 	uint8_t k[8] = { 0x13, 0x34, 0x57, 0x79, 0x9b, 0xbc, 0xdf, 0xf1 };
 	CHECK(xc_des_key_is_weak((void *)weak, 8) && !xc_des_key_is_weak(k, 8), "DES weak keys");
+	/* the same weak and semi-weak keys with their parity bits flipped: the bits are not part of the key */
+	static const uint8_t weak_even[8] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+	static const uint8_t semi[8] = { 0x01, 0x1f, 0x01, 0x1f, 0x01, 0x0e, 0x01, 0x0e };
+	uint8_t semi_even[8], k3[24];
+	for (int i = 0; i < 8; i++) semi_even[i] = semi[i] ^ 1;
+	CHECK(xc_des_key_is_weak((void *)weak_even, 8), "DES weak key without odd parity");
+	CHECK(xc_des_key_is_weak((void *)semi, 8) && xc_des_key_is_weak(semi_even, 8), "DES semi-weak key, both parities");
+	memcpy(k3, k, 8), memcpy(k3 + 8, k, 8), memcpy(k3 + 16, weak_even, 8);
+	CHECK(xc_des_key_is_weak(k3, 24), "triple DES key with a weak third part");
+	CHECK(memcmp(weak_even, (uint8_t[8]){0}, 8) == 0, "the key checked is left as it was");
 }
 
 static void
@@ -353,6 +410,18 @@ test_chachapoly(void)
 		xc_ccp_reset(NULL, &c), xc_ccp_setnonce(NULL, &c, nonce), xc_ccp_aad(NULL, &c, an, aad);
 		xc_ccp_decrypt(NULL, &c, n, ours, back);
 		CHECK(xc_ccp_verify(NULL, &c, tag) == CCMODE_INTEGRITY_FAILURE, "ChaCha20-Poly1305 forged tag accepted");
+		/* a message dropped halfway: after reset only setnonce goes on, and the next message is as if it were the first */
+		xc_ccp_reset(NULL, &c), xc_ccp_setnonce(NULL, &c, nonce), xc_ccp_aad(NULL, &c, an, aad);
+		if (n > 0) xc_ccp_encrypt(NULL, &c, rndn(n) + 1, pt, back);
+		xc_ccp_reset(NULL, &c);
+		CHECK(xc_ccp_encrypt(NULL, &c, 1, pt, back) != 0, "ChaCha20-Poly1305 encrypt after reset without a nonce");
+		CHECK(xc_ccp_aad(NULL, &c, 1, aad) != 0, "ChaCha20-Poly1305 aad after reset without a nonce");
+		uint8_t t2[16];
+		CHECK(xc_ccp_finalize(NULL, &c, t2) != 0, "ChaCha20-Poly1305 finalize after reset without a nonce");
+		xc_ccp_reset(NULL, &c), xc_ccp_setnonce(NULL, &c, nonce), xc_ccp_aad(NULL, &c, an, aad);
+		xc_ccp_encrypt(NULL, &c, n, pt, back);
+		CHECK(xc_ccp_finalize(NULL, &c, t2) == 0 && memcmp(back, theirs, n) == 0 && memcmp(t2, ttag, 16) == 0,
+		    "ChaCha20-Poly1305 message after a dropped one");
 	}
 }
 
@@ -396,6 +465,20 @@ test_rsa(void)
 		}
 		BN_free(bn), BN_free(be), EVP_PKEY_free(pk);
 	}
+	/* an object identifier that is no digest's, shorter than any: refused, and read no further than its own length */
+	{
+		ccrsa_pub_ctx_decl(ccn_sizeof(4096), key);
+		uint8_t *oid = malloc(5), dig[32] = {0}, sig[512] = {0};
+		bool valid = true;
+		memcpy(oid, (uint8_t[]){ 0x06, 0x03, 0x2b, 0x0e, 0x03 }, 5);
+		ccrsa_ctx_n(key) = ccn_nof(4096);
+		CHECK(xc_rsa_verify_pkcs1v15(key, oid, 32, dig, 512, sig, &valid) == CCRSA_INVALID_INPUT && !valid,
+		    "RSA with an unknown short OID");
+		oid[0] = 0x04;
+		CHECK(xc_rsa_verify_pkcs1v15(key, oid, 32, dig, 512, sig, &valid) == CCRSA_INVALID_INPUT, "RSA with no OID tag");
+		free(oid);
+	}
+	CHECK(frees_wrong == 0, "%d frees named another size than their allocation", frees_wrong);
 }
 
 static void
@@ -410,6 +493,29 @@ test_rng(void)
 	for (int i = 0; i < 10; i++) {
 		CHECK(counts[i] > 9000 && counts[i] < 11000, "uniform bucket %d: %llu", i, (unsigned long long)counts[i]);
 	}
+	/* kmem's generator: uniform, any lengths, and two of them differ */
+	_Alignas(16) uint8_t a[256], b[256];
+	CHECK(xc_kmem_rng_size() <= sizeof(a), "kmem generator size");
+	xc_kmem_rng_init(a), xc_kmem_rng_init(b);
+	memset(counts, 0, sizeof(counts));
+	for (int i = 0; i < 100000; i++) {
+		CHECK(xc_rng_uniform((struct ccrng_state *)a, 10, &v) == 0 && v < 10, "kmem uniform");
+		counts[v]++;
+	}
+	for (int i = 0; i < 10; i++) {
+		CHECK(counts[i] > 9000 && counts[i] < 11000, "kmem uniform bucket %d: %llu", i, (unsigned long long)counts[i]);
+	}
+	uint8_t x[1000], y[1000];
+	for (size_t off = 0; off < sizeof(x);) {
+		size_t m = 1 + rndn(sizeof(x) - off);
+		ccrng_generate((struct ccrng_state *)a, m, x + off);
+		off += m;
+	}
+	ccrng_generate((struct ccrng_state *)b, sizeof(y), y);
+	CHECK(memcmp(x, y, sizeof(x)) != 0, "two kmem generators gave the same bytes");
+	size_t ones = 0;
+	for (size_t i = 0; i < sizeof(x); i++) ones += (size_t)__builtin_popcount(x[i]);
+	CHECK(ones > 3700 && ones < 4300, "kmem generator bits: %zu ones of 8000", ones);
 }
 
 int

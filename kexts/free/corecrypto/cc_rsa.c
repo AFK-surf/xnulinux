@@ -74,8 +74,12 @@ xc_rsa_verify_pkcs1v15(ccrsa_pub_ctx_t key, const uint8_t *oid, size_t digest_le
 	*valid = false;
 	if (oid != NULL) {
 		size_t i;
+		/* a DER object identifier: tag 6 and a short-form length, then that many bytes */
+		if (oid[0] != 0x06 || oid[1] > 0x7f) {
+			return CCRSA_INVALID_INPUT;
+		}
 		for (i = 0; i < sizeof(digests) / sizeof(digests[0]); i++) {
-			if (memcmp(oid, digests[i].oid, digests[i].oid_size) == 0) {
+			if ((size_t)oid[1] + 2 == digests[i].oid_size && memcmp(oid, digests[i].oid, digests[i].oid_size) == 0) {
 				break;
 			}
 		}

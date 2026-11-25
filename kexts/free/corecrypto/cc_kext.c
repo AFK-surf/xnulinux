@@ -177,19 +177,23 @@ hmac_verify(crypto_digest_alg_t alg, const void *key, size_t key_size, const voi
 	return ok;
 }
 
-/* random numbers: every context is the host's generator */
+/* random numbers: a context is kmem's generator (the only kind crypto_random_* is given); none, the host's */
+static struct ccrng_state *
+random_rng(crypto_random_ctx_t ctx)
+{
+	return ctx != NULL ? (struct ccrng_state *)ctx : xc_rng(NULL);
+}
+
 static void
 random_generate(crypto_random_ctx_t ctx, void *random, size_t random_size)
 {
-	(void)ctx;
-	xc_random(random, random_size);
+	(void)ccrng_generate(random_rng(ctx), random_size, random);
 }
 
 static void
 random_uniform(crypto_random_ctx_t ctx, uint64_t bound, uint64_t *random)
 {
-	(void)ctx;
-	if (xc_rng_uniform(xc_rng(NULL), bound, random) != 0) {
+	if (xc_rng_uniform(random_rng(ctx), bound, random) != 0) {
 		xc_panic("corecrypto: crypto_random_uniform with bound 0");
 	}
 }
@@ -197,13 +201,13 @@ random_uniform(crypto_random_ctx_t ctx, uint64_t bound, uint64_t *random)
 static size_t
 random_kmem_ctx_size(void)
 {
-	return sizeof(uint64_t);
+	return xc_kmem_rng_size();
 }
 
 static void
 random_kmem_init(crypto_random_ctx_t ctx)
 {
-	(void)ctx;
+	xc_kmem_rng_init(ctx);
 }
 
 static struct crypto_functions functions = {

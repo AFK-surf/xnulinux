@@ -3,6 +3,7 @@
 # Inside the arm64 Ubuntu VM: the DroidVM Linux toolchain (native compile, no Darling: the kernel build does not need it)
 # and the xnu-12377 kernel from source.
 set -ex
+POC=$(cd "$(dirname "$0")/.." && pwd)
 export DEBIAN_FRONTEND=noninteractive
 if [ ! -x /usr/lib/llvm-21/bin/clang ]; then
   wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
@@ -53,5 +54,7 @@ python3 compat/xnu-linux/scripts/setup-appleclang.py fetch --directory $A
 [ -d $A/apple-tools ] || python3 compat/xnu-linux/scripts/setup-appleclang.py extract --directory $A
 ls $A/apple-tools/Library/Developer/CommandLineTools/usr/lib/clang/*/lib/darwin/ | grep cc_kext
 python3 scripts/setup-env.py x12377 --jobs 12
-JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -30
-ls -la out/k27/kernel-k27.macho
+# the first kernel build is the rebuild's: xnu-patches and xnulinux's corecrypto go into the tree before anything of it
+# is compiled (XNU's own corecrypto never is)
+[ -e ~/w/poc ] || ln -s "$POC" ~/w/poc	# where vm-xnu-rebuild.sh finds this repository
+bash "$POC"/scripts/vm-xnu-rebuild.sh

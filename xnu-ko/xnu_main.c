@@ -1325,6 +1325,9 @@ static int __init xnu_init(void)
 
 	if (fki_version() != 0)
 		return -22;
+	/* every random number XNU takes comes from Linux's generator (the boot seeds, LINUX64_CALL_RANDOM): seeded first */
+	err = fki_random_wait();
+	if (err) { logkv("xnu: Linux's random number generator is not seeded, err", (u64_t)err); return err; }
 	if (ramdisk) {
 		err = fki_blob_get(ramdisk, &rd_data, &rd_size, &rd_blob);
 		if (err) { logkv("xnu: cannot read the RAM disk, err", (u64_t)err); return err; }

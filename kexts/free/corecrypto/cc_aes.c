@@ -206,6 +206,9 @@ xts_init_dir(ccxts_ctx *ctx, size_t n, const void *dk, const void *tk, int enc)
 	struct xc_xts *x = (struct xc_xts *)ctx;
 	int rc;
 
+	if (n != 16 && n != 32) {	/* XTS-AES-128 and -256 only */
+		return CCERR_PARAMETER;
+	}
 	if (cc_cmp_safe(n, dk, tk) == 0) {
 		return CCERR_XTS_KEYS_EQUAL;
 	}

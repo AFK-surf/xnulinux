@@ -248,6 +248,12 @@ void fki_random(void *buf, unsigned long len)
 }
 EXPORT_SYMBOL(fki_random);
 
+int fki_random_wait(void)
+{
+	return wait_for_random_bytes();
+}
+EXPORT_SYMBOL(fki_random_wait);
+
 /*
  * cpu_list: the Linux CPUs of the foreign kernel's CPUs 0 .. n-1 (default: the same numbers). For machines where two
  * CPUs share a block-device interrupt (an NVMe with fewer queues than CPUs), which deadlocks two foreign CPUs on them.
