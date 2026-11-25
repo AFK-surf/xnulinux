@@ -11,7 +11,7 @@ dyld, libSystem, launchd, zsh and toybox) to its console shell.
 | Kext | From | Built as |
 |---|---|---|
 | XNU, `XnuCPU`, `XnuDisk`, `XnuDrm` | this repository | as for macOS (`vm-xnu-rebuild.sh`) |
-| `com.apple.kec.corecrypto` | PureDarwin's interim corecrypto fork (MPL-2.0), pinned | `kexts/free/patches/corecrypto-arm64e-sptr.patch` |
+| `com.apple.kec.corecrypto` | xnulinux (`kexts/free/corecrypto`: Mbed TLS behind the corecrypto interface, `docs/corecrypto.md`) | |
 | `com.apple.kec.amfi` | PureDarwin's permissive AMFI stub | |
 | `com.apple.kec.pthread` | PureDarwin (Apple's libpthread kext) | |
 | `com.apple.iokit.IOStorageFamily`, `HFSEncodings`, `hfs` | PureDarwin (Apple's open-source projects) | |
@@ -26,10 +26,8 @@ first makes an empty one: an `MH_FILESET` with the kernel's segments at the addr
 kernelcache and kernel collection of Apple's hidden from the build (a mount namespace with them replaced by empty files),
 the result is the same byte for byte. It also boots with no static trust cache (`TRUSTCACHE=`).
 
-PureDarwin's prebuilt kexts cannot be used. They are arm64 and this kernel is arm64e, so calls from the kernel through their C++ vtables and
-function pointers would fail pointer authentication. For the same reason the corecrypto patch signs the function
-pointers that corecrypto shares with the kernel (digest and mode descriptors, the PRNG's function table, RNG handles) as
-Apple's headers declare them (`CC_SPTR`).
+PureDarwin's prebuilt kexts cannot be used. They are arm64 and this kernel is arm64e, so calls from the kernel through
+their C++ vtables and function pointers would fail pointer authentication.
 
 `kexts/free/compat/` fills the few gaps between those sources and this kernel: `OSMalloc`, which this kernel no longer
 has; the kernel-internal `kalloc_type_impl` that pthread and AMFI reach for; `devfs_is_ready`, which only PureDarwin's
@@ -88,8 +86,6 @@ prelink info XNU's `OSKext` reads):
 
 ## Not done yet
 
-- corecrypto here is PureDarwin's interim fork. By its own README it is LLM-written and unaudited, and it must not be
-  relied on to protect anything.
 - The kernel headers the kexts build against come from this kernel's `installhdrs`. PureDarwin's AMFI stub also needs
   PureDarwin's CoreEntitlements and TrustCache headers.
 - Tested in the krunkit VM with 1 and 2 hosted CPUs: console shell, `launchctl list`, writes to the root, `halt`.

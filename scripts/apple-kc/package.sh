@@ -12,13 +12,15 @@
 set -euo pipefail
 POC=$(cd "$(dirname "$0")/../.." && pwd)
 DVM=${DVM:-$HOME/w/dvm}; KIT=${1:-$HOME/w/apple-kc-kit}
-[ -s $DVM/out/k27/natives.txt ] || { echo "$DVM/out/k27/natives.txt: run scripts/vm-xnu-rebuild.sh (with out/kc/kc27.bin) first" >&2; exit 1; }
-rm -rf $KIT; mkdir -p $KIT/kexts
-cp $DVM/out/k27/kernel-k27.macho $KIT/kernel.macho
-[ -e /lib/firmware/xnu/kc-free.bin ] && cp /lib/firmware/xnu/kc-free.bin $KIT/kc-free.bin
-python3 - $DVM $KIT "$(sha256sum $DVM/out/kc/kc27.bin | cut -d' ' -f1)" \
-	"$(git -C $POC rev-parse HEAD 2>/dev/null || echo unknown)" "${AMFI_PLATFORM:-26}" $(cat $DVM/out/k27/natives.txt) -- \
-	$(grep -v '^#' $POC/scripts/apple-kc/keep.txt) -- $(grep -v '^#' $POC/scripts/apple-kc/rebind.txt) <<'PY'
+[ -s "$DVM/out/k27/natives.txt" ] || { echo "$DVM/out/k27/natives.txt: run scripts/vm-xnu-rebuild.sh (with out/kc/kc27.bin) first" >&2; exit 1; }
+mapfile -t lines < "$DVM/out/k27/natives.txt"	# one kext description a line, paths whole (a file not read stops here)
+natives=(); for l in "${lines[@]}"; do [ -n "$l" ] && natives+=("$l"); done
+rm -rf "$KIT"; mkdir -p "$KIT/kexts"
+cp "$DVM/out/k27/kernel-k27.macho" "$KIT/kernel.macho"
+[ -e /lib/firmware/xnu/kc-free.bin ] && cp /lib/firmware/xnu/kc-free.bin "$KIT/kc-free.bin"
+python3 - "$DVM" "$KIT" "$(sha256sum "$DVM/out/kc/kc27.bin" | cut -d' ' -f1)" \
+	"$(git -C "$POC" rev-parse HEAD 2>/dev/null || echo unknown)" "${AMFI_PLATFORM:-26}" "${natives[@]}" -- \
+	$(grep -v '^#' "$POC/scripts/apple-kc/keep.txt") -- $(grep -v '^#' "$POC/scripts/apple-kc/rebind.txt") <<'PY'
 import json, os, shutil, sys
 from pathlib import Path
 dvm, kit, kc_sha, poc_rev, amfi = sys.argv[1:6]
@@ -56,4 +58,4 @@ keep = [k for k in keep if k and not (k in seen or seen.add(k))]
 }, indent=1) + '\n')
 print(f'{kit}: kernel, {len(specs)} kexts of ours, {len(keep)} Apple kexts to keep')
 PY
-du -sh $KIT
+du -sh "$KIT"
