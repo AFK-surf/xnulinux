@@ -22,6 +22,10 @@ virglrenderer on the machine's Vulkan driver (`gpu/xnu-drm/xnudrmd_virgl.c`). Ub
 `vkCreateDevice` there; `gpu/build-virglrenderer.sh` builds and installs 1.2.0 with Venus. With `GPU=auto` and the
 Venus driver in `/Library/GPUBundles/XnuCpuMetal.bundle`, Metal and WindowServer run on `Virtio-GPU Venus (NVIDIA GB10)`.
 
+The backend's shared memory is Linux's 4 KB pages, not contiguous, and XnuDrm cannot map those into a task with 16 KB VM
+pages (`map handle ...: 0xe00002bd`; every client then falls back to the software renderer): `xnulinux-boot.sh` starts
+XNU with `vm16k=0` when xnudrmd serves this backend.
+
 ## In a KVM guest
 
 `guest/`: an arm64 Ubuntu guest under KVM, QEMU run from a container (`Dockerfile`, `run-vm.sh`, `vm.sh`); KVM on the

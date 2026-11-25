@@ -108,6 +108,11 @@ if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
   done
   if [ "$DRM_READY" = 1 ]; then
     echo "gpu: xnudrmd ready on /dev/dri/renderD128 (journalctl -u xnudrmd)"
+    # The virglrenderer backend's shared memory is Linux's 4 KB pages, wherever they are: XnuDrm cannot map them into a
+    # task whose VM pages are 16 KB (xnu.ko's default), so the hosted system gets 4 KB VM pages (override: XNU_ARGS)
+    if sudo journalctl _SYSTEMD_INVOCATION_ID="$DRM_INV" -q --no-pager 2>/dev/null | grep "serving virglrenderer" >/dev/null; then
+      VM16K=vm16k=0
+    fi
     # GPU name for System Information (override: GPU_MODEL=)
     GPU_MODEL=${GPU_MODEL:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)}
   else
@@ -130,7 +135,7 @@ for try in 1 2 3 4 5 6 7 8 9; do
   sudo dmesg -C
   sudo setsid nohup insmod xnu-ko/xnu.ko mode=3 cpus="$CPUS" ram_mb="$RAM_MB" image="$IMAGE" \
     ${TRUSTCACHE:+trustcache="$TRUSTCACHE"} disk="$DISK" root_uuid="$ROOT_UUID" boot_uuid="$BOOT_UUID" preboot_uuid="$BOOT_UUID" \
-    console_in="$CONSOLE_IN" input_in="$INPUT_IN" fb_dump="$FB_DUMP" keystore="$KEYSTORE" bootargs="\"$BOOTARGS\"" "${NAMES[@]}" ${XNU_ARGS:-} \
+    console_in="$CONSOLE_IN" input_in="$INPUT_IN" fb_dump="$FB_DUMP" keystore="$KEYSTORE" bootargs="\"$BOOTARGS\"" "${NAMES[@]}" ${VM16K:-} ${XNU_ARGS:-} \
     > /var/tmp/xnu-insmod.log 2>&1 < /dev/null &
   sleep 5
   if sudo dmesg | grep -aE "fki: carve-out .* (overlaps|is not all RAM)" >/dev/null; then	# a configuration error: no retry
