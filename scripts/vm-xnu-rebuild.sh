@@ -22,6 +22,17 @@ grep -h '^+++ b/' $P/*.patch | sed 's|^+++ b/||' > $T/.linux64-patched
 # the machine layer's headers (shared with xnu.ko), where every component's sources find them
 mkdir -p $T/EXTERNAL_HEADERS/linux64
 for h in $P/include/*.h; do cmp -s $h $T/EXTERNAL_HEADERS/linux64/$(basename $h) || cp $h $T/EXTERNAL_HEADERS/linux64/; done
+# the corecrypto interface: xnulinux's own headers and kernel side (xnu-patches/corecrypto) in place of the tree's
+# corecrypto, whose files are under Apple's corecrypto internal-use license (0008 drops them from the build). Files that
+# come out the same keep their times.
+mirror() {	# mirror SRC DST: DST holds exactly SRC's files
+  mkdir -p $2
+  for f in $(ls -A $2); do [ -e $1/$f ] || rm -rf $2/$f; done
+  for f in $(ls -A $1); do cmp -s $1/$f $2/$f || cp $1/$f $2/$f; done
+}
+rm -rf $T/osfmk/corecrypto $T/osfmk/arm64/corecrypto
+mirror $P/corecrypto/include/corecrypto $T/EXTERNAL_HEADERS/corecrypto
+mirror $P/corecrypto/kernel $T/osfmk/xnulinux_crypto
 t=$SECONDS; JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -15; echo "kernel: $((SECONDS - t)) s"
 if [ -e out/kc/kc27.bin ]; then
   cp k27/segaddrs.sh /tmp/segaddrs.before
