@@ -12,7 +12,7 @@ for what they install is the user's responsibility.
 |---|---|---|
 | Kernel collection | `kc-free.bin`: our XNU, our kexts, PureDarwin's kexts built from source | `kc-apple.bin`: the same kernel and our kexts, plus Apple's kexts, linked on the user's machine |
 | System disk | PureDarwin's userland on HFS+ (we build it) | made by Apple's installer from Apple's IPSW (the user makes it) |
-| Licenses | APSL-2.0, BSD, MIT; MPL-2.0 for corecrypto (§2.3) | Apple's, accepted by the user |
+| Licenses | APSL-2.0, BSD, MIT; Apache-2.0 for Mbed TLS (corecrypto) | Apple's, accepted by the user |
 
 Both boot on the same `xnu.ko` and kernel, so a host can switch between them with `IMAGE=` (§4).
 
@@ -55,11 +55,10 @@ macOS build we support gets its own kit, and `link.sh` refuses any other kernelc
 - `scripts/puredarwin-root.sh` takes the root file system from PureDarwin's `image-arm64-virt-minimal`, and
   `scripts/mk-puredarwin-disk.sh` makes the HFS+ disk and its `MAC_CONF`. Pin the PureDarwin revision, and ship its
   source references with the disk.
-- PureDarwin's kexts in `kc-free.bin` (`IOStorageFamily`, `HFSEncodings`, `hfs`, `pthread`, the AMFI stub,
-  corecrypto) are built from source as arm64e with this kernel's flags (`docs/free-kc.md`).
-- **Blocker for a production launch:** the corecrypto in it is PureDarwin's interim fork. Its own README says it is
-  LLM-written and unaudited, and it is not to be relied on. Replace it before offering PureDarwin instances to anyone
-  who would store secrets in them.
+- PureDarwin's kexts in `kc-free.bin` (`IOStorageFamily`, `HFSEncodings`, `hfs`, `pthread`, the AMFI stub) are built
+  from source as arm64e with this kernel's flags (`docs/free-kc.md`); its corecrypto is xnulinux's, on Mbed TLS
+  (`docs/corecrypto.md`).
+- PureDarwin's userland still carries PureDarwin's interim `libcorecrypto` (unaudited, by its own README) on its disk.
 
 ### 2.4 The GPU parts for macOS users
 
@@ -142,7 +141,7 @@ Apple's installer (`tart` or another Virtualization.framework installer).
 
 | Gap | Effect on the service |
 |---|---|
-| PureDarwin's corecrypto is unaudited (§2.3) | blocks offering PureDarwin for anything that keeps secrets |
+| PureDarwin's userland `libcorecrypto` is PureDarwin's unaudited interim fork (§2.3) | replace it on the PureDarwin disk before offering it for anything that keeps secrets |
 | Making the macOS disk needs a Mac with Xcode and `tart` (`mk-macvm-disk.sh`), and the PureDarwin disk needs `hdiutil` (`mk-puredarwin-disk.sh`) | users need a Mac to make their macOS disk; a Linux disk maker (from the IPSW's APFS images) would remove that. Check `tart`'s own license for commercial use, or use another Virtualization.framework installer. The PureDarwin disk should move to a Linux build (`mkfs.hfsplus`) so the pipeline runs without a Mac |
 | One kit per macOS build, fixed segment slots | each macOS release needs a new kit before users can update |
 | AMFI relaxed (`amfi_get_out_of_my_way=1`) and SIP partly off (`lp-sip0`); the OS cryptex merged into the system volume | the hosted macOS is less locked down than a real Mac. State this in the service's documentation (`docs/production.md` §3) |

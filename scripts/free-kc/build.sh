@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # In the VM, after scripts/vm-xnu-rebuild.sh: a kernel collection with none of Apple's kexts. The hosted kernel and xnulinux's
 # own kexts (XnuCPU, XnuDisk, XnuDrm), plus the kexts a Darwin userland needs, built from PureDarwin's sources as arm64e with
-# this kernel's own compile flags and headers (scripts/free-kc/kcc.py): corecrypto, a permissive AMFI, pthread,
-# IOStorageFamily, HFSEncodings and hfs. It boots PureDarwin's userland from an HFS+ disk (scripts/mk-puredarwin-disk.sh):
+# this kernel's own compile flags and headers (scripts/free-kc/kcc.py): a permissive AMFI, pthread, IOStorageFamily,
+# HFSEncodings and hfs; and xnulinux's own corecrypto kext (kexts/free/corecrypto: Mbed TLS behind the kernel's corecrypto
+# interface). It boots PureDarwin's userland from an HFS+ disk (scripts/mk-puredarwin-disk.sh):
 #   IMAGE=xnu/kc-free.bin DISK=... ROOT_UUID=... scripts/xnulinux-boot.sh
-# Sources are fetched at pinned revisions; corecrypto gets kexts/free/patches/corecrypto-arm64e-sptr.patch.
+# Sources are fetched at pinned revisions (Mbed TLS: kexts/free/corecrypto/mbedtls.rev).
 #
 # Nothing of Apple's is read: the collection is linked into an empty one that mk-template.py makes from layout numbers
 # (layout.json) and XNU's own pseudo-extensions.
@@ -13,7 +14,7 @@ set -euo pipefail
 POC=$(cd "$(dirname "$0")/../.." && pwd)
 DVM=${DVM:-$HOME/w/dvm}; W=${FREE_KC_WORK:-$HOME/w/free-kc}; OUT=${OUT:-/lib/firmware/xnu/kc-free.bin}
 PD_URL=https://github.com/PureDarwin/PureDarwin PD_REV=0c1990c803c13b68cad4df3f6dc34ba4306fc789
-CC_URL=https://github.com/Vali0004/corecrypto CC_REV=fa94ec601f8d6b3a2a39b974f29c5acaf8a9fa2d
+MBEDTLS_URL=https://github.com/Mbed-TLS/mbedtls MBEDTLS_REV=$(sed -n 's/^MBEDTLS_REV=//p' $POC/kexts/free/corecrypto/mbedtls.rev)
 export DVM NETINC=${NETINC:-$POC/build/netinc}
 K="python3 $POC/scripts/free-kc/kcc.py --macos"; O=$W/obj; S=$W/src; F=$POC/kexts/free
 mkdir -p $S $O
@@ -28,8 +29,7 @@ fetch() {	# repo rev dir [paths...]: a shallow checkout of one revision, only th
 E=src/Kernel/Extensions
 fetch $PD_URL $PD_REV $S/pd /$E/IOStorageFamily/ /$E/HFSEncodings/ /$E/hfs/ /$E/pthread/ /$E/amfi/ /src/Kernel/xnu/EXTERNAL_HEADERS/ \
 	/src/Libraries/libSystem/pthread/include/ /src/Libraries/libSystem/pthread/private/
-fetch $CC_URL $CC_REV $S/corecrypto
-git -C $S/corecrypto apply --check $F/patches/corecrypto-arm64e-sptr.patch 2>/dev/null && git -C $S/corecrypto apply $F/patches/corecrypto-arm64e-sptr.patch
+fetch $MBEDTLS_URL $MBEDTLS_REV $S/mbedtls /include/ /library/
 E=$S/pd/src/Kernel/Extensions
 
 # this kernel's Kernel.framework (xnu installhdrs into objects of its own, k27h-*), what --kext-view builds against
@@ -44,15 +44,11 @@ if [ ! -d $KF/PrivateHeaders ]; then
 fi
 
 # the kexts (each step stops the build when a source fails)
-( cd $S/corecrypto && $K $O/corecrypto --kext-view $(for c in */include; do echo -I $PWD/$c; done) -I $PWD/corecrypto_kext \
-	--cflag=-Wno-nullability-completeness $(python3 - <<'PY'
-import re
-comps = "cc ccaes ccansikdf ccasn1 ccblowfish cccast ccchacha20poly1305 cccmac ccdes ccdigest ccdrbg cchkdf cchmac ccmd2 ccmd4 ccmd5 ccmode ccn ccnistkdf ccpad ccpbkdf2 ccrc2 ccrc4 ccripemd ccrng ccsha1 ccsha2 ccwrap cckprng ccpost ccrsa cczp".split()
-for c in comps:   # pd/corecrypto-pd.cmake's PD_CORECRYPTO_KERNEL_COMPONENTS
-    s = open(f'cmake/components/{c}.cmake').read()
-    print(' '.join(f'{c}/src/{f}' for f in re.search(r'set\(CORECRYPTO_%s_SOURCES(.*?)\)' % c, s, re.S).group(1).split()))
-PY
-) corecrypto_kext/main.c )
+# corecrypto: the kernel's own view of its headers (it registers with libkern's and osfmk's interfaces), not the macOS target
+C=$F/corecrypto
+( cd $C && python3 $POC/scripts/free-kc/kcc.py $O/corecrypto -I $C -I $S/mbedtls/include -I $S/mbedtls/library --after $C/compat \
+	-D 'MBEDTLS_CONFIG_FILE="mbedtls_config_xnulinux.h"' cc_kext.c cc_digest.c cc_aes.c cc_des.c cc_chachapoly.c cc_rsa.c \
+	cc_platform.c cc_selftest.c $(for f in $(sed -n 's/^MBEDTLS_SOURCES=//p' $C/mbedtls.rev); do echo $S/mbedtls/library/$f; done) )
 # PureDarwin's AMFI stub, with PureDarwin's CoreEntitlements headers (it declares their coreentitlements_t itself) and
 # TrustCache headers (after this kernel's own)
 mkdir -p $W/ce-inc; ln -sfn $S/pd/src/Kernel/xnu/EXTERNAL_HEADERS/CoreEntitlements $W/ce-inc/CoreEntitlements

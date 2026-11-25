@@ -20,7 +20,7 @@ import argparse, json, os, subprocess, sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 DVM = Path(os.environ.get('DVM', Path.home() / 'w/dvm'))
-NETINC = Path(os.environ.get('NETINC', Path.home() / 'w/poc/build/netinc'))   # TargetConditionals.h (vm-xnu-rebuild.sh)
+NETINC = Path(os.environ.get('NETINC', Path(__file__).resolve().parents[2] / 'build/netinc'))   # TargetConditionals.h (vm-xnu-rebuild.sh)
 KF = Path(os.environ.get('KERNEL_FRAMEWORK', DVM / 'out/x12377/build/xnu/k27h-dst/System/Library/Frameworks/Kernel.framework/Versions/A'))
 tree = DVM / 'out/x12377/build/xnu/k27-obj/DEVELOPMENT_ARM64_BCM2837'
 p = argparse.ArgumentParser()

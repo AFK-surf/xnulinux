@@ -15,7 +15,8 @@ from pathlib import Path
 SRC, O, OUT = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 OUT.mkdir(parents=True, exist_ok=True)
 KEXTS = {   # name: (Info.plist below SRC, bundle id when the plist leaves it to the build, start, stop, compat objects)
-    'corecrypto': ('corecrypto/corecrypto_kext/Info.plist', 'com.apple.kec.corecrypto', '_corecrypto_start', '_corecrypto_stop', []),
+    'corecrypto': (str(Path(__file__).resolve().parents[2] / 'kexts/free/corecrypto/Info.plist'), None, '_corecrypto_start',
+                   '_corecrypto_stop', []),
     'amfi': ('pd/src/Kernel/Extensions/amfi/Info.plist', None, '_amfi_kext_start', '_amfi_kext_stop', ['kalloc-type']),
     'pthread': ('pd/src/Kernel/Extensions/pthread/pthread-Info.plist', None, '_pthread_start', '_pthread_stop', ['kalloc-type']),
     'IOStorageFamily': ('pd/src/Kernel/Extensions/IOStorageFamily/Info.plist', None, None, None, ['osmalloc']),

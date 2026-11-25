@@ -54,7 +54,8 @@ sudo dmesg -n "${CONLEVEL:-1}"
 # fki has the hosted kernel's DRAM from its load at boot (scripts/vm-install-fki-service.sh): reload it only when it changed,
 # with the same carve-out
 CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || echo 0x200000000) carve_mb=$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null || echo 8156)"
-CPULIST=$(cat /sys/module/fki/parameters/cpu_list 2>/dev/null | tr -d '\n'); [ -z "$CPULIST" ] || CARVE="$CARVE cpu_list=$CPULIST"
+# (an fki.ko from before cpu_list has none: set -e must not stop here)
+CPULIST=$(tr -d '\n' 2>/dev/null < /sys/module/fki/parameters/cpu_list || true); [ -z "$CPULIST" ] || CARVE="$CARVE cpu_list=$CPULIST"
 if [ "$(cat /sys/module/fki/srcversion 2>/dev/null)" != "$(modinfo -F srcversion fki-ko/fki.ko)" ]; then
   sudo systemctl stop xnudrmd 2>/dev/null || true	# it holds fki's /dev/xnu-hostcall
   sudo rmmod fki 2>/dev/null || true
@@ -77,7 +78,7 @@ NCPU=$(nproc --all)
 HOSTCPUS=	# Linux's CPUs that XNU does not take
 if [ "$NCPU" -gt "$CPUS" ]; then
   # XNU's CPUs: Linux CPUs 0..CPUS-1, or the first CPUS of fki's cpu_list
-  XCPUS=$(cat /sys/module/fki/parameters/cpu_list 2>/dev/null | tr -d '\n')
+  XCPUS=$(tr -d '\n' 2>/dev/null < /sys/module/fki/parameters/cpu_list || true)
   MASK=$(python3 -c "
 l = [int(c) for c in '$XCPUS'.split(',') if c][:$CPUS] or list(range($CPUS))
 m = (1 << $NCPU) - 1
@@ -121,7 +122,7 @@ if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
   fi
 fi
 # Chip name for System Information (override: SOC_NAME=)
-XCPU0=$(cat /sys/module/fki/parameters/cpu_list 2>/dev/null | tr -d '\n' | cut -d, -f1); XCPU0=${XCPU0:-0}
+XCPU0=$( (tr -d '\n' 2>/dev/null < /sys/module/fki/parameters/cpu_list || true) | cut -d, -f1); XCPU0=${XCPU0:-0}
 SOC_NAME=${SOC_NAME:-$(lscpu -e=CPU,MODELNAME 2>/dev/null | awk -v c="$XCPU0" '$1 == c { $1 = ""; sub(/^ +/, ""); print }' || true)}
 [ "$SOC_NAME" = - ] && SOC_NAME=	# lscpu's "-": the CPU has no model name (a guest)
 NAMES=()

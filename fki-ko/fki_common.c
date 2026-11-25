@@ -76,6 +76,12 @@ void fki_random(void *buf, unsigned long len)
 }
 EXPORT_SYMBOL(fki_random);
 
+int fki_random_wait(void)
+{
+	return wait_for_random_bytes();
+}
+EXPORT_SYMBOL(fki_random_wait);
+
 static int cpu_list[NR_CPUS];
 static int cpu_list_n;
 module_param_array(cpu_list, int, &cpu_list_n, 0444);
