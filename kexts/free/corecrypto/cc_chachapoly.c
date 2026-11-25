@@ -22,6 +22,9 @@ _Static_assert(sizeof(mbedtls_chachapoly_context) <= sizeof(ccchacha20poly1305_c
 
 #define C(ctx) ((mbedtls_chachapoly_context *)(void *)(ctx))
 
+/* Mbed TLS's states of a message (library/chachapoly.c of the pinned release) */
+enum { CCP_INIT = 0, CCP_AAD = 1, CCP_TEXT = 2 };
+
 static const struct ccchacha20poly1305_info xc_ccp_info_value;
 
 const struct ccchacha20poly1305_info *
@@ -38,7 +41,7 @@ xc_ccp_init(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *
 	return mbedtls_chachapoly_setkey(C(ctx), key) ? CCERR_PARAMETER : 0;
 }
 
-/* the key kept, the message dropped: nothing but setnonce goes on from here (Mbed TLS's state 0, before a nonce) */
+/* the key kept, the message dropped: nothing but setnonce goes on from here */
 int
 xc_ccp_reset(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx)
 {
@@ -48,7 +51,7 @@ xc_ccp_reset(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx 
 	mbedtls_platform_zeroize(&c->poly1305_ctx, sizeof(c->poly1305_ctx));
 	c->aad_len = 0;
 	c->ciphertext_len = 0;
-	c->state = 0;
+	c->state = CCP_INIT;
 	return 0;
 }
 
@@ -59,7 +62,10 @@ xc_ccp_setnonce(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_c
 	return mbedtls_chachapoly_starts(C(ctx), nonce, MBEDTLS_CHACHAPOLY_ENCRYPT) ? CCERR_PARAMETER : 0;
 }
 
-/* not provided: XNU's interface (libkern/crypto/chacha20poly1305.h) has no call that reaches it */
+/*
+ * Not provided: chacha20poly1305_incnonce (libkern/crypto/chacha20poly1305.h) returns CCMODE_NOT_SUPPORTED. Nothing in
+ * the kernel calls it; ESP sets each packet's nonce (setnonce).
+ */
 int
 xc_ccp_incnonce(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, uint8_t *nonce)
 {
@@ -106,11 +112,23 @@ xc_ccp_decrypt(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ct
 	return crypt(ctx, nbytes, ctext, ptext, MBEDTLS_CHACHAPOLY_DECRYPT);
 }
 
+/* a message ends once: Mbed TLS would finish a finished one again (state 3) */
+static int
+finish(ccchacha20poly1305_ctx *ctx, uint8_t tag[CCPOLY1305_TAG_NBYTES])
+{
+	mbedtls_chachapoly_context *c = C(ctx);
+
+	if (c->state != CCP_AAD && c->state != CCP_TEXT) {	/* a nonce set, the message not ended */
+		return CCERR_CALL_SEQUENCE;
+	}
+	return mbedtls_chachapoly_finish(c, tag) ? CCERR_CALL_SEQUENCE : 0;
+}
+
 int
 xc_ccp_finalize(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx *ctx, uint8_t *tag)
 {
 	(void)info;
-	return mbedtls_chachapoly_finish(C(ctx), tag) ? CCERR_CALL_SEQUENCE : 0;
+	return finish(ctx, tag);
 }
 
 /* 0 only when the tag is the message's */
@@ -121,7 +139,7 @@ xc_ccp_verify(const struct ccchacha20poly1305_info *info, ccchacha20poly1305_ctx
 	int rc;
 
 	(void)info;
-	if (mbedtls_chachapoly_finish(C(ctx), t)) {
+	if (finish(ctx, t)) {
 		return CCERR_CALL_SEQUENCE;
 	}
 	rc = cc_cmp_safe(sizeof(t), t, tag) ? CCMODE_INTEGRITY_FAILURE : 0;

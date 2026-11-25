@@ -24,7 +24,7 @@ callers agree on. `scripts/corecrypto-abi-check.sh` checks it: every kernel sour
 compiled twice with its own recipe, once with XNU's headers (read from the k27 tree's history into a temporary directory,
 never kept) and once with xnulinux's, and the objects' code, data, relocations and section sizes must be the same. All 22
 such sources this configuration builds are, C and C++, xnulinux's kernel side and the PRNG's registration among them (the
-one other, NFS's Kerberos, is not built). The check fails when it finds no objects to compare.
+one other, NFS's Kerberos, is not built). The check fails when a source other than that one has no recipe, or nothing was compared.
 
 ## The provider
 
@@ -34,9 +34,9 @@ one other, NFS's Kerberos, is not built). The check fails when it finds no objec
 |---|---|
 | Digests | MD5, SHA-1, SHA-224/256/384/512: Mbed TLS's block functions and padding on the interface's digest contexts |
 | HMAC | RFC 2104 over those digests, in the interface's HMAC context |
-| AES | ECB, CBC, CTR, XTS (IEEE 1619 tweak over Mbed TLS's AES), GCM (Mbed TLS's); arm64 with the CPU's AES and SHA-256 instructions |
+| AES | ECB, CBC, CTR, XTS (IEEE 1619 tweak over Mbed TLS's AES), GCM (Mbed TLS's; tags of 4, 8 and 12 to 16 bytes, SP 800-38D's); arm64 with the CPU's AES and SHA-256 instructions |
 | DES, triple DES | ECB, CBC; weak keys and parity; CBC-CS3 (RFC 3962) over any CBC mode |
-| ChaCha20-Poly1305 | Mbed TLS's (RFC 8439) |
+| ChaCha20-Poly1305 | Mbed TLS's (RFC 8439); not `chacha20poly1305_incnonce`, which nothing in the kernel calls (`CCMODE_NOT_SUPPORTED`) |
 | RSA | PKCS #1 v1.5 signature verification (Mbed TLS's) |
 | Random numbers | the kernel PRNG and `ccrng`: the host's generator. kmem's (`crypto_random_kmem_*`, which must take no lock once set up): ChaCha20 with fast key erasure, keyed from the host when kmem sets it up |
 

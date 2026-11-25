@@ -4,13 +4,14 @@
 # kernelcache is there) relink the kernel collection with Apple's kexts. The kernel's segment slots inside the collection
 # (k27/segaddrs.sh) follow the kernel's size: when kc27-layout.py moves them, the kernel is linked again.
 set -e -o pipefail	# a failed kernel build stops here: never repackage the previous kernel
+POC=${POC:-$(cd "$(dirname "$0")/.." && pwd)}	# this repository: its patches, kexts and linker
 cd ~/w/dvm
 export PATH=$PATH:/usr/lib/llvm-21/bin
 T=out/k27/xnu
 # back to the tree's own sources: every file the patches touched last time (.linux64-patched) or touch now, then the
 # patches again. A file that comes out as it was keeps its old time, so the build recompiles only what changed (assert.h
 # and cpu_data.h are included everywhere: touching them rebuilds the whole kernel)
-P=~/w/poc/xnu-patches
+P=$POC/xnu-patches
 FILES=$(cat $T/.linux64-patched 2>/dev/null; grep -h '^+++ b/' $P/*.patch | sed 's|^+++ b/||')
 SNAP=$(mktemp -d)
 for f in $FILES; do [ -e $T/$f ] && mkdir -p $SNAP/$(dirname $f) && cp -p $T/$f $SNAP/$f; done
@@ -46,7 +47,7 @@ if [ -e out/kc/kc27.bin ]; then
   # IONetworkingFamily's kernel headers (IOKit/network/*.h) for XnuEthernet: Apple's open source IONetworkingFamily-188 (APSL,
   # fetched here, not kept in the repository), whose __PRIVATE_SPI__ declarations name the reserved slots 2-5 the shipped family
   # uses (the SDK's headers leave slot 5 a reserved stub the collection does not export)
-  NETINC=~/w/poc/build/netinc; NETSRC=~/w/poc/build/IONetworkingFamily-188; mkdir -p $NETINC/IOKit
+  NETINC=$POC/build/netinc; NETSRC=$POC/build/IONetworkingFamily-188; mkdir -p $NETINC/IOKit
   [ -e $NETSRC/IOEthernetController.h ] || git clone -q --depth 1 --branch IONetworkingFamily-188 https://github.com/apple-oss-distributions/IONetworkingFamily.git $NETSRC
   ln -sfn $NETSRC $NETINC/IOKit/network
   # IOHIDFamily's kernel headers (IOKit/hid/*.h) for XnuInput and IOStorageFamily's (IOKit/storage/*.h) for XnuDisk: the SDK's
@@ -56,7 +57,7 @@ if [ -e out/kc/kc27.bin ]; then
       ln -sfn $PWD/${h%%/System/*}/usr/include/TargetConditionals.h $NETINC/TargetConditionals.h
       ln -sfn $PWD/$h/../../HIDDriverKit $NETINC/HIDDriverKit; break; }	# IOHIDDevice.h includes HIDDriverKit/IOHIDDevice.h
   done
-  for j in ~/w/poc/kexts/*/*.json; do
+  for j in $POC/kexts/*/*.json; do
     [ -e "$j" ] || continue
     n=$(basename $j .json)
     # a kext that does not build is left out of the collection (reported), not the whole rebuild
@@ -67,14 +68,14 @@ if [ -e out/kc/kc27.bin ]; then
   # the collection (scripts/kclink): the kernel, xnulinux's kexts, and the Apple kexts of scripts/apple-kc/keep.txt from
   # macOS 27.2's kernelcache
   t=$SECONDS
-  python3 ~/w/poc/scripts/kclink/kclink.py out/kc/kc27.bin out/k27/kernel-k27.macho out/k27/kc-k27.bin \
-    --keep $(grep -v '^#' ~/w/poc/scripts/apple-kc/keep.txt) --native $NATIVE \
-    --rebind $(grep -v '^#' ~/w/poc/scripts/apple-kc/rebind.txt) > out/k27/kclink.log 2>&1 ||
+  python3 $POC/scripts/kclink/kclink.py out/kc/kc27.bin out/k27/kernel-k27.macho out/k27/kc-k27.bin \
+    --keep $(grep -v '^#' $POC/scripts/apple-kc/keep.txt) --native $NATIVE \
+    --rebind $(grep -v '^#' $POC/scripts/apple-kc/rebind.txt) > out/k27/kclink.log 2>&1 ||
     { tail -5 out/k27/kclink.log; echo "kclink failed: out/k27/kclink.log"; exit 1; }
   grep -E '^wrote|vtable check' out/k27/kclink.log; echo "collection: $((SECONDS - t)) s"
   # AMFI of the collection's macOS expects the code-signature platform version of that build; the system disk's binaries
   # carry their own (macOS 27.0.1: 26 where 27.2's AMFI expects 27)
-  python3 ~/w/poc/scripts/kc-amfi-platform.py out/k27/kc-k27.bin ${AMFI_PLATFORM:-26}
+  python3 $POC/scripts/kc-amfi-platform.py out/k27/kc-k27.bin ${AMFI_PLATFORM:-26}
   sudo cp out/k27/kc-k27.bin /lib/firmware/xnu/kc.bin
 fi
 ls -la out/k27/kernel-k27.macho

@@ -44,17 +44,17 @@ patch_cctools() {
 }
 python3 scripts/setup-env.py toolchain --jobs 12
 patch_cctools
-# decomment keeps getc() in a char: EOF never matches where char is unsigned (aarch64) and it spins forever
-D=out/k27/xnu/SETUP/decomment/decomment.c
-[ -f $D ] && sed -i 's/^\tchar bufchar;/\tint bufchar;/' $D && grep -n 'bufchar;' $D && rm -f out/x12377/build/xnu/hdrs-obj/SETUP/decomment/decomment
-pkill -x decomment || true
 # libclang_rt.cc_kext comes from the CLTools package (unpacked only; Darling is not needed for it)
 A=toolchains/linux/appleclang; mkdir -p $A
 python3 compat/xnu-linux/scripts/setup-appleclang.py fetch --directory $A
 [ -d $A/apple-tools ] || python3 compat/xnu-linux/scripts/setup-appleclang.py extract --directory $A
 ls $A/apple-tools/Library/Developer/CommandLineTools/usr/lib/clang/*/lib/darwin/ | grep cc_kext
+# the k27 tree first (setup-env's x12377 step makes it and runs its installhdrs at once), for decomment: it keeps getc()
+# in a char, so EOF never matches where char is unsigned (aarch64) and it spins forever
+python3 -c "import importlib.util as u; s = u.spec_from_file_location('setup_env', 'scripts/setup-env.py'); m = u.module_from_spec(s); s.loader.exec_module(m); m.kernel_tree()"
+D=out/k27/xnu/SETUP/decomment/decomment.c
+sed -i 's/^\tchar bufchar;/\tint bufchar;/' $D && grep -n 'int bufchar;' $D && rm -f out/x12377/build/xnu/hdrs-obj/SETUP/decomment/decomment
 python3 scripts/setup-env.py x12377 --jobs 12
 # the first kernel build is the rebuild's: xnu-patches and xnulinux's corecrypto go into the tree before anything of it
 # is compiled (XNU's own corecrypto never is)
-[ -e ~/w/poc ] || ln -s "$POC" ~/w/poc	# where vm-xnu-rebuild.sh finds this repository
 bash "$POC"/scripts/vm-xnu-rebuild.sh

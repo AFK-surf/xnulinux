@@ -125,6 +125,9 @@ cbc_run(const cccbc_ctx *ctx, int mode, cccbc_iv *iv, size_t nblocks, const void
 	if (nblocks == 0) {
 		return 0;
 	}
+	if (nblocks > SIZE_MAX / 16) {
+		return CCMODE_INVALID_INPUT;
+	}
 	aes_load(&c, (const struct xc_aes_key *)ctx);
 	rc = mbedtls_aes_crypt_cbc(&c, mode, nblocks * 16, (unsigned char *)iv, in, out);
 	mbedtls_platform_zeroize(&c, sizeof(c));
@@ -421,7 +424,8 @@ gcm_finalize(ccgcm_ctx *ctx, size_t tag_nbytes, void *tag)
 	if (c->state != GCM_AAD && c->state != GCM_TEXT) {
 		return CCMODE_INVALID_CALL_SEQUENCE;
 	}
-	if (tag_nbytes == 0 || tag_nbytes > sizeof(t)) {
+	/* the tag lengths of NIST SP 800-38D (5.2.1.2): 12 to 16 bytes, and 4 or 8 */
+	if (tag_nbytes != 4 && tag_nbytes != 8 && (tag_nbytes < 12 || tag_nbytes > sizeof(t))) {
 		return CCMODE_INVALID_INPUT;
 	}
 	if (mbedtls_gcm_finish(&c->g, NULL, 0, &none, t, sizeof(t)) != 0) {

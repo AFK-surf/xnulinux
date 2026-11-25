@@ -29,11 +29,16 @@ recipes = {}
 for j in [*obj.rglob('*.o.json'), *obj.rglob('*.cpo.json')]:
     r = json.JSONDecoder().raw_decode(j.read_text())[0]
     recipes.setdefault(os.path.normpath(os.path.join(r['directory'], r['file'])), r)
-same = differ = 0
+# the one source the k27 configuration does not build (NFS's Kerberos); every other one must be compared
+UNBUILT = {'bsd/nfs/gss/ccrypto.c'}
+same = differ = missing = 0
 for s in srcs:
     r = next((v for k, v in recipes.items() if k.endswith('/' + s)), None)
     if r is None:
-        print(f'  -   {s} (not built in this configuration)')
+        if s in UNBUILT:
+            print(f'  -   {s} (not built in this configuration)')
+        else:
+            missing += 1; print(f'  MISSING {s}: no recipe in {obj}')
         continue
     outs = {}
     for side in ('old', 'new'):
@@ -64,6 +69,6 @@ for s in srcs:
         differ += 1; print(f'  DIFF {s}')
         for side in ('old', 'new'):
             (w.parent / f'abi-{Path(s).name}.{side}.txt').write_text(outs[side])
-print(f'{same} the same, {differ} different')
-sys.exit(1 if differ or same == 0 else 0)
+print(f'{same} the same, {differ} different' + (f', {missing} without a recipe' if missing else ''))
+sys.exit(1 if differ or missing or same == 0 else 0)
 PY

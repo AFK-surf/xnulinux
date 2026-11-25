@@ -32,9 +32,11 @@ cc_cmp_safe(size_t num, const void *a, const void *b)
 	return num == 0 || d != 0;
 }
 
+static unsigned long host_calls;	/* how often the kext asked the host for random numbers */
 void
 xc_random(void *buf, size_t n)
 {
+	host_calls++;
 	if (getrandom(buf, n, 0) != (ssize_t)n) {
 		abort();
 	}
@@ -234,6 +236,23 @@ test_aes(void)
 		CHECK(xe->init(xe, cx, 32, k1, k1) == CCERR_XTS_KEYS_EQUAL, "XTS with equal keys accepted");
 		CHECK(xe->init(xe, cx, 32, k1, k2) == 0, "XTS-256 init");
 	}
+	/* a block count whose bytes size_t cannot hold: refused, nothing done */
+	{
+		const struct ccmode_cbc *ce = xc_aes_cbc_encrypt();
+		cccbc_ctx_decl(ce->size, cc);
+		uint8_t k1[16] = {0}, ivb[16] = {0}, buf[16] = {0};
+		ce->init(ce, cc, 16, k1);
+		CHECK(ce->cbc(cc, (cccbc_iv *)ivb, SIZE_MAX / 16 + 1, buf, buf) != 0, "AES-CBC with a block count past size_t");
+		const struct ccmode_cbc *de = xc_des_cbc_encrypt(), *d3 = xc_des3_cbc_encrypt();
+		cccbc_ctx_decl(de->size, dc);
+		cccbc_ctx_decl(d3->size, d3c);
+		uint8_t dk[24] = { 0x13, 0x34, 0x57, 0x79, 0x9b, 0xbc, 0xdf, 0xf1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01,
+			0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23 };
+		de->init(de, dc, 8, dk), d3->init(d3, d3c, 24, dk);
+		CHECK(de->cbc(dc, (cccbc_iv *)ivb, SIZE_MAX / 8 + 1, buf, buf) != 0, "DES-CBC with a block count past size_t");
+		CHECK(d3->cbc(d3c, (cccbc_iv *)ivb, SIZE_MAX / 8 + 1, buf, buf) != 0, "3DES-CBC with a block count past size_t");
+		CHECK(memcmp(buf, (uint8_t[16]){0}, 16) == 0, "CBC wrote with a block count past size_t");
+	}
 }
 
 static void
@@ -277,6 +296,14 @@ test_gcm(void)
 		tag[rndn(tn)] ^= (uint8_t)(1 << rndn(8));
 		d->reset(gd), d->set_iv(gd, ivn, iv), d->gmac(gd, an, aad), d->gcm(gd, n, ours, back);
 		CHECK(d->finalize(gd, tn, tag) == CCMODE_INTEGRITY_FAILURE, "GCM forged tag accepted");
+		/* tag lengths: SP 800-38D's only, both ways */
+		size_t bad = (size_t[]){ 0, 1, 3, 5, 7, 9, 11, 17 }[rndn(8)], good = it & 1 ? 4 : 8;
+		e->reset(ge), e->set_iv(ge, ivn, iv), e->gmac(ge, an, aad), e->gcm(ge, n, pt, ours);
+		CHECK(e->finalize(ge, bad, tag) == CCMODE_INVALID_INPUT, "GCM encrypt with a %zu-byte tag", bad);
+		d->reset(gd), d->set_iv(gd, ivn, iv), d->gmac(gd, an, aad), d->gcm(gd, n, theirs, back);
+		CHECK(d->finalize(gd, bad, ttag) == CCMODE_INVALID_INPUT, "GCM decrypt with a %zu-byte tag", bad);
+		d->reset(gd), d->set_iv(gd, ivn, iv), d->gmac(gd, an, aad), d->gcm(gd, n, theirs, back);
+		CHECK(d->finalize(gd, good, ttag) == 0, "GCM decrypt with a %zu-byte tag", good);
 	}
 	/* IPsec's sequence: init with an IV, then for each packet reset, inc_iv, aad, text, finalize */
 	{
@@ -418,10 +445,15 @@ test_chachapoly(void)
 		CHECK(xc_ccp_aad(NULL, &c, 1, aad) != 0, "ChaCha20-Poly1305 aad after reset without a nonce");
 		uint8_t t2[16];
 		CHECK(xc_ccp_finalize(NULL, &c, t2) != 0, "ChaCha20-Poly1305 finalize after reset without a nonce");
+		CHECK(xc_ccp_verify(NULL, &c, ttag) == CCERR_CALL_SEQUENCE, "ChaCha20-Poly1305 verify after reset without a nonce");
 		xc_ccp_reset(NULL, &c), xc_ccp_setnonce(NULL, &c, nonce), xc_ccp_aad(NULL, &c, an, aad);
 		xc_ccp_encrypt(NULL, &c, n, pt, back);
 		CHECK(xc_ccp_finalize(NULL, &c, t2) == 0 && memcmp(back, theirs, n) == 0 && memcmp(t2, ttag, 16) == 0,
 		    "ChaCha20-Poly1305 message after a dropped one");
+		/* a message ends once */
+		CHECK(xc_ccp_finalize(NULL, &c, t2) == CCERR_CALL_SEQUENCE, "ChaCha20-Poly1305 finalized twice");
+		CHECK(xc_ccp_verify(NULL, &c, ttag) == CCERR_CALL_SEQUENCE, "ChaCha20-Poly1305 verify after finalize");
+		CHECK(xc_ccp_encrypt(NULL, &c, 1, pt, back) != 0, "ChaCha20-Poly1305 encrypt after finalize");
 	}
 }
 
@@ -496,7 +528,10 @@ test_rng(void)
 	/* kmem's generator: uniform, any lengths, and two of them differ */
 	_Alignas(16) uint8_t a[256], b[256];
 	CHECK(xc_kmem_rng_size() <= sizeof(a), "kmem generator size");
+	unsigned long calls = host_calls;
 	xc_kmem_rng_init(a), xc_kmem_rng_init(b);
+	CHECK(host_calls == calls + 2, "kmem generator keyed from the host at init");
+	calls = host_calls;
 	memset(counts, 0, sizeof(counts));
 	for (int i = 0; i < 100000; i++) {
 		CHECK(xc_rng_uniform((struct ccrng_state *)a, 10, &v) == 0 && v < 10, "kmem uniform");
@@ -512,6 +547,7 @@ test_rng(void)
 		off += m;
 	}
 	ccrng_generate((struct ccrng_state *)b, sizeof(y), y);
+	CHECK(host_calls == calls, "kmem generator asked the host %lu times after init", host_calls - calls);
 	CHECK(memcmp(x, y, sizeof(x)) != 0, "two kmem generators gave the same bytes");
 	size_t ones = 0;
 	for (size_t i = 0; i < sizeof(x); i++) ones += (size_t)__builtin_popcount(x[i]);

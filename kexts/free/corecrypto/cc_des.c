@@ -51,6 +51,9 @@ des_cbc(const cccbc_ctx *ctx, cccbc_iv *iv, size_t nblocks, const void *in, void
 	if (nblocks == 0) {
 		return 0;
 	}
+	if (nblocks > SIZE_MAX / 8) {
+		return CCMODE_INVALID_INPUT;
+	}
 	return mbedtls_des_crypt_cbc((mbedtls_des_context *)ctx, mode, nblocks * 8, (unsigned char *)iv, in, out) ?
 	       CCMODE_INTERNAL_ERROR : 0;
 }
@@ -96,6 +99,9 @@ des3_cbc(const cccbc_ctx *ctx, cccbc_iv *iv, size_t nblocks, const void *in, voi
 {
 	if (nblocks == 0) {
 		return 0;
+	}
+	if (nblocks > SIZE_MAX / 8) {
+		return CCMODE_INVALID_INPUT;
 	}
 	return mbedtls_des3_crypt_cbc((mbedtls_des3_context *)ctx, mode, nblocks * 8, (unsigned char *)iv, in, out) ?
 	       CCMODE_INTERNAL_ERROR : 0;
