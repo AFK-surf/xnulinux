@@ -113,6 +113,7 @@ fi
 # Chip name for System Information (override: SOC_NAME=)
 XCPU0=$(cat /sys/module/fki/parameters/cpu_list 2>/dev/null | tr -d '\n' | cut -d, -f1); XCPU0=${XCPU0:-0}
 SOC_NAME=${SOC_NAME:-$(lscpu -e=CPU,MODELNAME 2>/dev/null | awk -v c="$XCPU0" '$1 == c { $1 = ""; sub(/^ +/, ""); print }' || true)}
+[ "$SOC_NAME" = - ] && SOC_NAME=	# lscpu's "-": the CPU has no model name (a guest)
 NAMES=()
 [ -n "${SOC_NAME:-}" ] && NAMES+=("soc_name=\"$SOC_NAME\"")
 [ -n "${GPU_MODEL:-}" ] && NAMES+=("gpu_model=\"$GPU_MODEL\"")

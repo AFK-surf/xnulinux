@@ -447,7 +447,8 @@ static inline void acct_add(unsigned long call, u64_t ticks)
 
 /*
  * Stopping the run: the CPUs leave XNU together. A CPU still inside XNU could otherwise wait for good, interrupts masked,
- * for one that had already left. Each parks briefly at its host calls; the run is abandoned once all are parked at once.
+ * for one that had already left. Each parks briefly at its host calls and kicks the others, so that one idle or in user
+ * space comes to a host call too; the run is abandoned once all are parked at once.
  * stop_state: the number of parked CPUs, and STOP_COMMIT once the run is abandoned.
  */
 #define STOP_COMMIT 0x10000u
@@ -483,6 +484,9 @@ static int stop_park(void)	/* 1: the run is abandoned, do not return to XNU */
 		s = stop_state;
 		if (s & STOP_COMMIT) return 1;
 	} while (!stop_cas(s, s + 1));
+	for (int c = 0, me = linux_cpu_of_slot[this_slot()]; c < cpus; c++)
+		if (c != me && (c == 0 || cpu_running[c]))
+			fki_kick_cpu(c);
 	end = fki_counter() + fki_counter_frequency() / 500;	/* 2 ms */
 	for (;;) {
 		s = stop_state;
