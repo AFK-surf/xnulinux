@@ -177,10 +177,10 @@ index 48e5ccf..ed731ce 100644
  protected:
  	IOMemoryDescriptor * _parent;
 diff --git a/iokit/Kernel/IOKitKernelInternal.h b/iokit/Kernel/IOKitKernelInternal.h
-index b33a663..bcbbc7e 100644
+index b33a663..a9861a5 100644
 --- a/iokit/Kernel/IOKitKernelInternal.h
 +++ b/iokit/Kernel/IOKitKernelInternal.h
-@@ -62,6 +62,56 @@ struct IOMemoryDescriptorMapAllocRef {
+@@ -62,6 +62,60 @@ struct IOMemoryDescriptorMapAllocRef {
  kern_return_t
  IOMemoryDescriptorMapAlloc(vm_map_t map, void * ref);
  
@@ -231,6 +231,10 @@ index b33a663..bcbbc7e 100644
 +	size_t *pagerCapIO);
 +IOReturn el0PopulatePendingPagers(
 +	const struct linux64_el0_pending_pager *pagers, size_t npagers);
++extern IOReturn el0IOMemoryDescriptorRedirectList(
++	IOMemoryDescriptor **descs, uint32_t count, task_t safeTask, bool doRedirect);
++extern void *el0RedirectAllocPtrArray(uint32_t count, bool zero);
++extern void el0RedirectFreePtrArray(void *ptr, uint32_t count);
 +}
 +#endif
 +
@@ -316,7 +320,7 @@ index ff22ba5..e2763c9 100644
  
  		address += page_size;
 diff --git a/iokit/Kernel/IOMemoryDescriptor.cpp b/iokit/Kernel/IOMemoryDescriptor.cpp
-index cc2c1af..910644a 100644
+index cc2c1af..77a22a0 100644
 --- a/iokit/Kernel/IOMemoryDescriptor.cpp
 +++ b/iokit/Kernel/IOMemoryDescriptor.cpp
 @@ -965,6 +965,12 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
@@ -732,25 +736,61 @@ index cc2c1af..910644a 100644
  			}
  		}
  	}
-@@ -5536,13 +5755,30 @@ IOMemoryDescriptor::doMap(
+@@ -5536,31 +5755,174 @@ IOMemoryDescriptor::doMap(
  	return kIOReturnUnsupported;
  }
  
-+struct el0UnredirectFrame {
-+	IOMemoryDescriptor *desc;
-+	el0UnredirectFrame *next;
++struct el0RedirectFrame {
++	IOMemoryDescriptor **descs;
++	uint32_t count;
++	thread_t owner;
++	bool isUnredirect;
++	el0RedirectFrame *next;
 +};
-+static el0UnredirectFrame *gIOMemoryUnredirectStack = NULL;
++static el0RedirectFrame *gIOMemoryRedirectStack = NULL;
++
++static bool
++el0IsRedirecting(IOMemoryDescriptor *desc)
++{
++	thread_t self = current_thread();
++	for (el0RedirectFrame *f = gIOMemoryRedirectStack; f != NULL; f = f->next) {
++		if (f->owner == self) {
++			for (uint32_t i = 0; i < f->count; i++) {
++				if (f->descs[i] == desc) {
++					return true;
++				}
++			}
++		}
++	}
++	return false;
++}
 +
 +static bool
 +el0IsUnredirecting(IOMemoryDescriptor *desc)
 +{
-+	for (el0UnredirectFrame *f = gIOMemoryUnredirectStack; f != NULL; f = f->next) {
-+		if (f->desc == desc) {
-+			return true;
++	thread_t self = current_thread();
++	for (el0RedirectFrame *f = gIOMemoryRedirectStack; f != NULL; f = f->next) {
++		if (f->owner == self && f->isUnredirect) {
++			for (uint32_t i = 0; i < f->count; i++) {
++				if (f->descs[i] == desc) {
++					return true;
++				}
++			}
 +		}
 +	}
 +	return false;
++}
++
++static void
++el0UnlinkRedirectFrame(el0RedirectFrame *target)
++{
++	for (el0RedirectFrame **pp = &gIOMemoryRedirectStack; *pp != NULL; pp = &(*pp)->next) {
++		if (*pp == target) {
++			*pp = target->next;
++			target->next = NULL;
++			return;
++		}
++	}
 +}
 +
  IOReturn
@@ -764,7 +804,11 @@ index cc2c1af..910644a 100644
  #if DEBUG
  		IOLog("sleep mem redirect %p, %qx\n", this, sourceOffset);
  #endif
-@@ -5553,14 +5789,104 @@ IOMemoryDescriptor::handleFault(
+ 		do {
+ 			SLEEP;
+-		} while (kIOMemoryRedirected & _flags);
++		} while ((kIOMemoryRedirected & _flags) && !el0IsUnredirecting(this));
+ 	}
  	return kIOReturnSuccess;
  }
  
@@ -873,7 +917,7 @@ index cc2c1af..910644a 100644
  {
  	IOReturn            err = kIOReturnSuccess;
  	memory_object_t     pager = (memory_object_t) _pager;
-@@ -5568,27 +5894,51 @@ IOMemoryDescriptor::populateDevicePager(
+@@ -5568,27 +5930,51 @@ IOMemoryDescriptor::populateDevicePager(
  	mach_vm_size_t      bytes;
  	mach_vm_size_t      page;
  	mach_vm_size_t      pageOffset;
@@ -934,7 +978,7 @@ index cc2c1af..910644a 100644
  	bytes = size;
  	do{
  		// in the middle of the loop only map whole pages
-@@ -5613,7 +5963,7 @@ IOMemoryDescriptor::populateDevicePager(
+@@ -5613,7 +5999,7 @@ IOMemoryDescriptor::populateDevicePager(
  		}
  #endif /* DEBUG || DEVELOPMENT */
  
@@ -943,7 +987,7 @@ index cc2c1af..910644a 100644
  		for (page = 0;
  		    (page < segLen) && (KERN_SUCCESS == err);
  		    page += chunk) {
-@@ -5622,40 +5972,60 @@ IOMemoryDescriptor::populateDevicePager(
+@@ -5622,40 +6008,60 @@ IOMemoryDescriptor::populateDevicePager(
  			pagerOffset += chunk;
  		}
  
@@ -1016,7 +1060,66 @@ index cc2c1af..910644a 100644
  IOReturn
  IOMemoryDescriptor::doUnmap(
  	vm_map_t                addressMap,
-@@ -5710,35 +6080,97 @@ IOMemoryDescriptor::redirect( task_t safeTask, bool doRedirect )
+@@ -5701,48 +6107,261 @@ IOMemoryDescriptor::doUnmap(
+ 	return err;
+ }
+ 
++class el0RedirectAccess : public IOMemoryDescriptor {
++public:
++	static OSSet *mappings(IOMemoryDescriptor *d) { return ((el0RedirectAccess *)d)->_mappings.get(); }
++	static IOOptionBits &flags(IOMemoryDescriptor *d) { return ((el0RedirectAccess *)d)->_flags; }
++	static IOMemoryDescriptorReserved *res(IOMemoryDescriptor *d) { return ((el0RedirectAccess *)d)->reserved; }
++	static IOReturn populate(IOMemoryDescriptor *d, void *p, vm_map_t m, mach_vm_address_t a, mach_vm_size_t o, mach_vm_size_t l, IOOptionBits opt) {
++		return ((el0RedirectAccess *)d)->populateDevicePager(p, m, a, o, l, opt);
++	}
++};
++
++void *
++el0RedirectAllocPtrArray(uint32_t count, bool zero)
++{
++	return kalloc_type(OSObject *, count, zero ? Z_WAITOK_ZERO : Z_WAITOK);
++}
++
++void
++el0RedirectFreePtrArray(void *ptr, uint32_t count)
++{
++	if (ptr) {
++		kfree_type(OSObject *, count, ptr);
++	}
++}
++
+ IOReturn
+-IOMemoryDescriptor::redirect( task_t safeTask, bool doRedirect )
++el0IOMemoryDescriptorRedirectList(
++	IOMemoryDescriptor **descs,
++	uint32_t count,
++	task_t safeTask,
++	bool doRedirect)
+ {
+-	IOReturn            err = kIOReturnSuccess;
+-	IOMemoryMap *       mapping = NULL;
+-	OSSharedPtr<OSIterator>        iter;
++	if (descs == NULL || count == 0) {
++		return kIOReturnSuccess;
++	}
++
++	IOReturn err = kIOReturnSuccess;
++	OSCollectionIterator *inlineIters[8] = {};
++	OSCollectionIterator **iters = inlineIters;
++	bool heapMeta = false;
++
++	if (count > 8) {
++		iters = (OSCollectionIterator **)el0RedirectAllocPtrArray(count, true);
++		if (!iters) {
++			return kIOReturnNoMemory;
++		}
++		heapMeta = true;
++	}
++
++	IOMemoryMap *inlineTouched[8] = {};
++	IOMemoryMap **touchedMaps = inlineTouched;
++	uint32_t touchedCount = 0;
++	uint32_t touchedCap = 8;
  
  	LOCK;
  
@@ -1024,76 +1127,153 @@ index cc2c1af..910644a 100644
 -		_flags |= kIOMemoryRedirected;
 -	} else {
 -		_flags &= ~kIOMemoryRedirected;
-+	memory_object_t pager = reserved ? (memory_object_t) reserved->dp.devicePager : MACH_PORT_NULL;
-+	if (_mappings && _mappings->getCount() > 0) {
-+		iter = OSCollectionIterator::withCollection( _mappings.get());
-+		if (!iter) {
-+			UNLOCK;
-+			return kIOReturnNoMemory;
++	/* 1. Pre-allocate iterators and touchedMaps capacity before changing any flags */
++	uint32_t totalMappings = 0;
++	for (uint32_t i = 0; i < count; i++) {
++		OSSet *mset = el0RedirectAccess::mappings(descs[i]);
++		if (mset && mset->getCount() > 0) {
++			uint32_t mc = mset->getCount();
++			if (totalMappings > UINT32_MAX - mc) {
++				err = kIOReturnNoMemory;
++				break;
++			}
++			totalMappings += mc;
++			iters[i] = OSCollectionIterator::withCollection(mset).detach();
++			if (!iters[i]) {
++				err = kIOReturnNoMemory;
++				break;
++			}
++		}
++	}
++	if (kIOReturnSuccess == err && totalMappings > touchedCap) {
++		IOMemoryMap **pre = (IOMemoryMap **)el0RedirectAllocPtrArray(totalMappings, false);
++		if (!pre) {
++			err = kIOReturnNoMemory;
++		} else {
++			touchedMaps = pre;
++			touchedCap = totalMappings;
 +		}
  	}
  
 -	do {
 -		if ((iter = OSCollectionIterator::withCollection( _mappings.get()))) {
 -			memory_object_t   pager;
--
++	/* 2. Preflight all descriptors and mappings before any mutation */
++	if (kIOReturnSuccess == err) {
++		for (uint32_t i = 0; i < count && kIOReturnSuccess == err; i++) {
++			if (!iters[i]) {
++				continue;
++			}
++			IOMemoryDescriptorReserved *r = el0RedirectAccess::res(descs[i]);
++			memory_object_t pager = r ? (memory_object_t) r->dp.devicePager : MACH_PORT_NULL;
++			IOOptionBits dflags = el0RedirectAccess::flags(descs[i]);
++			IOMemoryMap *mapping = NULL;
++
++			iters[i]->reset();
++			while ((mapping = (IOMemoryMap *) iters[i]->getNextObject())) {
++				if (linux64_el0 && mapping->fAddress && mapping->fLength && mapping->fAddressMap &&
++				    linux64_el0_is_kernel_pmap(mapping->fAddressMap)) {
++					bool usesProtectCacheMode =
++					    ((safeTask && (get_task_map(safeTask) == mapping->fAddressMap)) ||
++					     (0 != (mapping->fOptions & kIOMapStatic))) &&
++					    (kIOMapWriteCombineCache == (mapping->fOptions & kIOMapCacheMask)) &&
++					    (NULL == mapping->fSuperMap);
++					if (usesProtectCacheMode) {
++						err = kIOReturnUnsupported;
++						break;
++					}
++				}
++				if (!doRedirect && linux64_el0 && pager &&
++				    mapping->fAddress && mapping->fLength && mapping->fAddressMap) {
++					IOReturn preErr = el0PreflightDevicePager(descs[i], mapping->fAddressMap,
++					    mapping->fAddress, mapping->fOffset, mapping->fLength,
++					    mapping->fOptions & ~kIOMapAnywhere, r->dp.pagerContig, dflags);
++					if (kIOReturnSuccess != preErr) {
++						err = preErr;
++						break;
++					}
++				}
++			}
++			if (kIOReturnSuccess == err && !iters[i]->isValid()) {
++				err = kIOReturnError;
++			}
++		}
++	}
+ 
 -			if (reserved) {
 -				pager = (memory_object_t) reserved->dp.devicePager;
 -			} else {
 -				pager = MACH_PORT_NULL;
-+	if (!doRedirect && linux64_el0 && pager && iter) {
-+		while ((mapping = (IOMemoryMap *) iter->getNextObject())) {
-+			if (mapping->fAddress && mapping->fLength && mapping->fAddressMap) {
-+				IOReturn preErr = el0PreflightDevicePager(this, mapping->fAddressMap,
-+				    mapping->fAddress, mapping->fOffset, mapping->fLength,
-+				    mapping->fOptions & ~kIOMapAnywhere, reserved->dp.pagerContig, _flags);
-+				if (kIOReturnSuccess != preErr) {
-+					err = preErr;
-+					break;
-+				}
++	if (kIOReturnSuccess != err) {
++		for (uint32_t i = 0; i < count; i++) {
++			if (iters[i]) {
++				iters[i]->release();
  			}
 +		}
-+		if (kIOReturnSuccess == err && !iter->isValid()) {
-+			err = kIOReturnError;
++		UNLOCK;
++		if (touchedMaps != inlineTouched) {
++			el0RedirectFreePtrArray(touchedMaps, touchedCap);
 +		}
-+		if (kIOReturnSuccess != err) {
-+			iter.reset();
-+			UNLOCK;
-+			return err;
++		if (heapMeta) {
++			el0RedirectFreePtrArray(iters, count);
 +		}
++		return err;
 +	}
  
-+	if (doRedirect) {
-+		_flags |= kIOMemoryRedirected;
-+		if (iter) {
-+			iter->reset();
- 			while ((mapping = (IOMemoryMap *) iter->getNextObject())) {
+-			while ((mapping = (IOMemoryMap *) iter->getNextObject())) {
 -				mapping->redirect( safeTask, doRedirect );
 -				if (!doRedirect && !safeTask && pager && (kernel_map == mapping->fAddressMap)) {
 -					err = populateDevicePager(pager, mapping->fAddressMap, mapping->fAddress, mapping->fOffset, mapping->fLength, kIOMapDefaultCache );
-+				IOReturn mapErr = mapping->redirect( safeTask, true );
-+				if (kIOReturnSuccess == err && kIOReturnSuccess != mapErr) {
-+					err = mapErr;
- 				}
- 			}
-+			if (kIOReturnSuccess == err && !iter->isValid()) {
-+				err = kIOReturnError;
-+			}
-+			iter.reset();
++	/* 3. Push thread-scoped redirect frame covering all descriptors in chain */
++	el0RedirectFrame frame = {
++		.descs = descs,
++		.count = count,
++		.owner = current_thread(),
++		.isUnredirect = !doRedirect,
++		.next = gIOMemoryRedirectStack,
++	};
++	gIOMemoryRedirectStack = &frame;
++
++	/* 4. Execute mapping transitions (child->parent for doRedirect, parent->child for !doRedirect) */
++	for (uint32_t step = 0; step < count && kIOReturnSuccess == err; step++) {
++		uint32_t i = doRedirect ? step : (count - 1 - step);
++		if (!iters[i]) {
++			continue;
 +		}
-+	} else {
-+		el0UnredirectFrame frame = { this, gIOMemoryUnredirectStack };
-+		gIOMemoryUnredirectStack = &frame;
-+		uint32_t touchedCount = 0;
- 
-+		if (iter) {
-+			iter->reset();
-+			while ((mapping = (IOMemoryMap *) iter->getNextObject())) {
-+				touchedCount++;
-+				IOReturn stepErr = mapping->redirect( safeTask, false );
-+				if (kIOReturnSuccess == stepErr && !safeTask && pager && (kernel_map == mapping->fAddressMap)) {
-+					stepErr = populateDevicePager(pager, mapping->fAddressMap, mapping->fAddress, mapping->fOffset, mapping->fLength, kIOMapDefaultCache | (mapping->fOptions & kIOMapReadOnly));
-+				} else if (kIOReturnSuccess == stepErr && !safeTask && !pager && linux64_el0 &&
++		IOMemoryDescriptorReserved *r = el0RedirectAccess::res(descs[i]);
++		memory_object_t pager = r ? (memory_object_t) r->dp.devicePager : MACH_PORT_NULL;
++		IOMemoryMap *mapping = NULL;
++
++		iters[i]->reset();
++		while ((mapping = (IOMemoryMap *) iters[i]->getNextObject())) {
++			if (touchedCount == touchedCap) {
++				if (touchedCap > (UINT32_MAX / 2)) {
++					err = kIOReturnNoMemory;
++					break;
++				}
++				uint32_t newCap = touchedCap * 2;
++				IOMemoryMap **nb = (IOMemoryMap **)el0RedirectAllocPtrArray(newCap, false);
++				if (!nb) {
++					err = kIOReturnNoMemory;
++					break;
+ 				}
++				bcopy(touchedMaps, nb, touchedCount * sizeof(*nb));
++				if (touchedMaps != inlineTouched) {
++					el0RedirectFreePtrArray(touchedMaps, touchedCap);
++				}
++				touchedMaps = nb;
++				touchedCap = newCap;
++			}
++			mapping->retain();
++			touchedMaps[touchedCount++] = mapping;
++
++			IOReturn stepErr = mapping->redirect( safeTask, doRedirect );
++			if (!doRedirect && kIOReturnSuccess == stepErr) {
++				if (!safeTask && pager && (kernel_map == mapping->fAddressMap)) {
++					stepErr = el0RedirectAccess::populate(descs[i], pager, mapping->fAddressMap,
++					    mapping->fAddress, mapping->fOffset, mapping->fLength,
++					    kIOMapDefaultCache | (mapping->fOptions & kIOMapReadOnly));
++				} else if (!safeTask && !pager && linux64_el0 &&
 +				    !(mapping->fOptions & kIOMapStatic) &&
 +				    mapping->fAddress && mapping->fLength &&
 +				    mapping->fAddressMap && linux64_el0_is_kernel_pmap(mapping->fAddressMap)) {
@@ -1101,38 +1281,87 @@ index cc2c1af..910644a 100644
 +					    mapping->fAddress, mapping->fLength,
 +					    (mapping->fOptions & kIOMapReadOnly) ? VM_PROT_READ : (VM_PROT_READ | VM_PROT_WRITE));
 +				}
-+				if (kIOReturnSuccess != stepErr) {
-+					err = stepErr;
-+					break;
-+				}
 +			}
-+			if (kIOReturnSuccess == err && !iter->isValid()) {
-+				err = kIOReturnError;
++			if (kIOReturnSuccess != stepErr) {
++				err = stepErr;
++				break;
+ 			}
++		}
++		if (kIOReturnSuccess == err && !iters[i]->isValid()) {
++			err = kIOReturnError;
++		}
++	}
+ 
+-			iter.reset();
++	/* 5. Rollback on failure or atomically commit flags + WAKEUP on success */
++	if (kIOReturnSuccess != err) {
++		if (!doRedirect) {
++			for (uint32_t j = 0; j < touchedCount; j++) {
++				(void) touchedMaps[j]->redirect( safeTask, true );
 +			}
-+			if (kIOReturnSuccess != err && touchedCount > 0) {
-+				iter->reset();
-+				uint32_t idx = 0;
-+				while (idx < touchedCount && (mapping = (IOMemoryMap *) iter->getNextObject())) {
-+					(void) mapping->redirect( safeTask, true );
-+					idx++;
-+				}
-+			}
- 			iter.reset();
  		}
 -	} while (false);
++		el0UnlinkRedirectFrame(&frame);
++	} else {
++		el0UnlinkRedirectFrame(&frame);
++		for (uint32_t i = 0; i < count; i++) {
++			if (doRedirect) {
++				el0RedirectAccess::flags(descs[i]) |= kIOMemoryRedirected;
++			} else {
++				el0RedirectAccess::flags(descs[i]) &= ~kIOMemoryRedirected;
++				IORecursiveLockWakeup( gIOMemoryLock, (void *)descs[i], false );
++			}
++		}
++	}
  
 -	if (!doRedirect) {
 -		WAKEUP;
-+		gIOMemoryUnredirectStack = frame.next;
-+
-+		if (kIOReturnSuccess == err) {
-+			_flags &= ~kIOMemoryRedirected;
-+			WAKEUP;
++	for (uint32_t j = 0; j < touchedCount; j++) {
++		touchedMaps[j]->release();
++	}
++	if (touchedMaps != inlineTouched) {
++		el0RedirectFreePtrArray(touchedMaps, touchedCap);
++	}
++	for (uint32_t i = 0; i < count; i++) {
++		if (iters[i]) {
++			iters[i]->release();
 +		}
  	}
  
  	UNLOCK;
-@@ -5790,12 +6222,18 @@ IOMemoryMap::redirect( task_t safeTask, bool doRedirect )
+ 
++	if (heapMeta) {
++		el0RedirectFreePtrArray(iters, count);
++	}
++	return err;
++}
++
++IOReturn
++IOMemoryDescriptor::redirect( task_t safeTask, bool doRedirect )
++{
++	IOMemoryDescriptor *self = this;
++	IOReturn err = el0IOMemoryDescriptorRedirectList(&self, 1, safeTask, doRedirect);
++
+ #ifndef __LP64__
+ 	// temporary binary compatibility
+ 	IOSubMemoryDescriptor * subMem;
+@@ -5776,26 +6395,31 @@ IOMemoryMap::redirect( task_t safeTask, bool doRedirect )
+ 
+ 			if ((!safeTask || (get_task_map(safeTask) != fAddressMap))
+ 			    && (0 == (fOptions & kIOMapStatic))) {
+-				IOUnmapPages( fAddressMap, fAddress, fLength );
+-				err = kIOReturnSuccess;
++				err = IOUnmapPages( fAddressMap, fAddress, fLength );
+ #if DEBUG
+ 				IOLog("IOMemoryMap::redirect(%d, %p) 0x%qx:0x%qx from %p\n", doRedirect, this, fAddress, fLength, fAddressMap);
+ #endif
+ 			} else if (kIOMapWriteCombineCache == (fOptions & kIOMapCacheMask)) {
+ 				IOOptionBits newMode;
+ 				newMode = (fOptions & ~kIOMapCacheMask) | (doRedirect ? kIOMapInhibitCache : kIOMapWriteCombineCache);
+-				IOProtectCacheMode(fAddressMap, fAddress, fLength, newMode);
++				err = IOProtectCacheMode(fAddressMap, fAddress, fLength, newMode);
+ 			}
+ 		}while (false);
  		UNLOCK;
  	}
  
@@ -1140,7 +1369,7 @@ index cc2c1af..910644a 100644
  	if ((((fMemory->_flags & kIOMemoryTypeMask) == kIOMemoryTypePhysical)
  	    || ((fMemory->_flags & kIOMemoryTypeMask) == kIOMemoryTypePhysical64))
  	    && safeTask
-+	    && !el0IsUnredirecting(fMemory.get())
++	    && !el0IsRedirecting(fMemory.get())
  	    && (doRedirect != (0 != (fMemory->_flags & kIOMemoryRedirected)))) {
 -		fMemory->redirect(safeTask, doRedirect);
 +		IOReturn memErr = fMemory->redirect(safeTask, doRedirect);
@@ -1152,7 +1381,7 @@ index cc2c1af..910644a 100644
  
  	return err;
  }
-@@ -5865,9 +6303,56 @@ IOMemoryMap::taggedRelease(const void *tag) const
+@@ -5865,9 +6489,56 @@ IOMemoryMap::taggedRelease(const void *tag) const
  	super::taggedRelease(tag, 2);
  }
  
@@ -1209,7 +1438,7 @@ index cc2c1af..910644a 100644
  	unmap();
  
  	if (fMemory) {
-@@ -5881,11 +6366,6 @@ IOMemoryMap::free()
+@@ -5881,11 +6552,6 @@ IOMemoryMap::free()
  		fSuperMap.reset();
  	}
  
@@ -1221,7 +1450,7 @@ index cc2c1af..910644a 100644
  	super::free();
  }
  
-@@ -6125,6 +6605,10 @@ IOMemoryDescriptor::createMappingInTask(
+@@ -6125,6 +6791,10 @@ IOMemoryDescriptor::createMappingInTask(
  	IOMemoryMap * result;
  	IOMemoryMap * mapping;
  
@@ -1232,7 +1461,7 @@ index cc2c1af..910644a 100644
  	if (0 == length) {
  		length = getLength();
  	}
-@@ -6184,17 +6668,33 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
+@@ -6184,17 +6854,33 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
  				physMem = fMemory;
  			}
  
@@ -1275,7 +1504,7 @@ index cc2c1af..910644a 100644
  					IOUnmapPages( fAddressMap, fAddress, fLength );
  					if ((false)) {
  						physMem->redirect(NULL, true);
-@@ -6202,12 +6702,25 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
+@@ -6202,12 +6888,25 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
  				}
  			}
  
@@ -1302,7 +1531,7 @@ index cc2c1af..910644a 100644
  						err = kIOReturnError;
  					}
  				}
-@@ -6215,6 +6728,36 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
+@@ -6215,6 +6914,36 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
  					upl_commit(fRedirUPL, NULL, 0);
  					upl_deallocate(fRedirUPL);
  					fRedirUPL = NULL;
@@ -1339,7 +1568,7 @@ index cc2c1af..910644a 100644
  				}
  				if ((false) && physMem) {
  					physMem->redirect(NULL, false);
-@@ -6247,6 +6790,9 @@ IOMemoryDescriptor::makeMapping(
+@@ -6247,6 +6976,9 @@ IOMemoryDescriptor::makeMapping(
  	__block IOMemoryMap * result  = NULL;
  
  	IOMemoryMap *  mapping = (IOMemoryMap *) __address;
@@ -1349,7 +1578,7 @@ index cc2c1af..910644a 100644
  	mach_vm_size_t offset  = mapping->fOffset + __offset;
  	mach_vm_size_t length  = mapping->fLength;
  
-@@ -6272,12 +6818,24 @@ IOMemoryDescriptor::makeMapping(
+@@ -6272,12 +7004,24 @@ IOMemoryDescriptor::makeMapping(
  			    || ((_flags & kIOMemoryTypeMask) == kIOMemoryTypePhysical64)) {
  				phys = getPhysicalSegment(offset, &physLen, kIOMemoryMapperNone);
  				if (!phys || (physLen < length)) {
@@ -1374,7 +1603,7 @@ index cc2c1af..910644a 100644
  					continue;
  				}
  				offset = 0;
-@@ -6315,6 +6873,8 @@ IOMemoryDescriptor::makeMapping(
+@@ -6315,6 +7059,8 @@ IOMemoryDescriptor::makeMapping(
  			result = mapping;
  			mapDesc->addMapping(result);
  			result->setMemoryDescriptor(mapDesc.get(), offset);
@@ -1383,7 +1612,7 @@ index cc2c1af..910644a 100644
  		} else {
  			mapping->release();
  			mapping = NULL;
-@@ -6643,3 +7203,376 @@ _IOMemoryDescriptorMixedData::getLength() const
+@@ -6643,3 +7389,376 @@ _IOMemoryDescriptorMixedData::getLength() const
  {
  	return _data ? _length : 0;
  }
@@ -1819,32 +2048,63 @@ index eeb44f4..9f8073f 100644
  		bytesRemaining = length;
  		nextAddress = address;
 diff --git a/iokit/Kernel/IOSubMemoryDescriptor.cpp b/iokit/Kernel/IOSubMemoryDescriptor.cpp
-index 5c807d1..5ca5d36 100644
+index 5c807d1..cfea705 100644
 --- a/iokit/Kernel/IOSubMemoryDescriptor.cpp
 +++ b/iokit/Kernel/IOSubMemoryDescriptor.cpp
-@@ -39,9 +39,26 @@ IOReturn
+@@ -28,6 +28,7 @@
+ 
+ #include <IOKit/IOSubMemoryDescriptor.h>
+ #include <IOKit/IOLib.h>
++#include <kern/kalloc.h>
+ 
+ #include "IOKitKernelInternal.h"
+ 
+@@ -39,9 +40,49 @@ IOReturn
  IOSubMemoryDescriptor::redirect( task_t safeTask, bool doRedirect )
  {
  #ifdef __LP64__
 -	super::redirect( safeTask, doRedirect );
 -#endif /* __LP64__ */
-+	if (doRedirect) {
-+		IOReturn err = super::redirect( safeTask, true );
-+		if (kIOReturnSuccess != err) {
-+			return err;
++	IOMemoryDescriptor *inlineChain[8];
++	IOMemoryDescriptor **chain = inlineChain;
++	uint32_t count = 0;
++	uint32_t cap = 8;
++
++	chain[count++] = this;
++	IOMemoryDescriptor *cur = _parent;
++	while (cur != NULL && count < 64) {
++		if (count == cap) {
++			uint32_t newCap = cap * 2;
++			IOMemoryDescriptor **nb = (IOMemoryDescriptor **)el0RedirectAllocPtrArray(newCap, false);
++			if (!nb) {
++				if (chain != inlineChain) {
++					el0RedirectFreePtrArray(chain, cap);
++				}
++				return kIOReturnNoMemory;
++			}
++			bcopy(chain, nb, count * sizeof(*nb));
++			if (chain != inlineChain) {
++				el0RedirectFreePtrArray(chain, cap);
++			}
++			chain = nb;
++			cap = newCap;
 +		}
-+		return _parent->redirect( safeTask, true );
-+	} else {
-+		IOReturn err = _parent->redirect( safeTask, false );
-+		if (kIOReturnSuccess != err) {
-+			return err;
-+		}
-+		err = super::redirect( safeTask, false );
-+		if (kIOReturnSuccess != err) {
-+			(void) _parent->redirect( safeTask, true );
-+		}
-+		return err;
++		chain[count++] = cur;
++		IOSubMemoryDescriptor *sub = OSDynamicCast(IOSubMemoryDescriptor, cur);
++		cur = sub ? sub->_parent : NULL;
 +	}
++	if (cur != NULL) {
++		if (chain != inlineChain) {
++			el0RedirectFreePtrArray(chain, cap);
++		}
++		return kIOReturnOverrun;
++	}
++
++	IOReturn err = el0IOMemoryDescriptorRedirectList(chain, count, safeTask, doRedirect);
++	if (chain != inlineChain) {
++		el0RedirectFreePtrArray(chain, cap);
++	}
++	return err;
 +#else /* !__LP64__ */
  	return _parent->redirect( safeTask, doRedirect );
 +#endif /* __LP64__ */
@@ -2415,7 +2675,7 @@ index b65f76c..2d18613 100644
  		max_cpus_initialized = MAX_CPUS_WAIT;
  		lck_mtx_sleep(&max_cpus_lock, LCK_SLEEP_DEFAULT, &max_cpus_initialized, THREAD_UNINT);
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 79d0bc1..a25d4cc 100644
+index 79d0bc1..cb9752f 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -51,6 +51,7 @@
@@ -2802,7 +3062,7 @@ index 79d0bc1..a25d4cc 100644
  	return true;
  }
  
-@@ -5475,14 +5738,165 @@ pmap_protect(
+@@ -5475,14 +5738,259 @@ pmap_protect(
  	pmap_protect_options(pmap, b, e, prot, 0, NULL);
  }
  
@@ -2861,10 +3121,31 @@ index 79d0bc1..a25d4cc 100644
 +	return true;
 +}
 +
++bool
++pmap_el0_protect_undo_record_hole(
++	struct pmap_el0_protect_undo *undo,
++	vm_map_address_t va)
++{
++	if (undo == NULL) {
++		return false;
++	}
++	if (undo->count == undo->cap && !pmap_el0_protect_undo_grow(undo)) {
++		return false;
++	}
++	undo->recs[undo->count++] = (struct pmap_el0_protect_rec){
++		.va = va,
++		.old_pte = (uint64_t)ARM_PTE_EMPTY,
++		.new_pte = (uint64_t)ARM_PTE_EMPTY,
++	};
++	return true;
++}
++
 +void
-+pmap_el0_protect_undo_rollback(
++pmap_el0_protect_undo_rollback_filtered(
 +	pmap_t pmap,
-+	struct pmap_el0_protect_undo *undo)
++	struct pmap_el0_protect_undo *undo,
++	bool (*match_va)(vm_map_address_t va, void *ctx),
++	void *ctx)
 +{
 +	if (undo == NULL || undo->count == 0) {
 +		return;
@@ -2872,6 +3153,8 @@ index 79d0bc1..a25d4cc 100644
 +
 +	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
 +	const uint64_t pmap_page_size = PAGE_RATIO * pt_attr_page_size(pt_attr);
++	const pt_entry_t prot_mask = ARM_PTE_APMASK | ARM_PTE_NX | ARM_PTE_PNX | ARM_PTE_AF | ARM_PTE_WRITEABLE;
++	const pt_entry_t perm_mask = ARM_PTE_APMASK | ARM_PTE_NX | ARM_PTE_PNX;
 +	vm_map_address_t min_va = UINT64_MAX;
 +	vm_map_address_t max_va_end = 0;
 +	unsigned int restored = 0;
@@ -2894,12 +3177,36 @@ index 79d0bc1..a25d4cc 100644
 +		}
 +
 +		const struct pmap_el0_protect_rec *rec = &undo->recs[i - 1];
++		if (match_va != NULL && !match_va(rec->va, ctx)) {
++			continue;
++		}
 +		pt_entry_t *pte_p = pmap_pte(pmap, rec->va);
 +		if (pte_p == PT_ENTRY_NULL) {
 +			continue;
 +		}
 +		pt_entry_t cur_pte = *((volatile pt_entry_t *)pte_p);
 +		if ((cur_pte == ARM_PTE_EMPTY) || ARM_PTE_IS_COMPRESSED(cur_pte, pte_p)) {
++			continue;
++		}
++
++		pt_entry_t old_pte = (pt_entry_t)rec->old_pte;
++		pt_entry_t new_pte = (pt_entry_t)rec->new_pte;
++
++		if (old_pte == ARM_PTE_EMPTY && new_pte == ARM_PTE_EMPTY) {
++			if (pte_is_valid(cur_pte)) {
++				pmap_remove_range(pmap, rec->va, pte_p, pte_p + PAGE_RATIO);
++				if (rec->va < min_va) {
++					min_va = rec->va;
++				}
++				if (rec->va + pmap_page_size > max_va_end) {
++					max_va_end = rec->va + pmap_page_size;
++				}
++				restored++;
++			}
++			continue;
++		}
++
++		if (!pte_is_valid(old_pte)) {
 +			continue;
 +		}
 +
@@ -2922,25 +3229,38 @@ index 79d0bc1..a25d4cc 100644
 +			pvh_unlock(pai);
 +		}
 +
-+		if (cur_pte == (pt_entry_t)rec->new_pte) {
-+			int mr = linux64_el0_mirror_pte(pmap, rec->va, (pt_entry_t)rec->old_pte, pmap_page_size);
-+			if (mr < 0) {
-+				if (managed) {
-+					pvh_assert_locked(pai);
-+					pvh_unlock(pai);
++		if (pte_is_valid(cur_pte) && pte_to_pa(cur_pte) == pte_to_pa(new_pte)) {
++			pt_entry_t restored_pte = cur_pte;
++			if ((cur_pte & perm_mask) == (new_pte & perm_mask)) {
++				restored_pte = (cur_pte & ~prot_mask) | (old_pte & prot_mask);
++			} else if (((new_pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RWNA)) &&
++			    ((cur_pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RONA)) &&
++			    pte_was_writeable(cur_pte) &&
++			    ((old_pte & ARM_PTE_APMASK) != ARM_PTE_AP(AP_RWNA)) &&
++			    !pte_was_writeable(old_pte)) {
++				restored_pte = (cur_pte & ~(ARM_PTE_WRITEABLE | ARM_PTE_NX | ARM_PTE_PNX)) |
++				    (old_pte & (ARM_PTE_NX | ARM_PTE_PNX));
++			}
++			if (restored_pte != cur_pte) {
++				int mr = linux64_el0_mirror_pte(pmap, rec->va, restored_pte, pmap_page_size);
++				if (mr < 0) {
++					if (managed) {
++						pvh_assert_locked(pai);
++						pvh_unlock(pai);
++					}
++					pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
++					panic("linux64_el0: unrecoverable kernel pmap_protect rollback failure va=0x%llx err=%d",
++					    (unsigned long long)rec->va, mr);
 +				}
-+				pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
-+				panic("linux64_el0: unrecoverable kernel pmap_protect rollback failure va=0x%llx err=%d",
-+				    (unsigned long long)rec->va, mr);
++				write_pte_fast(pte_p, restored_pte);
++				if (rec->va < min_va) {
++					min_va = rec->va;
++				}
++				if (rec->va + pmap_page_size > max_va_end) {
++					max_va_end = rec->va + pmap_page_size;
++				}
++				restored++;
 +			}
-+			write_pte_fast(pte_p, (pt_entry_t)rec->old_pte);
-+			if (rec->va < min_va) {
-+				min_va = rec->va;
-+			}
-+			if (rec->va + pmap_page_size > max_va_end) {
-+				max_va_end = rec->va + pmap_page_size;
-+			}
-+			restored++;
 +		}
 +
 +		if (managed) {
@@ -2954,6 +3274,40 @@ index 79d0bc1..a25d4cc 100644
 +	}
 +	pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
 +	undo->count = 0;
++}
++
++void
++pmap_el0_protect_undo_rollback(
++	pmap_t pmap,
++	struct pmap_el0_protect_undo *undo)
++{
++	pmap_el0_protect_undo_rollback_filtered(pmap, undo, NULL, NULL);
++}
++
++bool
++pmap_protect_should_remove(
++	pmap_t pmap,
++	vm_prot_t prot,
++	unsigned int options)
++{
++#if DEVELOPMENT || DEBUG
++	if (options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
++#else
++	if (linux64_el0 && pmap == kernel_pmap && (options & PMAP_OPTIONS_PROTECT_IMMEDIATE)) {
++#endif
++		return (prot & VM_PROT_ALL) == VM_PROT_NONE;
++	}
++	switch (prot) {
++	case VM_PROT_READ:
++	case VM_PROT_READ | VM_PROT_EXECUTE:
++	case VM_PROT_READ | VM_PROT_WRITE:
++	case VM_PROT_ALL:
++		return false;
++	case VM_PROT_EXECUTE:
++		return !pmap_allows_xo(pmap);
++	default:
++		return true;
++	}
 +}
 +
 +static MARK_AS_PMAP_TEXT vm_map_address_t
@@ -2971,7 +3325,7 @@ index 79d0bc1..a25d4cc 100644
  {
  	tt_entry_t      *tte_p;
  	pt_entry_t      *bpte_p, *epte_p;
-@@ -5503,11 +5917,13 @@ pmap_protect_options_internal(
+@@ -5503,11 +6011,13 @@ pmap_protect_options_internal(
  
  #if DEVELOPMENT || DEBUG
  	if (options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
@@ -2986,7 +3340,7 @@ index 79d0bc1..a25d4cc 100644
  	{
  		/* Determine the new protection. */
  		switch (prot) {
-@@ -5516,6 +5932,9 @@ pmap_protect_options_internal(
+@@ -5516,6 +6026,9 @@ pmap_protect_options_internal(
  			break;
  		case VM_PROT_READ | VM_PROT_WRITE:
  		case VM_PROT_ALL:
@@ -2996,7 +3350,7 @@ index 79d0bc1..a25d4cc 100644
  			return end;         /* nothing to do */
  		case VM_PROT_EXECUTE:
  			set_XO = true;
-@@ -5570,9 +5989,7 @@ pmap_protect_options_internal(
+@@ -5570,9 +6083,7 @@ pmap_protect_options_internal(
  				break;
  			}
  			pt_entry_t spte;
@@ -3006,7 +3360,7 @@ index 79d0bc1..a25d4cc 100644
  
  			spte = *((volatile pt_entry_t*)pte_p);
  
-@@ -5613,6 +6030,10 @@ pmap_protect_options_internal(
+@@ -5613,6 +6124,10 @@ pmap_protect_options_internal(
  			pt_entry_t      tmplate;
  
  			if (pmap == kernel_pmap) {
@@ -3017,7 +3371,7 @@ index 79d0bc1..a25d4cc 100644
  #if DEVELOPMENT || DEBUG
  				if ((options & PMAP_OPTIONS_PROTECT_IMMEDIATE) && (prot & VM_PROT_WRITE)) {
  					force_write = TRUE;
-@@ -5654,14 +6075,63 @@ pmap_protect_options_internal(
+@@ -5654,14 +6169,63 @@ pmap_protect_options_internal(
  				} else {
  					/* do NOT clear "NX"! */
  					tmplate |= pt_attr_leaf_x(pt_attr);
@@ -3083,7 +3437,7 @@ index 79d0bc1..a25d4cc 100644
  			if (force_write) {
  				/*
  				 * TODO: Run CS/Monitor checks here.
-@@ -5673,7 +6143,6 @@ pmap_protect_options_internal(
+@@ -5673,7 +6237,6 @@ pmap_protect_options_internal(
  					 * referenced.
  					 */
  					ppattr_pa_set_bits(pa, PP_ATTR_REFERENCED | PP_ATTR_MODIFIED);
@@ -3091,7 +3445,7 @@ index 79d0bc1..a25d4cc 100644
  
  					if (ppattr_test_reffault(pai)) {
  						ppattr_clear_reffault(pai);
-@@ -5691,32 +6160,33 @@ pmap_protect_options_internal(
+@@ -5691,32 +6254,33 @@ pmap_protect_options_internal(
  				 */
  				if (managed) {
  					ppattr_pa_set_bits(pa, PP_ATTR_REFERENCED);
@@ -3137,7 +3491,7 @@ index 79d0bc1..a25d4cc 100644
  	} else {
  		va = end;
  	}
-@@ -5725,6 +6195,120 @@ pmap_protect_options_internal(
+@@ -5725,6 +6289,106 @@ pmap_protect_options_internal(
  	return va;
  }
  
@@ -3176,30 +3530,16 @@ index 79d0bc1..a25d4cc 100644
 +		pmap_verify_preemptible();
 +	}
 +
++	if (pmap_protect_should_remove(pmap, prot, options)) {
++		pmap_remove_options(pmap, b, e, options);
++		return KERN_SUCCESS;
++	}
 +#if DEVELOPMENT || DEBUG
-+	if (options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
++	if (!(options & PMAP_OPTIONS_PROTECT_IMMEDIATE)) {
 +#else
-+	if (linux64_el0 && pmap == kernel_pmap && (options & PMAP_OPTIONS_PROTECT_IMMEDIATE)) {
++	if (!(linux64_el0 && pmap == kernel_pmap && (options & PMAP_OPTIONS_PROTECT_IMMEDIATE))) {
 +#endif
-+		if ((prot & VM_PROT_ALL) == VM_PROT_NONE) {
-+			pmap_remove_options(pmap, b, e, options);
-+			return KERN_SUCCESS;
-+		}
-+	} else {
-+		switch (prot) {
-+		case VM_PROT_READ:
-+		case VM_PROT_READ | VM_PROT_EXECUTE:
-+			break;
-+		case VM_PROT_READ | VM_PROT_WRITE:
-+		case VM_PROT_ALL:
-+			return KERN_SUCCESS;
-+		case VM_PROT_EXECUTE:
-+			if (pmap_allows_xo(pmap)) {
-+				break;
-+			}
-+			OS_FALLTHROUGH;
-+		default:
-+			pmap_remove_options(pmap, b, e, options);
++		if (prot == (VM_PROT_READ | VM_PROT_WRITE) || prot == VM_PROT_ALL) {
 +			return KERN_SUCCESS;
 +		}
 +	}
@@ -3258,7 +3598,7 @@ index 79d0bc1..a25d4cc 100644
  void
  pmap_protect_options(
  	pmap_t pmap,
-@@ -5755,12 +6339,14 @@ pmap_protect_options(
+@@ -5755,12 +6419,14 @@ pmap_protect_options(
  
  #if DEVELOPMENT || DEBUG
  	if (options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
@@ -3274,24 +3614,41 @@ index 79d0bc1..a25d4cc 100644
  	{
  		/* Determine the new protection. */
  		switch (prot) {
-@@ -5862,8 +6448,82 @@ pmap_map_block_addr(
+@@ -5845,6 +6511,20 @@ pmap_map_block(
+  *
+  * @return KERN_SUCCESS.
+  */
++static kern_return_t pmap_enter_addr_el0_block_page(
++	pmap_t pmap,
++	vm_map_address_t v,
++	pmap_paddr_t pa,
++	vm_prot_t prot,
++	unsigned int flags,
++	pt_entry_t *old_pte_out,
++	pt_entry_t *new_pte_out);
++
++struct el0_block_rec {
++	pt_entry_t old_pte;
++	pt_entry_t new_pte;
++};
++
+ kern_return_t
+ pmap_map_block_addr(
+ 	pmap_t pmap,
+@@ -5862,8 +6542,121 @@ pmap_map_block_addr(
  	const uint64_t pmap_page_size = PAGE_SIZE;
  #endif
  
 +	addr64_t orig_va = va;
-+	pt_entry_t stack_saved[32];
-+	pt_entry_t *saved_ptes = NULL;
-+	vm_size_t saved_bytes = 0;
++	struct el0_block_rec stack_recs[32];
++	struct el0_block_rec *recs = NULL;
 +
 +	if (linux64_el0 && pmap == kernel_pmap && size > 0) {
 +		if (size <= 32) {
-+			saved_ptes = stack_saved;
++			recs = stack_recs;
 +		} else if (startup_phase >= STARTUP_SUB_ZALLOC) {
-+			if (os_mul_overflow((vm_size_t)size, sizeof(pt_entry_t), &saved_bytes)) {
-+				return KERN_RESOURCE_SHORTAGE;
-+			}
-+			saved_ptes = kalloc_data(saved_bytes, Z_WAITOK | Z_ZERO);
-+			if (saved_ptes == NULL) {
++			recs = kalloc_data((size_t)size * sizeof(*recs), Z_WAITOK | Z_ZERO);
++			if (recs == NULL) {
 +				return KERN_RESOURCE_SHORTAGE;
 +			}
 +		}
@@ -3299,112 +3656,123 @@ index 79d0bc1..a25d4cc 100644
 +
  	for (ppnum_t page = 0; page < size; page++) {
 -		if (pmap_enter_addr(pmap, va, pa, prot, VM_PROT_NONE, attr, TRUE) != KERN_SUCCESS) {
-+		kern_return_t kr = KERN_SUCCESS;
-+		bool skip_cur_page = false;
-+
-+		if (saved_ptes != NULL) {
-+			pmap_lock(pmap, PMAP_LOCK_SHARED);
-+			pt_entry_t *pte_p = pmap_pte(pmap, va);
-+			saved_ptes[page] = (pte_p != PT_ENTRY_NULL) ? *((volatile pt_entry_t *)pte_p) : ARM_PTE_EMPTY;
-+			pmap_unlock(pmap, PMAP_LOCK_SHARED);
-+			if (pte_is_valid(saved_ptes[page]) && !pmap_el0_pte_restorable(pmap, (uint64_t)saved_ptes[page])) {
-+				kr = KERN_NOT_SUPPORTED;
-+				skip_cur_page = true;
-+			}
-+		}
-+
-+		if (kr == KERN_SUCCESS) {
++		kern_return_t kr;
++		if (recs != NULL) {
++			kr = pmap_enter_addr_el0_block_page(pmap, va, pa, prot, attr,
++			    &recs[page].old_pte, &recs[page].new_pte);
++		} else {
 +			kr = pmap_enter_addr(pmap, va, pa, prot, VM_PROT_NONE, attr, TRUE);
 +		}
 +		if (kr != KERN_SUCCESS) {
-+			if (linux64_el0 && pmap == kernel_pmap) {
-+				if (saved_ptes != NULL) {
-+					ppnum_t unwind_end = skip_cur_page ? page : (page + 1);
-+					for (ppnum_t j = 0; j < unwind_end; j++) {
-+						addr64_t cur_va = orig_va + ((uint64_t)j * pmap_page_size);
-+						if (!pte_is_valid(saved_ptes[j])) {
-+							if (j < page) {
-+								pmap_remove(pmap, cur_va, cur_va + pmap_page_size);
++			if (recs != NULL) {
++				const pt_entry_t blk_mask = ARM_PTE_APMASK | ARM_PTE_NX | ARM_PTE_PNX |
++				    ARM_PTE_AF | ARM_PTE_WRITEABLE | ARM_PTE_WIRED_MASK;
++				for (ppnum_t j = page; j > 0; j--) {
++					const struct el0_block_rec *rec = &recs[j - 1];
++					if (rec->old_pte == rec->new_pte) {
++						continue;
++					}
++					addr64_t cur_va = orig_va + ((uint64_t)(j - 1) * pmap_page_size);
++					pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
++					pt_entry_t *cpte_p = pmap_pte(pmap, cur_va);
++					if (cpte_p != PT_ENTRY_NULL) {
++						pt_entry_t cur_pte = *((volatile pt_entry_t *)cpte_p);
++						if (!pte_is_valid(rec->old_pte)) {
++							if (pte_is_valid(cur_pte) &&
++							    pte_to_pa(cur_pte) == pte_to_pa(rec->new_pte)) {
++								pmap_remove_range(pmap, cur_va, cpte_p, cpte_p + PAGE_RATIO);
++								FLUSH_PTE_STRONG();
++								PMAP_UPDATE_TLBS(pmap, cur_va, cur_va + pmap_page_size, true, true);
 +							}
-+						} else {
-+							pmap_lock(pmap, PMAP_LOCK_SHARED);
-+							pt_entry_t *cpte_p = pmap_pte(pmap, cur_va);
-+							pt_entry_t cur_pte = (cpte_p != PT_ENTRY_NULL) ? *((volatile pt_entry_t *)cpte_p) : ARM_PTE_EMPTY;
-+							pmap_unlock(pmap, PMAP_LOCK_SHARED);
-+							if (cur_pte == saved_ptes[j]) {
-+								continue;
-+							}
-+							if (pte_is_valid(cur_pte) && pte_to_pa(cur_pte) != pte_to_pa(saved_ptes[j])) {
-+								pmap_remove(pmap, cur_va, cur_va + pmap_page_size);
-+							}
-+							kern_return_t rkr = pmap_el0_restore_pte_snapshot(pmap, cur_va, (uint64_t)saved_ptes[j]);
-+							if (rkr != KERN_SUCCESS) {
-+								if (saved_ptes != stack_saved) {
-+									kfree_data(saved_ptes, saved_bytes);
++						} else if (pte_is_valid(cur_pte) &&
++						    pte_to_pa(cur_pte) == pte_to_pa(rec->new_pte)) {
++							pmap_paddr_t cpa = 0;
++							unsigned int pai = 0;
++							boolean_t managed = FALSE;
++							while (!managed) {
++								cpa = pte_to_pa(cur_pte);
++								if (!pa_valid(cpa)) {
++									break;
 +								}
-+								panic("linux64_el0: unrecoverable pmap_map_block_addr rollback failure va=0x%llx kr=%d",
-+								    (unsigned long long)cur_va, rkr);
++								pai = pa_index(cpa);
++								pvh_lock(pai);
++								cur_pte = *((volatile pt_entry_t *)cpte_p);
++								cpa = pte_to_pa(cur_pte);
++								if (pa_valid(cpa) && pai == pa_index(cpa)) {
++									managed = TRUE;
++									break;
++								}
++								pvh_unlock(pai);
++							}
++							if (pte_is_valid(cur_pte) &&
++							    pte_to_pa(cur_pte) == pte_to_pa(rec->new_pte)) {
++								const pt_entry_t perm_mask =
++								    ARM_PTE_APMASK | ARM_PTE_NX | ARM_PTE_PNX | ARM_PTE_WRITEABLE;
++								pt_entry_t restored_pte = cur_pte;
++								if ((cur_pte & perm_mask) == (rec->new_pte & perm_mask)) {
++									restored_pte = (cur_pte & ~blk_mask) |
++									    (rec->old_pte & blk_mask);
++								} else if (((rec->new_pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RWNA)) &&
++								    ((cur_pte & ARM_PTE_APMASK) == ARM_PTE_AP(AP_RONA)) &&
++								    pte_was_writeable(cur_pte) &&
++								    ((rec->old_pte & ARM_PTE_APMASK) != ARM_PTE_AP(AP_RWNA)) &&
++								    !pte_was_writeable(rec->old_pte)) {
++									const pt_entry_t non_ap_mask =
++									    ARM_PTE_NX | ARM_PTE_PNX | ARM_PTE_WIRED;
++									restored_pte = (cur_pte & ~(ARM_PTE_WRITEABLE | non_ap_mask)) |
++									    (rec->old_pte & non_ap_mask);
++								}
++								if (restored_pte != cur_pte) {
++									int mr = linux64_el0_mirror_pte(pmap, cur_va,
++									    restored_pte, pmap_page_size);
++									if (mr < 0) {
++										if (managed) {
++											pvh_assert_locked(pai);
++											pvh_unlock(pai);
++										}
++										pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
++										if (recs != stack_recs) {
++											kfree_data(recs, size * sizeof(*recs));
++										}
++										panic("linux64_el0: unrecoverable pmap_map_block_addr rollback failure va=0x%llx err=%d",
++										    (unsigned long long)cur_va, mr);
++									}
++									write_pte_fast(cpte_p, restored_pte);
++									FLUSH_PTE_STRONG();
++									PMAP_UPDATE_TLBS(pmap, cur_va, cur_va + pmap_page_size, true, true);
++								}
++							}
++							if (managed) {
++								pvh_assert_locked(pai);
++								pvh_unlock(pai);
 +							}
 +						}
 +					}
-+					if (saved_ptes != stack_saved) {
-+						kfree_data(saved_ptes, saved_bytes);
-+					}
-+				} else if (page > 0) {
-+					pmap_remove(pmap, orig_va, orig_va + ((uint64_t)page * pmap_page_size));
++					pmap_unlock(pmap, PMAP_LOCK_EXCLUSIVE);
++				}
++				if (recs != stack_recs) {
++					kfree_data(recs, (size_t)size * sizeof(*recs));
 +				}
 +				return kr;
 +			}
  			panic("%s: failed pmap_enter_addr, "
  			    "pmap=%p, va=%#llx, pa=%llu, size=%u, prot=%#x, flags=%#x",
  			    __FUNCTION__,
-@@ -5874,47 +6534,299 @@ pmap_map_block_addr(
+@@ -5874,6 +6667,9 @@ pmap_map_block_addr(
  		pa += pmap_page_size;
  	}
  
-+	if (saved_ptes != NULL && saved_ptes != stack_saved) {
-+		kfree_data(saved_ptes, saved_bytes);
++	if (recs != NULL && recs != stack_recs) {
++		kfree_data(recs, (size_t)size * sizeof(*recs));
 +	}
-+	return KERN_SUCCESS;
-+}
-+
-+kern_return_t
-+pmap_enter_addr(
-+	pmap_t pmap,
-+	vm_map_address_t v,
-+	pmap_paddr_t pa,
-+	vm_prot_t prot,
-+	vm_prot_t fault_type,
-+	unsigned int flags,
-+	boolean_t wired)
-+{
-+	return pmap_enter_options_addr(pmap, v, pa, prot, fault_type, flags, wired, 0, NULL, PMAP_MAPPING_TYPE_INFER);
-+}
-+
-+/*
-+ *	Insert the given physical page (p) at
-+ *	the specified virtual address (v) in the
-+ *	target physical map with the protection requested.
-+ *
-+ *	If specified, the page will be wired down, meaning
-+ *	that the related pte can not be reclaimed.
-+ *
-+ *	NB:  This is the only routine which MAY NOT lazy-evaluate
-+ *	or lose information.  That is, this routine must actually
-+ *	insert this page into the given map eventually (must make
-+ *	forward progress eventually.
-+ */
-+kern_return_t
-+pmap_enter(
-+	pmap_t pmap,
-+	vm_map_address_t v,
-+	ppnum_t pn,
-+	vm_prot_t prot,
-+	vm_prot_t fault_type,
-+	unsigned int flags,
-+	boolean_t wired,
-+	__unused pmap_mapping_type_t mapping_type)
-+{
+ 	return KERN_SUCCESS;
+ }
+ 
+@@ -5914,7 +6710,256 @@ pmap_enter(
+ 	boolean_t wired,
+ 	__unused pmap_mapping_type_t mapping_type)
+ {
+-	return pmap_enter_addr(pmap, v, ((pmap_paddr_t)pn) << PAGE_SHIFT, prot, fault_type, flags, wired);
 +	return pmap_enter_addr(pmap, v, ((pmap_paddr_t)pn) << PAGE_SHIFT, prot, fault_type, flags, wired);
 +}
 +
@@ -3620,22 +3988,12 @@ index 79d0bc1..a25d4cc 100644
 +		return KERN_FAILURE;
 +	}
 +	*handle_out = req.as_handle;
- 	return KERN_SUCCESS;
- }
- 
--kern_return_t
--pmap_enter_addr(
--	pmap_t pmap,
--	vm_map_address_t v,
--	pmap_paddr_t pa,
--	vm_prot_t prot,
--	vm_prot_t fault_type,
--	unsigned int flags,
--	boolean_t wired)
++	return KERN_SUCCESS;
++}
++
 +void
 +pmap_el0_kmap_txn_begin_restore(uint64_t handle)
- {
--	return pmap_enter_options_addr(pmap, v, pa, prot, fault_type, flags, wired, 0, NULL, PMAP_MAPPING_TYPE_INFER);
++{
 +	if (!linux64_el0 || handle == 0) {
 +		return;
 +	}
@@ -3648,35 +4006,11 @@ index 79d0bc1..a25d4cc 100644
 +		.result = 0,
 +	};
 +	linux64_call(LINUX64_CALL_KMAP_TXN, &req);
- }
- 
--/*
-- *	Insert the given physical page (p) at
-- *	the specified virtual address (v) in the
-- *	target physical map with the protection requested.
-- *
-- *	If specified, the page will be wired down, meaning
-- *	that the related pte can not be reclaimed.
-- *
-- *	NB:  This is the only routine which MAY NOT lazy-evaluate
-- *	or lose information.  That is, this routine must actually
-- *	insert this page into the given map eventually (must make
-- *	forward progress eventually.
-- */
--kern_return_t
--pmap_enter(
--	pmap_t pmap,
--	vm_map_address_t v,
--	ppnum_t pn,
--	vm_prot_t prot,
--	vm_prot_t fault_type,
--	unsigned int flags,
--	boolean_t wired,
--	__unused pmap_mapping_type_t mapping_type)
++}
++
 +void
 +pmap_el0_kmap_txn_end(uint64_t handle)
- {
--	return pmap_enter_addr(pmap, v, ((pmap_paddr_t)pn) << PAGE_SHIFT, prot, fault_type, flags, wired);
++{
 +	if (!linux64_el0 || handle == 0) {
 +		return;
 +	}
@@ -3692,7 +4026,7 @@ index 79d0bc1..a25d4cc 100644
  }
  
  /*
-@@ -5923,10 +6835,32 @@ pmap_enter(
+@@ -5923,10 +6968,32 @@ pmap_enter(
   * Performs no page table or accounting writes on failures.
   */
  static inline bool
@@ -3726,7 +4060,7 @@ index 79d0bc1..a25d4cc 100644
  
  	__unreachable_ok_push
  	if (TEST_PAGE_RATIO_4) {
-@@ -5954,7 +6888,11 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
+@@ -5954,7 +7021,11 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
  	__unreachable_ok_pop
  
  	if (success && *old_pte != new_pte) {
@@ -3739,7 +4073,7 @@ index 79d0bc1..a25d4cc 100644
  
  		if (pte_is_valid(*old_pte)) {
  			bool need_strong_sync = false;
-@@ -6195,7 +7133,9 @@ pmap_construct_pte(
+@@ -6195,7 +7266,9 @@ pmap_construct_pte(
  				*pp_attr_bits |= PP_ATTR_REFERENCED;
  			}
  		} else {
@@ -3750,7 +4084,30 @@ index 79d0bc1..a25d4cc 100644
  				pte |= pt_attr_leaf_rona(pt_attr);
  			} else {
  				pte |= pt_attr_leaf_ro(pt_attr);
-@@ -6228,7 +7168,8 @@ pmap_enter_options_internal(
+@@ -6208,8 +7281,8 @@ pmap_construct_pte(
+ 	return pte;
+ }
+ 
+-MARK_AS_PMAP_TEXT kern_return_t
+-pmap_enter_options_internal(
++static MARK_AS_PMAP_TEXT kern_return_t
++pmap_enter_options_internal_el0(
+ 	pmap_t pmap,
+ 	vm_map_address_t v,
+ 	pmap_paddr_t pa,
+@@ -6217,7 +7290,10 @@ pmap_enter_options_internal(
+ 	vm_prot_t fault_type,
+ 	unsigned int flags,
+ 	boolean_t wired,
+-	unsigned int options)
++	unsigned int options,
++	bool no_cross_pa_replace,
++	pt_entry_t *old_pte_out,
++	pt_entry_t *new_pte_out)
+ {
+ 	ppnum_t         pn = (ppnum_t)atop(pa);
+ 	pt_entry_t      pte;
+@@ -6228,7 +7304,8 @@ pmap_enter_options_internal(
  	bool            ro_va = false;
  	unsigned int    wimg_bits;
  	bool            committed = false, drop_refcnt = false, had_valid_mapping = false, skip_footprint_debit = false;
@@ -3760,7 +4117,21 @@ index 79d0bc1..a25d4cc 100644
  	kern_return_t   kr = KERN_SUCCESS;
  	uint16_t pp_attr_bits;
  	volatile uint16_t *refcnt;
-@@ -6502,7 +7443,13 @@ pmap_enter_options_internal(
+@@ -6373,6 +7450,13 @@ pmap_enter_options_internal(
+ 			}
+ 		}
+ 
++		if (no_cross_pa_replace && linux64_el0 && pmap == kernel_pmap && had_valid_mapping) {
++			if (pte_to_pa(spte) != pa || !pmap_el0_pte_restorable(pmap, (uint64_t)spte)) {
++				kr = KERN_NOT_SUPPORTED;
++				break;
++			}
++		}
++
+ 		if (had_valid_mapping && (pte_to_pa(spte) != pa)) {
+ 			/*
+ 			 * There is already a mapping here & it's for a different physical page.
+@@ -6502,7 +7586,13 @@ pmap_enter_options_internal(
  #endif
  
  
@@ -3775,7 +4146,7 @@ index 79d0bc1..a25d4cc 100644
  			if (!committed) {
  				pvh_unlock(pai);
  				continue;
-@@ -6644,7 +7591,12 @@ pmap_enter_options_internal(
+@@ -6644,7 +7734,12 @@ pmap_enter_options_internal(
  			}
  #endif
  
@@ -3789,7 +4160,59 @@ index 79d0bc1..a25d4cc 100644
  			if (committed) {
  				had_valid_mapping = pte_is_valid(spte);
  				assert(!had_valid_mapping || (pte_to_pa(spte) == pa));
-@@ -6972,6 +7924,366 @@ pmap_find_phys(
+@@ -6657,6 +7752,12 @@ pmap_enter_options_internal(
+ 			}
+ 		}
+ 		if (committed) {
++			if (old_pte_out != NULL) {
++				*old_pte_out = spte;
++			}
++			if (new_pte_out != NULL) {
++				*new_pte_out = pte;
++			}
+ 			if (ARM_PTE_IS_COMPRESSED(spte, pte_p)) {
+ 				uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
+ 				assert(pmap != kernel_pmap);
+@@ -6697,6 +7798,38 @@ pmap_enter_options_internal(
+ 	return kr;
+ }
+ 
++MARK_AS_PMAP_TEXT kern_return_t
++pmap_enter_options_internal(
++	pmap_t pmap,
++	vm_map_address_t v,
++	pmap_paddr_t pa,
++	vm_prot_t prot,
++	vm_prot_t fault_type,
++	unsigned int flags,
++	boolean_t wired,
++	unsigned int options)
++{
++	return pmap_enter_options_internal_el0(pmap, v, pa, prot, fault_type, flags, wired, options, false, NULL, NULL);
++}
++
++static kern_return_t
++pmap_enter_addr_el0_block_page(
++	pmap_t pmap,
++	vm_map_address_t v,
++	pmap_paddr_t pa,
++	vm_prot_t prot,
++	unsigned int flags,
++	pt_entry_t *old_pte_out,
++	pt_entry_t *new_pte_out)
++{
++	kern_return_t kr;
++	do {
++		kr = pmap_enter_options_internal_el0(pmap, v, pa, prot, VM_PROT_NONE, flags, TRUE, 0,
++		    true, old_pte_out, new_pte_out);
++	} while (kr == KERN_RESOURCE_SHORTAGE || kr == KERN_ABORTED);
++	return kr;
++}
++
+ kern_return_t
+ pmap_enter_options_addr(
+ 	pmap_t pmap,
+@@ -6972,6 +8105,366 @@ pmap_find_phys(
   * @return The physical address if the translation was successful, or zero if
   *         no valid mappings were found for the given virtual address.
   */
@@ -4156,7 +4579,7 @@ index 79d0bc1..a25d4cc 100644
  pmap_paddr_t
  kvtophys(vm_offset_t va)
  {
-@@ -8173,17 +9485,29 @@ arm_force_fast_fault_with_flush_range(
+@@ -8173,17 +9666,29 @@ arm_force_fast_fault_with_flush_range(
  		assert(!pte_is_xs(pt_attr, spte));
  #endif /* HAS_FEAT_XS */
  		if ((allow_mode & VM_PROT_READ) != VM_PROT_READ) {
@@ -4192,7 +4615,7 @@ index 79d0bc1..a25d4cc 100644
  				}
  			} else {
  				if ((tmplate & ARM_PTE_APMASK) == pt_attr_leaf_rw(pt_attr)) {
-@@ -8220,6 +9544,7 @@ arm_force_fast_fault_with_flush_range(
+@@ -8220,6 +9725,7 @@ arm_force_fast_fault_with_flush_range(
  				}
  			}
  			write_pte_fast(pte_p, tmplate);
@@ -4200,7 +4623,7 @@ index 79d0bc1..a25d4cc 100644
  		}
  
  fff_skip_pve_pass1:
-@@ -8500,6 +9825,7 @@ arm_clear_fast_fault(
+@@ -8500,6 +10006,7 @@ arm_clear_fast_fault(
  				tlb_flush_needed = true;
  			}
  			write_pte_fast(pte_p, tmplate);
@@ -4208,7 +4631,7 @@ index 79d0bc1..a25d4cc 100644
  			result = TRUE;
  		}
  
-@@ -8935,6 +10261,19 @@ pmap_map_cpu_windows_copy_internal(
+@@ -8935,6 +10442,19 @@ pmap_map_cpu_windows_copy_internal(
  	need_strong_sync = pte_is_xs(native_pt_attr, pte);
  #endif
  	write_pte_fast(ptep, pte);
@@ -4228,7 +4651,7 @@ index 79d0bc1..a25d4cc 100644
  	/*
  	 * Invalidate tlb. Cover nested cpu_copywindow_vaddr usage with the interrupted context
  	 * in pmap_unmap_cpu_windows_copy() after clearing the pte and before tlb invalidate.
-@@ -8977,6 +10316,10 @@ pmap_unmap_cpu_windows_copy_internal(
+@@ -8977,6 +10497,10 @@ pmap_unmap_cpu_windows_copy_internal(
  	__builtin_arm_dsb(DSB_SY);
  	ptep = pmap_pte(kernel_pmap, cpu_copywindow_vaddr);
  	write_pte_strong(ptep, ARM_PTE_EMPTY);
@@ -4239,7 +4662,7 @@ index 79d0bc1..a25d4cc 100644
  	PMAP_UPDATE_TLBS(kernel_pmap, cpu_copywindow_vaddr, cpu_copywindow_vaddr + PAGE_SIZE, pmap_cpu_data->copywindow_strong_sync[index], true);
  }
  
-@@ -9159,6 +10502,11 @@ pmap_set_nested_internal(
+@@ -9159,6 +10683,11 @@ pmap_set_nested_internal(
  	}
  
  	pmap_get_pt_ops(pmap)->free_id(pmap);
@@ -4251,7 +4674,7 @@ index 79d0bc1..a25d4cc 100644
  }
  
  __mockable void
-@@ -9617,6 +10965,23 @@ pmap_sign_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
+@@ -9617,6 +11146,23 @@ pmap_sign_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
  		panic("attempt to sign user pointer without process independent key");
  	}
  
@@ -4275,7 +4698,7 @@ index 79d0bc1..a25d4cc 100644
  	void *res = NULL;
  	uint64_t current_intr_state = pmap_interrupts_disable();
  
-@@ -9655,6 +11020,23 @@ pmap_auth_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
+@@ -9655,6 +11201,23 @@ pmap_auth_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
  		panic("attempt to auth user pointer without process independent key");
  	}
  
@@ -4299,7 +4722,7 @@ index 79d0bc1..a25d4cc 100644
  	void *res = NULL;
  	uint64_t current_intr_state = pmap_interrupts_disable();
  
-@@ -10442,6 +11824,10 @@ unnest_subord_done:
+@@ -10442,6 +12005,10 @@ unnest_subord_done:
  	}
  
  	FLUSH_PTE_STRONG();
@@ -4310,7 +4733,7 @@ index 79d0bc1..a25d4cc 100644
  	PMAP_UPDATE_TLBS(grand, start, addr, false, false);
  
  	pmap_unlock(grand, PMAP_LOCK_EXCLUSIVE);
-@@ -12980,6 +14366,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
+@@ -12980,6 +14547,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
  #if __ARM_MIXED_PAGE_SIZE__
  	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
  	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
@@ -4319,7 +4742,7 @@ index 79d0bc1..a25d4cc 100644
  #else
  	return 64 - T0SZ_BOOT;
  #endif
-@@ -14853,7 +16241,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+@@ -14853,7 +16422,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
  
  		/* Disable PAN; pmap shouldn't be the kernel pmap. */
  #if __ARM_PAN_AVAILABLE__
@@ -4330,7 +4753,7 @@ index 79d0bc1..a25d4cc 100644
  #endif /* __ARM_PAN_AVAILABLE__ */
  	}
  
-@@ -14872,7 +16262,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+@@ -14872,7 +16443,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
  
  	if (pmap != NULL) {
  #if __ARM_PAN_AVAILABLE__
@@ -7221,6 +7644,38 @@ index b1ca47a..d878442 100644
  		if (chr < 0) { /* The serial buffer is empty */
  			break;
  		}
+diff --git a/osfmk/device/iokit_rpc.c b/osfmk/device/iokit_rpc.c
+index fd3e49e..55aa4ea 100644
+--- a/osfmk/device/iokit_rpc.c
++++ b/osfmk/device/iokit_rpc.c
+@@ -512,6 +512,11 @@ IOProtectCacheMode(vm_map_t __unused map, mach_vm_address_t __unused va,
+ 		break;
+ 	}
+ 
++	extern unsigned int linux64_el0;
++	if (linux64_el0 && pmap == kernel_pmap && !pmap_el0_wimg_supported(flags)) {
++		return KERN_NOT_SUPPORTED;
++	}
++
+ 	pmap_flush_context_init(&pmap_flush_context_storage);
+ 	delayed_pmap_flush = FALSE;
+ 
+@@ -529,8 +534,14 @@ IOProtectCacheMode(vm_map_t __unused map, mach_vm_address_t __unused va,
+ 				panic("Illegal cache attribute overwrite on tagged mapping at 0x%016llx in pmap 0x%016llx", va + off, (uint64_t)pmap);
+ 			}
+ #endif
+-			pmap_enter_options(pmap, va + off, ppnum, prot, VM_PROT_NONE, flags, TRUE,
++			kern_return_t kr = pmap_enter_options(pmap, va + off, ppnum, prot, VM_PROT_NONE, flags, TRUE,
+ 			    PMAP_OPTIONS_NOFLUSH, (void *)&pmap_flush_context_storage, PMAP_MAPPING_TYPE_INFER);
++			if (kr != KERN_SUCCESS) {
++				if (delayed_pmap_flush == TRUE) {
++					pmap_flush(&pmap_flush_context_storage);
++				}
++				return kr;
++			}
+ 			delayed_pmap_flush = TRUE;
+ 		}
+ 	}
 diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
 index 4224c9d..4a1fe94 100644
 --- a/osfmk/kern/assert.h
@@ -7767,10 +8222,10 @@ index 44b993c..4ce279b 100644
  
  	return 0;
 diff --git a/osfmk/vm/pmap.h b/osfmk/vm/pmap.h
-index 67ebd6a..a688fa9 100644
+index 67ebd6a..92f6943 100644
 --- a/osfmk/vm/pmap.h
 +++ b/osfmk/vm/pmap.h
-@@ -707,6 +707,38 @@ extern void             pmap_protect_options(   /* Change protections. */
+@@ -707,6 +707,50 @@ extern void             pmap_protect_options(   /* Change protections. */
  	unsigned int    options,
  	void            *arg);
  
@@ -7793,9 +8248,21 @@ index 67ebd6a..a688fa9 100644
 +	struct pmap_el0_protect_undo *undo);
 +extern void             pmap_el0_protect_undo_destroy(
 +	struct pmap_el0_protect_undo *undo);
++extern bool             pmap_el0_protect_undo_record_hole(
++	struct pmap_el0_protect_undo *undo,
++	vm_map_address_t va);
++extern void             pmap_el0_protect_undo_rollback_filtered(
++	pmap_t          pmap,
++	struct pmap_el0_protect_undo *undo,
++	bool            (*match_va)(vm_map_address_t va, void *ctx),
++	void            *ctx);
 +extern void             pmap_el0_protect_undo_rollback(
 +	pmap_t          pmap,
 +	struct pmap_el0_protect_undo *undo);
++extern bool             pmap_protect_should_remove(
++	pmap_t          pmap,
++	vm_prot_t       prot,
++	unsigned int    options);
 +
 +extern kern_return_t    pmap_protect_options_checked(
 +	pmap_t          map,
@@ -7809,7 +8276,7 @@ index 67ebd6a..a688fa9 100644
  extern void(pmap_pageable)(
  	pmap_t          pmap,
  	vm_map_offset_t start,
-@@ -740,6 +772,17 @@ extern kern_return_t pmap_unnest_options(pmap_t,
+@@ -740,6 +784,17 @@ extern kern_return_t pmap_unnest_options(pmap_t,
      unsigned int);
  extern boolean_t pmap_adjust_unnest_parameters(pmap_t, vm_map_offset_t *, vm_map_offset_t *);
  extern void             pmap_advise_pagezero_range(pmap_t, uint64_t);
@@ -8262,7 +8729,7 @@ index 4f2045c..a72ac7c 100644
  	/*
  	 * Finally, give any remaining allocable space to the data region.
 diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
-index fd9e108..ba91b41 100644
+index fd9e108..3bdb87b 100644
 --- a/osfmk/vm/vm_map.c
 +++ b/osfmk/vm/vm_map.c
 @@ -74,6 +74,7 @@
@@ -8293,7 +8760,7 @@ index fd9e108..ba91b41 100644
  	entry->vme_permanent = false;
  	vm_map_entry_reinit_code_signing_after_copy(map, entry);
  	vm_map_entry_reinit_csm_assoc_after_copy(map, entry);
-@@ -946,13 +953,358 @@ vm_map_entry_reinit_after_copy(vm_map_t map, vm_map_entry_t entry)
+@@ -946,13 +953,363 @@ vm_map_entry_reinit_after_copy(vm_map_t map, vm_map_entry_t entry)
   * something goes wrong. In that case, the zap list is iterated and the entries
   * reinserted into the map (see vm_map_enter).
   */
@@ -8613,13 +9080,18 @@ index fd9e108..ba91b41 100644
 +	vm_object_t             object,
 +	vm_object_offset_t      offset,
 +	vm_map_size_t           size,
-+	vm_map_offset_t         va)
++	vm_map_offset_t         va,
++	bool                    allow_obj_wimg_override)
 +{
 +	if (object == VM_OBJECT_NULL || size == 0 ||
 +	    is_kernel_object(object) || object == compressor_object) {
 +		return true;
 +	}
 +	vm_object_lock_shared(object);
++	if (!allow_obj_wimg_override && !pmap_el0_wimg_supported(object->wimg_bits)) {
++		vm_object_unlock(object);
++		return false;
++	}
 +	bool ok = true;
 +	if (object->phys_contiguous) {
 +		if (!(object->private && object->pager_created && !object->vo_el0_populated)) {
@@ -8653,7 +9125,7 @@ index fd9e108..ba91b41 100644
  
  static vm_map_entry_t
  vm_map_zap_first_entry(vm_map_zap_t list)
-@@ -996,6 +1348,23 @@ vm_map_zap_dispose(vm_map_t map __unused, vm_map_zap_t list)
+@@ -996,6 +1353,23 @@ vm_map_zap_dispose(vm_map_t map __unused, vm_map_zap_t list)
  {
  	vm_map_entry_t          entry;
  
@@ -8677,7 +9149,7 @@ index fd9e108..ba91b41 100644
  	while ((entry = vm_map_zap_pop(list))) {
  		/*
  		 * RANGELOCKINGTODO:
-@@ -3026,6 +3395,86 @@ uint64_t vm_map_enter_RLIMIT_DATA_count = 0;
+@@ -3026,6 +3400,86 @@ uint64_t vm_map_enter_RLIMIT_DATA_count = 0;
   */
  __static_testable unsigned int vm_map_enter_restore_successes = 0;
  __static_testable unsigned int vm_map_enter_restore_failures = 0;
@@ -8764,7 +9236,7 @@ index fd9e108..ba91b41 100644
  kern_return_t
  vm_map_enter(
  	vm_map_t                map,
-@@ -3049,6 +3498,8 @@ vm_map_enter(
+@@ -3049,6 +3503,8 @@ vm_map_enter(
  	kern_return_t           result = KERN_SUCCESS;
  	bool                    map_ilocked = false;
  	bool                    map_lock_dropped = false;
@@ -8773,7 +9245,7 @@ index fd9e108..ba91b41 100644
  	bool                    pmap_empty = TRUE;
  	bool                    new_mapping_established = FALSE;
  	const bool              keep_map_ilocked = vmk_flags.vmkf_keep_map_ilocked;
-@@ -3456,6 +3907,18 @@ fail_enter_mte_memory_request:
+@@ -3456,6 +3912,18 @@ fail_enter_mte_memory_request:
  proceed_with_enter_mte_memory_request:
  #endif /* HAS_MTE */
  
@@ -8785,14 +9257,14 @@ index fd9e108..ba91b41 100644
 +	    !superpage_size && size != 0;
 +
 +	if (el0_keep_new_locked && !anywhere && object != VM_OBJECT_NULL &&
-+	    !el0_object_range_supported(object, offset, size, vmsr_start(rsv))) {
++	    !el0_object_range_supported(object, offset, size, vmsr_start(rsv), false)) {
 +		RETURN(KERN_NOT_SUPPORTED);
 +	}
 +
  	if (anywhere) {
  		result = vm_map_locate_space_anywhere(map, vmsr_start(rsv),
  		    size, mask, vmk_flags, &rsv);
-@@ -3584,7 +4047,7 @@ proceed_with_enter_mte_memory_request:
+@@ -3584,7 +4052,7 @@ proceed_with_enter_mte_memory_request:
  		}
  	} else if (VM_MAP_PAGE_SHIFT(map) < PAGE_SHIFT) {
  		/* no coalescing if address space uses sub-pages */
@@ -8801,7 +9273,7 @@ index fd9e108..ba91b41 100644
  		/* no coalescing if caller wants the entries returned still locked. */
  	} else if ((is_submap == FALSE) &&
  	    (object == VM_OBJECT_NULL) &&
-@@ -3683,7 +4146,8 @@ proceed_with_enter_mte_memory_request:
+@@ -3683,7 +4151,8 @@ proceed_with_enter_mte_memory_request:
  		    object == VM_OBJECT_NULL &&
  		    size > chunk_size &&
  		    max_protection != VM_PROT_NONE &&
@@ -8811,7 +9283,7 @@ index fd9e108..ba91b41 100644
  			tmp_end = tmp_start + chunk_size;
  		} else {
  			tmp_end = tmp2_end;
-@@ -3834,6 +4298,9 @@ proceed_with_enter_mte_memory_request:
+@@ -3834,6 +4303,9 @@ proceed_with_enter_mte_memory_request:
  #endif /* NO_NESTED_PMAP */
  			}
  			entry = new_entry;
@@ -8821,7 +9293,7 @@ index fd9e108..ba91b41 100644
  
  			if (superpage_size) {
  				vm_page_t pages, m;
-@@ -3880,7 +4347,7 @@ proceed_with_enter_mte_memory_request:
+@@ -3880,7 +4352,7 @@ proceed_with_enter_mte_memory_request:
  			 * Unlock the new entry we created locked at
  			 * vm_map_entry_create_locked_and_insert.
  			 */
@@ -8830,7 +9302,7 @@ index fd9e108..ba91b41 100644
  				vm_entry_unlock_exclusive(map, entry);
  			}
  		} while (tmp_end != tmp2_end &&
-@@ -4056,13 +4523,100 @@ BailOut:
+@@ -4056,13 +4528,100 @@ BailOut:
  			kr = vm_map_wire_kernel(map, vmsr_start(rsv), end,
  			    cur_protection, VM_KERN_MEMORY_MLOCK, TRUE);
  			result = kr;
@@ -8932,7 +9404,7 @@ index fd9e108..ba91b41 100644
  			vm_map_entry_t sentinel = VM_MAP_ENTRY_NULL;
  
  			/*
-@@ -4108,10 +4662,12 @@ BailOut:
+@@ -4108,10 +4667,12 @@ BailOut:
  			 * the mapping above and now, so our delete should
  			 * always succeed.
  			 */
@@ -8947,7 +9419,7 @@ index fd9e108..ba91b41 100644
  #else /* __x86_64__ || __BUILDING_XNU_LIB_UNITTEST__*/
  			/*
  			 * on x86, we may drop the ilk for superpages so we can't
-@@ -4128,6 +4684,7 @@ BailOut:
+@@ -4128,6 +4689,7 @@ BailOut:
  				vm_map_store_remove(map, sentinel,
  				    VMS_REMOVE_FREE_ENTRY);
  			}
@@ -8955,7 +9427,7 @@ index fd9e108..ba91b41 100644
  		}
  
  		/*
-@@ -4159,12 +4716,16 @@ BailOut:
+@@ -4159,12 +4721,16 @@ BailOut:
  				 * Transfer the saved map entries from
  				 * "zap_old_map" to the original "map".
  				 */
@@ -8977,7 +9449,7 @@ index fd9e108..ba91b41 100644
  			} else {
  				/*
  				 * Part of that range has already been
-@@ -4182,6 +4743,11 @@ BailOut:
+@@ -4182,6 +4748,11 @@ BailOut:
  	 * keep the interlocked held, unless we failed to enter its mapping, in
  	 * which case we should consistently release the interlock before we return.
  	 */
@@ -8989,7 +9461,7 @@ index fd9e108..ba91b41 100644
  	if (map_ilocked && (!keep_map_ilocked || result != KERN_SUCCESS)) {
  		vm_map_ilk_unlock(map);
  	}
-@@ -4249,85 +4815,474 @@ vm_map_enter_adjust_offset(
+@@ -4249,82 +4820,472 @@ vm_map_enter_adjust_offset(
  	return KERN_SUCCESS;
  }
  
@@ -9029,6 +9501,7 @@ index fd9e108..ba91b41 100644
 +	bool                    is_submap;
 +	bool                    needs_copy;
 +	bool                    iokit_acct;
++	bool                    wimg_will_override;
 +	bool                    prewired;
 +	bool                    populated;
 +	vm_map_entry_t          new_entry;
@@ -9114,9 +9587,6 @@ index fd9e108..ba91b41 100644
 -		    PAGE_MASK,
 -		    VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS |
 -		    VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES,
--		    obj_offs, obj_end, obj_size);
--		if (__improbable(result != KERN_SUCCESS)) {
--			return result;
 +	/*
 +	 * Phase 1: Validate PA support and pre-wire object pages BEFORE touching
 +	 * any existing mappings in [base_addr, total_end).
@@ -9128,7 +9598,7 @@ index fd9e108..ba91b41 100644
 +			continue;
 +		}
 +		if (!el0_object_range_supported(segs[i].object, segs[i].offset,
-+		    segs[i].size, segs[i].va)) {
++		    segs[i].size, segs[i].va, segs[i].wimg_will_override)) {
 +			kr = KERN_NOT_SUPPORTED;
 +			goto fail_phase1;
 +		}
@@ -9528,13 +9998,10 @@ index fd9e108..ba91b41 100644
 +		    PAGE_MASK,
 +		    VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS |
 +		    VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES,
-+		    obj_offs, obj_end, obj_size);
-+		if (__improbable(result != KERN_SUCCESS)) {
-+			return result;
- 		}
- 	} else {
- 		*obj_offs = 0;
-@@ -4673,6 +5628,177 @@ vm_map_enter_mem_object(
+ 		    obj_offs, obj_end, obj_size);
+ 		if (__improbable(result != KERN_SUCCESS)) {
+ 			return result;
+@@ -4673,6 +5634,177 @@ vm_map_enter_mem_object(
  			    VM_FLAGS_RETURN_4K_DATA_ADDR |
  			    VM_FLAGS_RETURN_DATA_ADDR));
  
@@ -9712,7 +10179,7 @@ index fd9e108..ba91b41 100644
  			/* reserve a contiguous range */
  			kr = vm_map_enter(target_map,
  			    &map_addr,
-@@ -5797,6 +6923,18 @@ vm_map_protect_preflight(
+@@ -5797,6 +6929,47 @@ vm_map_protect_preflight(
   *	specified, the maximum protection is to be set;
   *	otherwise, only the current protection is affected.
   */
@@ -9721,21 +10188,50 @@ index fd9e108..ba91b41 100644
 +struct el0_protect_entry_rec {
 +	vm_map_t cur_map;
 +	vm_map_entry_t entry;
++	vm_map_offset_t entry_start;
++	vm_map_offset_t entry_end;
++	vm_object_t object;
++	vm_object_offset_t offset;
 +	vm_prot_t old_prot;
 +	vm_prot_t old_max_prot;
++	vm_prot_t new_prot;
++	vm_prot_t new_max_prot;
 +	unsigned int pmap_options;
++	bool is_sub_map;
++	bool had_needs_copy;
 +	bool need_unwire;
 +	bool need_remove;
++	bool need_inlock_populate;
++	bool need_ext_populate;
++	bool matched;
 +};
++
++struct el0_protect_filter_ctx {
++	const struct el0_protect_entry_rec *entries;
++	uint32_t count;
++};
++
++static bool
++el0_va_in_matched_entry(vm_map_address_t va, void *ctx)
++{
++	const struct el0_protect_filter_ctx *fctx = (const struct el0_protect_filter_ctx *)ctx;
++	for (uint32_t i = 0; i < fctx->count; i++) {
++		const struct el0_protect_entry_rec *rec = &fctx->entries[i];
++		if (rec->matched && va >= rec->entry_start && va < rec->entry_end) {
++			return true;
++		}
++	}
++	return false;
++}
 +
  kern_return_t
  vm_map_protect(
  	vm_map_t                original_map,
-@@ -5950,6 +7088,16 @@ vm_map_protect(
+@@ -5950,6 +7123,16 @@ vm_map_protect(
  	/*
  	 *	Preflight passed, fix up the protections
  	 */
-+	bool el0_kmap_populate = false;
++	bool el0_has_ext_populate = false;
 +	kern_return_t protect_kr = KERN_SUCCESS;
 +	struct pmap_el0_protect_undo el0_undo_ptes;
 +	struct el0_protect_entry_rec el0_entries_inline[8];
@@ -9748,7 +10244,7 @@ index fd9e108..ba91b41 100644
  	while ((entry = vm_map_range_atomic_next(ctx))) {
  		/*
  		 * No constant submap descent. Transparent submaps are okay.
-@@ -5985,6 +7133,7 @@ vm_map_protect(
+@@ -5985,6 +7168,7 @@ vm_map_protect(
  		}
  
  		old_prot = entry->protection;
@@ -9756,23 +10252,28 @@ index fd9e108..ba91b41 100644
  
  		if (set_max) {
  			entry->max_protection = new_prot;
-@@ -6041,15 +7190,72 @@ vm_map_protect(
+@@ -6041,15 +7225,88 @@ vm_map_protect(
  		 *	write-protect fault occurred, it will be fixed up
  		 *	properly, COW or not.
  		 */
-+		if (linux64_el0 && cur_map->pmap == kernel_pmap && !entry->is_sub_map &&
++		bool el0_kmap_entry = (linux64_el0 && cur_map->pmap == kernel_pmap);
++		bool entry_need_inlock_populate = false;
++		bool entry_need_ext_populate = false;
++		if (el0_kmap_entry && !entry->is_sub_map &&
 +		    (entry->protection & (VM_PROT_READ | VM_PROT_WRITE))) {
 +			if (!entry->vme_el0_autowire ||
-+			    !(old_prot & (VM_PROT_READ | VM_PROT_WRITE)) ||
-+			    ((entry->protection & VM_PROT_WRITE) && entry->needs_copy) ||
++			    ((entry->protection & VM_PROT_WRITE) && entry->needs_copy)) {
++				entry_need_ext_populate = true;
++			} else if (!(old_prot & (VM_PROT_READ | VM_PROT_WRITE)) ||
 +			    el0_entry_missing_pte(cur_map, entry)) {
-+				el0_kmap_populate = true;
++				entry_need_inlock_populate = true;
 +			}
 +		}
 +
-+		bool el0_kmap_entry = (linux64_el0 && cur_map->pmap == kernel_pmap);
 +		struct el0_protect_entry_rec *el0_rec = NULL;
-+		if (el0_kmap_entry && (entry->protection != old_prot || entry->max_protection != old_max_prot)) {
++		if (el0_kmap_entry &&
++		    (entry->protection != old_prot || entry->max_protection != old_max_prot ||
++		    entry_need_inlock_populate || entry_need_ext_populate)) {
 +			if (el0_entry_count == el0_entry_cap) {
 +				if (startup_phase < STARTUP_SUB_ZALLOC || el0_entry_cap > (UINT32_MAX / 2)) {
 +					entry->protection = old_prot;
@@ -9799,11 +10300,22 @@ index fd9e108..ba91b41 100644
 +			*el0_rec = (struct el0_protect_entry_rec){
 +				.cur_map = cur_map,
 +				.entry = entry,
++				.entry_start = entry->vme_start,
++				.entry_end = entry->vme_end,
++				.object = entry->is_sub_map ? VM_OBJECT_NULL : VME_OBJECT(entry),
++				.offset = entry->is_sub_map ? 0 : VME_OFFSET(entry),
 +				.old_prot = old_prot,
 +				.old_max_prot = old_max_prot,
++				.new_prot = entry->protection,
++				.new_max_prot = entry->max_protection,
 +				.pmap_options = pmap_options,
++				.is_sub_map = entry->is_sub_map,
++				.had_needs_copy = entry->needs_copy,
 +				.need_unwire = false,
 +				.need_remove = false,
++				.need_inlock_populate = entry_need_inlock_populate,
++				.need_ext_populate = entry_need_ext_populate,
++				.matched = false,
 +			};
 +		}
 +
@@ -9830,7 +10342,7 @@ index fd9e108..ba91b41 100644
  				prot &= ~VM_PROT_WRITE;
  			} else {
  				assert(!VME_OBJECT(entry)->code_signed);
-@@ -6063,7 +7269,7 @@ vm_map_protect(
+@@ -6063,7 +7320,7 @@ vm_map_protect(
  					 * attempt to access the mapping
  					 * next.
  					 */
@@ -9839,29 +10351,17 @@ index fd9e108..ba91b41 100644
  				}
  			}
  
-@@ -6102,27 +7308,121 @@ vm_map_protect(
+@@ -6102,29 +7359,255 @@ vm_map_protect(
  				prot = VM_PROT_NONE;
  			}
  
 -			if (entry->is_sub_map && entry->use_pmap) {
 -				pmap_protect(VME_SUBMAP(entry)->pmap,
 +			if (el0_kmap_entry && el0_rec != NULL) {
-+				bool el0_need_remove = false;
-+				if (entry_pmap_options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
-+					el0_need_remove = ((prot & VM_PROT_ALL) == VM_PROT_NONE);
-+				} else {
-+					switch (prot) {
-+					case VM_PROT_READ:
-+					case VM_PROT_READ | VM_PROT_EXECUTE:
-+					case VM_PROT_READ | VM_PROT_WRITE:
-+					case VM_PROT_ALL:
-+						el0_need_remove = false;
-+						break;
-+					default:
-+						el0_need_remove = true;
-+						break;
-+					}
-+				}
++				bool el0_need_remove = pmap_protect_should_remove(
++				    (entry->is_sub_map && entry->use_pmap) ? VME_SUBMAP(entry)->pmap : cur_map->pmap,
++				    prot,
++				    (entry->is_sub_map && entry->use_pmap) ? 0 : entry_pmap_options);
 +				el0_rec->pmap_options = entry_pmap_options;
 +				el0_rec->need_unwire = el0_need_unwire;
 +				el0_rec->need_remove = el0_need_remove;
@@ -9917,6 +10417,75 @@ index fd9e108..ba91b41 100644
  	}
  
 -	vm_map_range_ex_unlock(ctx, &original_map);
+-
+-	vmlp_api_end(VM_MAP_PROTECT, KERN_SUCCESS);
+-	return KERN_SUCCESS;
+-}
+-
+-static __attribute__((always_inline, warn_unused_result))
++	if (protect_kr == KERN_SUCCESS) {
++		/*
++		 * Branch A: in-lock populate for autowired non-COW entries
++		 * while still holding ctx so any failure rolls back atomically.
++		 */
++		for (uint32_t i = 0; i < el0_entry_count; i++) {
++			struct el0_protect_entry_rec *rec = &el0_entries[i];
++			if (!rec->need_inlock_populate) {
++				continue;
++			}
++			vm_map_size_t eff_pgsz = MIN(VM_MAP_PAGE_SIZE(rec->cur_map), PAGE_SIZE);
++			for (vm_map_offset_t va = rec->entry_start; va < rec->entry_end; va += eff_pgsz) {
++				uint64_t pte = 0;
++				pmap_paddr_t pa = 0;
++				bool pa_ok = false;
++				if (!pmap_el0_read_pte_snapshot(rec->cur_map->pmap, va, &pte, &pa, &pa_ok)) {
++					if (!pmap_el0_protect_undo_record_hole(&el0_undo_ptes, va)) {
++						protect_kr = KERN_RESOURCE_SHORTAGE;
++						break;
++					}
++				}
++			}
++			if (protect_kr != KERN_SUCCESS) {
++				break;
++			}
++			kern_return_t pop_kr = vm_fault_el0_populate_wired_entry(
++			    rec->cur_map,
++			    rec->entry,
++			    rec->new_prot & (VM_PROT_READ | VM_PROT_WRITE),
++			    VM_KERN_MEMORY_OSFMK,
++			    ctx);
++			if (pop_kr != KERN_SUCCESS) {
++				protect_kr = pop_kr;
++				break;
++			}
++		}
++	}
++
++	if (protect_kr == KERN_SUCCESS) {
++		for (uint32_t i = 0; i < el0_entry_count; i++) {
++			struct el0_protect_entry_rec *rec = &el0_entries[i];
++			if (!rec->need_ext_populate) {
++				continue;
++			}
++			el0_has_ext_populate = true;
++			vm_map_size_t eff_pgsz = MIN(VM_MAP_PAGE_SIZE(rec->cur_map), PAGE_SIZE);
++			for (vm_map_offset_t va = rec->entry_start; va < rec->entry_end; va += eff_pgsz) {
++				uint64_t pte = 0;
++				pmap_paddr_t pa = 0;
++				bool pa_ok = false;
++				if (!pmap_el0_read_pte_snapshot(rec->cur_map->pmap, va, &pte, &pa, &pa_ok)) {
++					if (!pmap_el0_protect_undo_record_hole(&el0_undo_ptes, va)) {
++						protect_kr = KERN_RESOURCE_SHORTAGE;
++						break;
++					}
++				}
++			}
++			if (protect_kr != KERN_SUCCESS) {
++				break;
++			}
++		}
++	}
++
 +	if (protect_kr != KERN_SUCCESS) {
 +		for (uint32_t i = el0_entry_count; i > 0; i--) {
 +			struct el0_protect_entry_rec *rec = &el0_entries[i - 1];
@@ -9924,53 +10493,133 @@ index fd9e108..ba91b41 100644
 +			rec->entry->max_protection = rec->old_max_prot;
 +		}
 +		pmap_el0_protect_undo_rollback(kernel_pmap, &el0_undo_ptes);
-+	} else {
-+		for (uint32_t i = 0; i < el0_entry_count; i++) {
-+			struct el0_protect_entry_rec *rec = &el0_entries[i];
-+			if (rec->need_unwire) {
-+				rec->entry->vme_el0_autowire = 0;
-+				if (vm_map_wire_count_sub(rec->cur_map, rec->entry, FALSE)) {
-+					rec->entry->zero_wired_pages = FALSE;
-+					vm_fault_unwire(rec->cur_map, rec->entry, false, rec->cur_map->pmap,
-+					    rec->entry->vme_start, rec->entry->vme_end);
-+				}
-+			}
-+			if (rec->need_remove) {
-+				pmap_remove_options(rec->cur_map->pmap, rec->entry->vme_start, rec->entry->vme_end, rec->pmap_options);
-+			}
++		pmap_el0_protect_undo_destroy(&el0_undo_ptes);
++		if (el0_entries != el0_entries_inline) {
++			kfree_type(struct el0_protect_entry_rec, el0_entry_cap, el0_entries);
 +		}
-+	}
- 
--	vmlp_api_end(VM_MAP_PROTECT, KERN_SUCCESS);
--	return KERN_SUCCESS;
--}
-+	pmap_el0_protect_undo_destroy(&el0_undo_ptes);
-+	if (el0_entries != el0_entries_inline) {
-+		kfree_type(struct el0_protect_entry_rec, el0_entry_cap, el0_entries);
-+	}
-+
-+	vm_map_range_ex_unlock(ctx, &original_map);
-+
-+	if (protect_kr != KERN_SUCCESS) {
++		vm_map_range_ex_unlock(ctx, &original_map);
 +		vmlp_api_end(VM_MAP_PROTECT, protect_kr);
 +		return protect_kr;
 +	}
 +
-+	if (el0_kmap_populate) {
++	for (uint32_t i = 0; i < el0_entry_count; i++) {
++		struct el0_protect_entry_rec *rec = &el0_entries[i];
++		if (rec->need_unwire) {
++			rec->entry->vme_el0_autowire = 0;
++			if (vm_map_wire_count_sub(rec->cur_map, rec->entry, FALSE)) {
++				rec->entry->zero_wired_pages = FALSE;
++				vm_fault_unwire(rec->cur_map, rec->entry, false, rec->cur_map->pmap,
++				    rec->entry->vme_start, rec->entry->vme_end);
++			}
++		}
++		if (rec->need_remove) {
++			pmap_remove_options(rec->cur_map->pmap, rec->entry->vme_start, rec->entry->vme_end, rec->pmap_options);
++		}
++	}
++
++	if (el0_has_ext_populate) {
++		for (uint32_t i = 0; i < el0_entry_count; i++) {
++			struct el0_protect_entry_rec *rec = &el0_entries[i];
++			if (!rec->is_sub_map && rec->object != VM_OBJECT_NULL) {
++				vm_object_reference(rec->object);
++			}
++		}
++	}
++
++	vm_map_range_ex_unlock(ctx, &original_map);
++
++	if (el0_has_ext_populate) {
 +		kr = linux64_el0_prefault_kernel_map(original_map, start, end - start, new_prot);
++		if (kr != KERN_SUCCESS) {
++			VM_MAP_LOCK_CTX_DECLARE(rollback_ctx);
++			vm_map_t rb_map = original_map;
++			kern_return_t rb_kr = vm_map_range_ex_lock(rollback_ctx, &rb_map, start, end,
++			    VMRL_EX_ATOMIC_ALLOW_HOLES | VMRL_EX_NO_MIN_MAX_CHECK);
++			if (rb_kr == KERN_SUCCESS) {
++				vm_map_entry_t rb_entry;
++				while ((rb_entry = vm_map_range_atomic_next(rollback_ctx))) {
++					vm_map_t rb_cur_map = vm_map_lock_ctx_get_map(rollback_ctx);
++					for (uint32_t i = 0; i < el0_entry_count; i++) {
++						struct el0_protect_entry_rec *rec = &el0_entries[i];
++						if (rec->matched || rec->cur_map != rb_cur_map) {
++							continue;
++						}
++						if (rb_entry->vme_start != rec->entry_start ||
++						    rb_entry->vme_end != rec->entry_end ||
++						    rb_entry->is_sub_map != rec->is_sub_map ||
++						    rb_entry->protection != rec->new_prot ||
++						    rb_entry->max_protection != rec->new_max_prot) {
++							continue;
++						}
++						bool obj_match = false;
++						if (rec->is_sub_map) {
++							obj_match = true;
++						} else {
++							vm_object_t rb_obj = VME_OBJECT(rb_entry);
++							if (rb_obj == rec->object && VME_OFFSET(rb_entry) == rec->offset) {
++								obj_match = true;
++							} else if (rec->had_needs_copy && rec->object != VM_OBJECT_NULL &&
++							    rb_obj != VM_OBJECT_NULL) {
++								vm_object_lock_shared(rb_obj);
++								if (rb_obj->shadow == rec->object &&
++								    rb_obj->vo_shadow_offset == rec->offset &&
++								    VME_OFFSET(rb_entry) == 0) {
++									obj_match = true;
++								}
++								vm_object_unlock(rb_obj);
++							} else if (rec->object == VM_OBJECT_NULL && rb_obj != VM_OBJECT_NULL &&
++							    rb_obj->internal && VME_OFFSET(rb_entry) == 0 &&
++							    !rb_entry->vme_el0_autowire) {
++								obj_match = true;
++							}
++						}
++						if (obj_match) {
++							rb_entry->protection = rec->old_prot;
++							rb_entry->max_protection = rec->old_max_prot;
++							rec->matched = true;
++							break;
++						}
++					}
++				}
++				struct el0_protect_filter_ctx fctx = {
++					.entries = el0_entries,
++					.count = el0_entry_count,
++				};
++				pmap_el0_protect_undo_rollback_filtered(kernel_pmap, &el0_undo_ptes,
++				    el0_va_in_matched_entry, &fctx);
++				vm_map_range_ex_unlock(rollback_ctx, &rb_map);
++			}
++		}
++		for (uint32_t i = 0; i < el0_entry_count; i++) {
++			struct el0_protect_entry_rec *rec = &el0_entries[i];
++			if (!rec->is_sub_map && rec->object != VM_OBJECT_NULL) {
++				vm_object_deallocate(rec->object);
++			}
++		}
++		pmap_el0_protect_undo_destroy(&el0_undo_ptes);
++		if (el0_entries != el0_entries_inline) {
++			kfree_type(struct el0_protect_entry_rec, el0_entry_cap, el0_entries);
++		}
 +		if (kr != KERN_SUCCESS) {
 +			vmlp_api_end(VM_MAP_PROTECT, kr);
 +			return kr;
++		}
++	} else {
++		pmap_el0_protect_undo_destroy(&el0_undo_ptes);
++		if (el0_entries != el0_entries_inline) {
++			kfree_type(struct el0_protect_entry_rec, el0_entry_cap, el0_entries);
 +		}
 +	}
 +
 +	vmlp_api_end(VM_MAP_PROTECT, KERN_SUCCESS);
 +	return KERN_SUCCESS;
 +}
- 
- static __attribute__((always_inline, warn_unused_result))
++
++static __attribute__((always_inline, warn_unused_result))
  kern_return_t
-@@ -6457,11 +7757,11 @@ vm_map_wire_count_sub(vm_map_t map, vm_map_entry_t entry, bool user_wire)
+ vm_map_inherit_sanitize(
+ 	vm_map_t                        map,
+@@ -6457,11 +7940,11 @@ vm_map_wire_count_sub(vm_map_t map, vm_map_entry_t entry, bool user_wire)
  
  	entry->wired_count--;
  	vme_btref_consider_and_put(entry);
@@ -9984,7 +10633,7 @@ index fd9e108..ba91b41 100644
  		 *
  		 * Also wakeup if the wire count is less than one.
  		 */
-@@ -6753,9 +8053,12 @@ vm_map_wire_stabilize_entry_object(vm_map_t map, vm_map_entry_t entry)
+@@ -6753,9 +8236,12 @@ vm_map_wire_stabilize_entry_object(vm_map_t map, vm_map_entry_t entry)
   * NOT_WIRED: nothing about the entry is wired.
   */
  __enum_decl(vm_wire_state_t, unsigned char, {
@@ -10000,7 +10649,7 @@ index fd9e108..ba91b41 100644
  });
  
  /*
-@@ -6773,6 +8076,7 @@ typedef struct wire_copy_node {
+@@ -6773,6 +8259,7 @@ typedef struct wire_copy_node {
  	vm_wire_state_t                 wire_state;
  	bool                            is_sub_map;
  	vm_object_t                     object;
@@ -10008,7 +10657,7 @@ index fd9e108..ba91b41 100644
  } *wire_copy_list_t;
  
  
-@@ -6970,11 +8274,57 @@ vm_map_wire_sanitize(
+@@ -6970,11 +8457,57 @@ vm_map_wire_sanitize(
   * return KERN_SUCCESS if the preflight was successful
   * otherwise, the preflight of space failed and we cannot wire the entry.
   */
@@ -10066,7 +10715,7 @@ index fd9e108..ba91b41 100644
  	struct wire_copy_list_head     *copy_list,
  	vm_map_size_t                  * const size_that_would_be_wired)
  {
-@@ -6988,7 +8338,30 @@ vm_map_wire_copy_entry_and_preflight_space(
+@@ -6988,7 +8521,30 @@ vm_map_wire_copy_entry_and_preflight_space(
  	 * Also increment the wire count.
  	 */
  	bool entry_already_wired = entry->wired_count != 0;
@@ -10098,7 +10747,7 @@ index fd9e108..ba91b41 100644
  		kr = vm_map_wire_count_add(map, entry, user_wire);
  		if (kr != KERN_SUCCESS) {
  			kfree_type(struct wire_copy_node, wire_copy);
-@@ -7008,12 +8381,13 @@ vm_map_wire_copy_entry_and_preflight_space(
+@@ -7008,12 +8564,13 @@ vm_map_wire_copy_entry_and_preflight_space(
  	wire_copy->end = entry->vme_end;
  	wire_copy->offset = VME_OFFSET(entry);
  	wire_copy->is_sub_map = entry->is_sub_map;
@@ -10113,7 +10762,7 @@ index fd9e108..ba91b41 100644
  		wire_copy->object = VM_OBJECT_NULL;
  	} else {
  		wire_copy->object = VME_OBJECT(entry);
-@@ -7055,8 +8429,8 @@ int wire_restarts_due_to_kernel_wiring;
+@@ -7055,8 +8612,8 @@ int wire_restarts_due_to_kernel_wiring;
   * @param prot_u - the protections the entry must have. A mapping with all
   * the protections of the corresponding entry will still be entered into the pmap.
   */
@@ -10124,7 +10773,7 @@ index fd9e108..ba91b41 100644
  	vm_map_t                original_map,
  	vm_map_offset_ut        start_u,
  	vm_map_offset_ut        end_u,
-@@ -7064,7 +8438,8 @@ vm_map_wire_impl(
+@@ -7064,7 +8621,8 @@ vm_map_wire_impl(
  	vm_tag_t                tag,
  	boolean_t               user_wire,
  	ppnum_t                *physpage_p,
@@ -10134,7 +10783,7 @@ index fd9e108..ba91b41 100644
  {
  	/*
  	 * original_map is the map passed in by the caller.
-@@ -7134,7 +8509,7 @@ restart:
+@@ -7134,7 +8692,7 @@ restart:
  		};
  	} else {
  		ctx->vmlc_preflight = ^kern_return_t (vm_map_lock_ctx_t vctx, vm_map_entry_t vme) {
@@ -10143,7 +10792,7 @@ index fd9e108..ba91b41 100644
  		};
  	}
  
-@@ -7190,7 +8565,8 @@ restart:
+@@ -7190,7 +8748,8 @@ restart:
  		 * NOT_WIRED if the entry wasn't previously wired.
  		 */
  		kr = vm_map_wire_copy_entry_and_preflight_space(cur_map,
@@ -10153,7 +10802,7 @@ index fd9e108..ba91b41 100644
  		if (kr != KERN_SUCCESS) {
  			vm_map_range_ex_unlock(ctx, &original_map);
  
-@@ -7206,8 +8582,11 @@ restart:
+@@ -7206,8 +8765,11 @@ restart:
  	 * To do this, wire all the pages in our copies.
  	 */
  	TAILQ_FOREACH(cur_copy, &copy_list, chain) {
@@ -10167,7 +10816,7 @@ index fd9e108..ba91b41 100644
  			continue;
  		}
  
-@@ -7261,223 +8640,897 @@ restart:
+@@ -7261,223 +8823,903 @@ restart:
  
  		assert(cur_copy->wire_state != NOT_WIRED);
  
@@ -10839,9 +11488,13 @@ index fd9e108..ba91b41 100644
 +			named_entry_unlock(named_entry);
 +
 +			uint8_t target_wimg = obj->wimg_bits;
-+			vm_prot_to_wimg(effective_access, &target_wimg);
-+			if (!pmap_el0_wimg_supported(target_wimg) ||
-+			    (obj->nophyscache && !pmap_el0_wimg_supported(obj->wimg_bits))) {
++			if (req_access != MAP_MEM_NOOP) {
++				vm_prot_to_wimg(req_access, &target_wimg);
++			}
++			uint8_t effective_wimg = (req_access != MAP_MEM_NOOP && !obj->nophyscache) ?
++			    target_wimg : obj->wimg_bits;
++			if (!pmap_el0_wimg_supported(effective_wimg) ||
++			    (req_access != MAP_MEM_NOOP && !pmap_el0_wimg_supported(target_wimg))) {
 +				vm_object_unlock(obj);
 +				kr = KERN_NOT_SUPPORTED;
 +				break;
@@ -10855,6 +11508,7 @@ index fd9e108..ba91b41 100644
 +				}
 +#endif
 +			}
++			bool seg_wimg_override = (req_access != MAP_MEM_NOOP && !obj->nophyscache);
 +			vm_object_reference_locked(obj);
 +			vm_object_unlock(obj);
 +
@@ -10874,6 +11528,7 @@ index fd9e108..ba91b41 100644
 +			segs[n_segs].is_submap = false;
 +			segs[n_segs].needs_copy = false;
 +			segs[n_segs].iokit_acct = iokit_acct;
++			segs[n_segs].wimg_will_override = seg_wimg_override;
 +			n_segs++;
 +			chunks[c].data_addr_out = cur_va + oim;
 +			if (chunks[c].check_data_addr &&
@@ -11259,7 +11914,7 @@ index fd9e108..ba91b41 100644
  static __attribute__((always_inline, warn_unused_result))
  kern_return_t
  vm_map_unwire_sanitize(
-@@ -8344,10 +10397,14 @@ vm_map_delete_preflight(
+@@ -8344,10 +10586,14 @@ vm_map_delete_preflight(
  
  		if (vmrl_is_kernel_pmap(ctx)) {
  			assert(entry->user_wired_count == 0);
@@ -11275,7 +11930,7 @@ index fd9e108..ba91b41 100644
  				wired_count -= 1;
  			}
  		} else {
-@@ -8369,8 +10426,29 @@ vm_map_delete_preflight(
+@@ -8369,8 +10615,29 @@ vm_map_delete_preflight(
  }
  
  static void
@@ -11307,7 +11962,7 @@ index fd9e108..ba91b41 100644
  	if (entry->user_wired_count) {
  		/*
  		 * Collapse the wire count to 1, which will cause
-@@ -8379,7 +10457,12 @@ vm_map_delete_handle_wired(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags
+@@ -8379,7 +10646,12 @@ vm_map_delete_handle_wired(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags
  		entry->user_wired_count = 1;
  	}
  
@@ -11321,7 +11976,7 @@ index fd9e108..ba91b41 100644
  		vm_map_wire_count_sub(map, entry, entry->user_wired_count != 0);
  	}
  
-@@ -8518,7 +10601,8 @@ vm_map_delete_handle_entry(
+@@ -8518,7 +10790,8 @@ vm_map_delete_handle_entry(
  	vm_map_t                map,
  	vm_map_entry_t          entry,
  	vm_map_entry_t          sentinel,
@@ -11331,7 +11986,7 @@ index fd9e108..ba91b41 100644
  {
  	vm_map_offset_t e_start = entry->vme_start;
  	vm_map_offset_t e_end   = entry->vme_end;
-@@ -8529,7 +10613,7 @@ vm_map_delete_handle_entry(
+@@ -8529,7 +10802,7 @@ vm_map_delete_handle_entry(
  	 */
  
  	if (entry->wired_count) {
@@ -11340,7 +11995,7 @@ index fd9e108..ba91b41 100644
  	}
  
  	/*
-@@ -8799,12 +10883,61 @@ vm_map_delete_and_iunlock_internal(
+@@ -8799,12 +11072,61 @@ vm_map_delete_and_iunlock_internal(
  		kr = KERN_SUCCESS;
  	}
  	if (kr == KERN_SUCCESS) {
@@ -11402,7 +12057,7 @@ index fd9e108..ba91b41 100644
  		while ((entry = vm_map_range_ex_pop_with_error(ctx, &kr))) {
  			if (vm_map_lock_ctx_is_descended(ctx)) {
  				/*
-@@ -8814,7 +10947,12 @@ vm_map_delete_and_iunlock_internal(
+@@ -8814,7 +11136,12 @@ vm_map_delete_and_iunlock_internal(
  				 */
  				panic("Attempt to delete through transparent submap.");
  			}
@@ -11416,7 +12071,7 @@ index fd9e108..ba91b41 100644
  				if (ctx->vmlc_map != orig_map) {
  					/*
  					 * wait_for_space wakeup below does not
-@@ -9002,7 +11140,7 @@ vm_map_remove_entry(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags)
+@@ -9002,7 +11329,7 @@ vm_map_remove_entry(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags)
  	VM_ENTRY_ASSERT_EXCL_OWNER(entry);
  	assert(!entry->vme_permanent);
  
@@ -11425,7 +12080,7 @@ index fd9e108..ba91b41 100644
  }
  
  kern_return_t
-@@ -10547,6 +12685,14 @@ vm_map_copyout_kernel_buffer(
+@@ -10547,6 +12874,14 @@ vm_map_copyout_kernel_buffer(
  		if (kr != KERN_SUCCESS) {
  			return kr;
  		}
@@ -11440,7 +12095,7 @@ index fd9e108..ba91b41 100644
  #if KASAN
  		if (map->pmap == kernel_pmap) {
  			kasan_notify_address(*addr, copy->size);
-@@ -10904,7 +13050,8 @@ vm_map_copyout_internal(
+@@ -10904,7 +13239,8 @@ vm_map_copyout_internal(
  	}
  
  	adjustment = vmsr_start(rsv) - vm_copy_start;
@@ -11450,7 +12105,7 @@ index fd9e108..ba91b41 100644
  		/*
  		 * We're not allowed to consume "copy", so we'll have to
  		 * copy its map entries into the destination map below.
-@@ -11071,7 +13218,7 @@ after_adjustments:
+@@ -11071,7 +13407,7 @@ after_adjustments:
  	 *	Link in the copy
  	 */
  
@@ -11459,7 +12114,7 @@ index fd9e108..ba91b41 100644
  		vm_map_copy_insert(dst_map, copy, rsv, vmk_flags);
  		if (copy != original_copy) {
  			/* the copy discarded in vm_map_copy_insert() might have been one which
-@@ -11081,8 +13228,11 @@ after_adjustments:
+@@ -11081,8 +13417,11 @@ after_adjustments:
  		}
  	} else {
  		vm_map_copy_remap(dst_map, copy, rsv, vmk_flags,
@@ -11473,7 +12128,7 @@ index fd9e108..ba91b41 100644
  			/* if vm_map_copy_adjust_to_target() created a local copy, free it now */
  			vm_map_copy_discard(copy);
  			copy = original_copy;
-@@ -11091,6 +13241,26 @@ after_adjustments:
+@@ -11091,6 +13430,26 @@ after_adjustments:
  
  
  	vm_map_ilk_unlock(dst_map);
@@ -11500,7 +12155,7 @@ index fd9e108..ba91b41 100644
  	vmlp_api_end(VM_MAP_COPYOUT_INTERNAL, KERN_SUCCESS);
  
  	return KERN_SUCCESS;
-@@ -17283,6 +19453,11 @@ vm_map_remap(
+@@ -17283,6 +19642,11 @@ vm_map_remap(
  		max_protection = VM_PROT_READ;
  	}
  

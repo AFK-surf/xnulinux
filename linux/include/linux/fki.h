@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */
 /*
- * Foreign kernel interface (FKI), version 1.
+ * Foreign kernel interface (FKI), version 2.
  *
  * The only interface between Linux and a foreign-kernel module. It is
  * semantic and shaped like a hypervisor interface: plain integer types and
@@ -10,7 +10,7 @@
 #ifndef _LINUX_FKI_H
 #define _LINUX_FKI_H
 
-#define FKI_VERSION 1
+#define FKI_VERSION 2
 
 #ifndef __KERNEL__
 #include <stdint.h>
