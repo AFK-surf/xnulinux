@@ -110,6 +110,9 @@ void fki_kmem_free(struct fki_region *r);
 int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot);
 void fki_high_unmap(unsigned long va, unsigned long size);
 void fki_high_flush(void);
+void *fki_high_txn_begin(unsigned long va, unsigned long size);
+void fki_high_txn_restore(void *txn);
+void fki_high_txn_end(void *txn);
 int fki_high_read_u64x2(unsigned long va, fki_u64 *out0, fki_u64 *out1);
 void fki_icache_flush(unsigned long va, unsigned long size);
 /*

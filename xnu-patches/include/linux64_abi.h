@@ -30,6 +30,7 @@ enum linux64_call {
 	LINUX64_CALL_KMAP           = 211,	/* EL0 host: a1 = struct linux64_map_req: map [va, va+size) -> pa in high window */
 	LINUX64_CALL_KUNMAP         = 212,	/* EL0 host: a1 = struct linux64_map_req: unmap [va, va+size) from high window */
 	LINUX64_CALL_KFLUSH         = 213,	/* EL0 host: flush high window TLB */
+	LINUX64_CALL_KMAP_TXN       = 214,	/* EL0 host: a1 = struct linux64_map_req: high-window overwrite rollback txn */
 	LINUX64_CALL_AS_CREATE      = 220,	/* EL0 host: create user address space */
 	LINUX64_CALL_AS_DESTROY     = 221,	/* EL0 host: destroy user address space */
 	LINUX64_CALL_AS_MAP         = 222,	/* EL0 host: map pages in user address space */
@@ -76,7 +77,14 @@ enum linux64_call {
 #define LINUX64_EL0_CAP_EXEC_ONLY (1U << 0)	/* host supports execute-only (--x) user mappings */
 #define LINUX64_EL0_CAP_XO_COMPAT (1U << 1)	/* opt-in: relax --x to r-x when host lacks EXEC_ONLY */
 
-/* Kernel/user page mapping request for EL0 hosts (LINUX64_CALL_KMAP/KUNMAP/AS_*). */
+/* High-window overwrite transaction ops (LINUX64_CALL_KMAP_TXN, passed in linux64_map_req.prot). */
+enum {
+	LINUX64_KMAP_TXN_BEGIN   = 0,
+	LINUX64_KMAP_TXN_RESTORE = 1,
+	LINUX64_KMAP_TXN_END     = 2,
+};
+
+/* Kernel/user page mapping request for EL0 hosts (LINUX64_CALL_KMAP/KUNMAP/KMAP_TXN/AS_*). */
 struct linux64_map_req {
 	__UINT64_TYPE__ as_handle;
 	__UINT64_TYPE__ va;

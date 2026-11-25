@@ -52,7 +52,15 @@ static signed char linux_cpu_of_slot[LINUX64_CPU_SLOTS];
 static unsigned long long cpu_mpidr[XNU_MAX_CPUS];
 static void *cpu_thread[XNU_MAX_CPUS];
 static volatile int cpu_running[XNU_MAX_CPUS];
+#define STOP_PARKED_MASK 0x0000ffffu
+#define STOP_ACTIVE_SHIFT 16
+#define STOP_ACTIVE_MASK 0x7fff0000u
+#define STOP_ACTIVE_ONE (1u << STOP_ACTIVE_SHIFT)
+#define STOP_COMMIT 0x80000000u
+static volatile unsigned stop_state = STOP_ACTIVE_ONE;
+static inline int stop_cas(unsigned old, unsigned new);
 static void stop_commit(void);
+static int stop_park(int me);
 static u64_t a_cpu_entry;			/* XNU's linux64_cpu_entry */
 static int el0_mode;				/* nonzero when host reports FKI_CAP_EL0 */
 struct cpu_slot_hot {
@@ -456,6 +464,19 @@ static int cpu_fn(void *arg)
 	logkv("xnu: XNU CPU starts on Linux CPU", (u64_t)c);
 	if (park_secondaries) {	/* diagnostics: the CPU is asked for but never enters XNU */
 		logkv("xnu: secondary CPU parked (park_secondaries)", (u64_t)c);
+		for (;;) {
+			unsigned s = stop_state;
+			if ((s & STOP_COMMIT) || ((s & STOP_ACTIVE_MASK) <= STOP_ACTIVE_ONE))
+				break;
+			if (stop_cas(s, s - STOP_ACTIVE_ONE))
+				break;
+		}
+		cpu_running[c] = 0;
+		while (!fki_thread_should_stop())
+			fki_msleep(10);
+		return 0;
+	}
+	if (READ_ONCE(stop_run) && stop_park(c)) {
 		cpu_running[c] = 0;
 		while (!fki_thread_should_stop())
 			fki_msleep(10);
@@ -505,11 +526,9 @@ _Static_assert(__builtin_offsetof(struct linux64_utcb_req, tpidrro) - __builtin_
 /*
  * Stopping the run: the CPUs leave XNU together. A CPU still inside XNU could otherwise wait for good, interrupts masked,
  * for one that had already left. Each parks briefly at its host calls and kicks the others, so that one idle or in user
- * space comes to a host call too; the run is abandoned once all are parked at once.
- * stop_state: the number of parked CPUs, and STOP_COMMIT once the run is abandoned.
+ * space comes to a host call too; the run is abandoned once all active CPUs are parked at once.
+ * stop_state layout: [15:0] parked count, [30:16] active CPU count, [31] STOP_COMMIT.
  */
-#define STOP_COMMIT 0x10000u
-static volatile unsigned stop_state;
 static inline int stop_cas(unsigned old, unsigned new)
 {
 	unsigned cur, fail;
@@ -530,25 +549,34 @@ static void stop_commit(void)
 	unsigned s;
 	do s = stop_state; while (!(s & STOP_COMMIT) && !stop_cas(s, s | STOP_COMMIT));
 }
-static int stop_park(void)	/* 1: the run is abandoned, do not return to XNU */
+static int stop_park(int me)	/* 1: the run is abandoned, do not return to XNU */
 {
-	unsigned s, in_xnu_cpus = 1;
+	unsigned s, last_active;
 	u64_t end;
 
-	for (int c = 1; c < cpus; c++)
-		in_xnu_cpus += cpu_running[c] != 0;
 	do {
 		s = stop_state;
 		if (s & STOP_COMMIT) return 1;
 	} while (!stop_cas(s, s + 1));
-	for (int c = 0, me = linux_cpu_of_slot[this_slot()]; c < cpus; c++)
+	last_active = (s & STOP_ACTIVE_MASK) >> STOP_ACTIVE_SHIFT;
+	for (int c = 0; c < cpus; c++)
 		if (c != me && (c == 0 || cpu_running[c]))
 			fki_kick_cpu(c);
 	end = fki_counter() + fki_counter_frequency() / 500;	/* 2 ms */
 	for (;;) {
+		unsigned parked, active;
+
 		s = stop_state;
 		if (s & STOP_COMMIT) return 1;
-		if ((s & (STOP_COMMIT - 1)) >= in_xnu_cpus) { stop_cas(s, s | STOP_COMMIT); continue; }
+		parked = s & STOP_PARKED_MASK;
+		active = (s & STOP_ACTIVE_MASK) >> STOP_ACTIVE_SHIFT;
+		if (active != last_active) {
+			last_active = active;
+			for (int c = 0; c < cpus; c++)
+				if (c != me && (c == 0 || cpu_running[c]))
+					fki_kick_cpu(c);
+		}
+		if (parked >= active) { stop_cas(s, s | STOP_COMMIT); continue; }
 		if (fki_counter() > end && stop_cas(s, s - 1)) return 0;
 	}
 }
@@ -562,7 +590,7 @@ long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 	hot->upcalls++;
 	hot->last_call = call;
 	hot->in_xnu_state = 0;
-	if (*(volatile int *)&stop_run && stop_park()) {	/* the host asked the run to end (scripts/xnulinux-boot.sh stop): XNU is abandoned here */
+	if (*(volatile int *)&stop_run && stop_park(linux_cpu_of_slot[in_s])) {	/* the host asked the run to end (scripts/xnulinux-boot.sh stop): XNU is abandoned here */
 		logs("xnu: run stopped by the host (stop_run)");
 		return 1;
 	}
@@ -587,7 +615,7 @@ long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 		acct_add(call, fki_counter() - t0);
 	if (r)
 		stop_commit();		/* this CPU ends the run by itself (a panic, a failed assert) */
-	else if (*(volatile int *)&stop_run && stop_park()) {	/* back from a long call when the stop was asked */
+	else if (*(volatile int *)&stop_run && stop_park(linux_cpu_of_slot[in_s])) {	/* back from a long call when the stop was asked */
 		logs("xnu: run stopped by the host (stop_run)");
 		r = 1;
 	}
@@ -1032,6 +1060,16 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 			logkv("xnu: XNU asked to start a CPU it was not given, MPIDR", a1);
 			return 0;
 		}
+		for (;;) {
+			unsigned s;
+			if (READ_ONCE(stop_run))
+				return 0;
+			s = stop_state;
+			if (s & STOP_COMMIT)
+				return 0;
+			if (stop_cas(s, s + STOP_ACTIVE_ONE))
+				break;
+		}
 		cpu_running[c] = 1;
 		WRITE_ONCE(cpu_start_arg[c], a2);
 		fki_thread_wake(cpu_thread[c]);
@@ -1061,6 +1099,25 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 	}
 	if (call == LINUX64_CALL_KFLUSH) {
 		fki_high_flush();
+		return 0;
+	}
+	if (call == LINUX64_CALL_KMAP_TXN) {
+		struct linux64_map_req *q = (struct linux64_map_req *)a1;
+		if (q) {
+			if (q->prot == LINUX64_KMAP_TXN_BEGIN) {
+				void *txn = fki_high_txn_begin((unsigned long)q->va, (unsigned long)q->size);
+				q->as_handle = (u64_t)(unsigned long)txn;
+				q->result = txn ? 0 : -12; /* -ENOMEM */
+			} else if (q->prot == LINUX64_KMAP_TXN_RESTORE) {
+				fki_high_txn_restore((void *)(unsigned long)q->as_handle);
+				q->result = 0;
+			} else if (q->prot == LINUX64_KMAP_TXN_END) {
+				fki_high_txn_end((void *)(unsigned long)q->as_handle);
+				q->result = 0;
+			} else {
+				q->result = -22; /* -EINVAL */
+			}
+		}
 		return 0;
 	}
 	if (call == LINUX64_CALL_AS_CREATE) {
@@ -2111,6 +2168,7 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		if (!cpu_thread[c]) { logkv("xnu: cannot make a thread for CPU, running with CPUs below it:", (u64_t)c); cpus = c; }
 	}
 	logs("xnu: entering arm_init");
+	stop_state = STOP_ACTIVE_ONE;
 	in_xnu = 1;
 	long r = el0_mode ? xnu_world_call_el0(a_init, (unsigned long)ba) : xnu_world_call(a_init, (unsigned long)ba);
 	in_xnu = 0;

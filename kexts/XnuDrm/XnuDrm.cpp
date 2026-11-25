@@ -152,8 +152,19 @@ IOReturn AGXDeviceUserClient::doMap(IOExternalMethodArguments *a)
 	}
 	uint64_t id = r->arg0;
 	uint32_t nr = r->payload_len / sizeof(xnudrm_range);
+	if (nr == 0) {
+		IOLockUnlock(gCallLock);
+		xnudrm_hdr ur;
+		simple(XNUDRM_UNMAP, id, 0, &ur);
+		return kIOReturnBadArgument;
+	}
 	IOAddressRange *ranges = (IOAddressRange *)IOMallocData(nr * sizeof(IOAddressRange));
-	if (!ranges) { IOLockUnlock(gCallLock); return kIOReturnNoMemory; }
+	if (!ranges) {
+		IOLockUnlock(gCallLock);
+		xnudrm_hdr ur;
+		simple(XNUDRM_UNMAP, id, 0, &ur);
+		return kIOReturnNoMemory;
+	}
 	const xnudrm_range *rg = (const xnudrm_range *)(gOut + sizeof(xnudrm_hdr));
 	for (uint32_t i = 0; i < nr; i++) ranges[i] = (IOAddressRange){ rg[i].pa, rg[i].len };
 	IOLockUnlock(gCallLock);
@@ -177,7 +188,13 @@ IOReturn AGXDeviceUserClient::doMap(IOExternalMethodArguments *a)
 	if (i == fNSlots) {
 		unsigned nn = fNSlots ? fNSlots * 2 : 64;
 		Slot *s = (Slot *)IOMallocZeroData(nn * sizeof(Slot));
-		if (!s) { map->release(); md->release(); return kIOReturnNoMemory; }
+		if (!s) {
+			map->release();
+			md->release();
+			xnudrm_hdr ur;
+			simple(XNUDRM_UNMAP, id, 0, &ur);
+			return kIOReturnNoMemory;
+		}
 		if (fSlots) { memcpy(s, fSlots, fNSlots * sizeof(Slot)); IOFreeData(fSlots, fNSlots * sizeof(Slot)); }
 		fSlots = s; fNSlots = nn;
 	}

@@ -297,6 +297,23 @@ static inline unsigned long fki_as_entry_prot(void *e)
 	return (xa_to_value(e) >> FKI_AS_PROT_SHIFT) & FKI_AS_PROT_MASK;
 }
 
+struct fki_high_txn_page {
+	unsigned long cptr;
+	unsigned long pfn;
+	u8 prot;
+	bool stashed;
+};
+
+struct fki_high_txn {
+	struct list_head list;
+	struct fki_kmem *km;
+	unsigned long va;
+	unsigned long size;
+	unsigned long npages;
+	bool restoring;
+	struct fki_high_txn_page pages[];
+};
+
 struct fki_kmem {
 	unsigned long high_va;
 	fki_u64 pa_base;
@@ -305,6 +322,7 @@ struct fki_kmem {
 	struct fki_kmem_chunk *chunks;
 	struct list_head pts;
 	struct list_head as_list;	/* protected by fki_vs_lock */
+	struct list_head high_txns;	/* protected by km->lock */
 	struct xarray dyn_slots;	/* (va >> PAGE_SHIFT) -> fki_as_mk_entry(cptr, pfn, lprot) */
 	struct xarray pt_ready;		/* (va >> 21) -> xa_mk_value(1) when L1..L3 PTs exist */
 	spinlock_t lock;
@@ -513,6 +531,7 @@ int fki_kmem_alloc(unsigned long size, unsigned long high_va, fki_u64 pa_base, s
 	km->nchunks = nchunks;
 	INIT_LIST_HEAD(&km->pts);
 	INIT_LIST_HEAD(&km->as_list);
+	INIT_LIST_HEAD(&km->high_txns);
 	xa_init_flags(&km->dyn_slots, XA_FLAGS_LOCK_IRQ);
 	xa_init_flags(&km->pt_ready, XA_FLAGS_LOCK_IRQ);
 	spin_lock_init(&km->lock);
@@ -679,6 +698,23 @@ void fki_kmem_free(struct fki_region *r)
 	}
 	fki_vs_pool_fini();
 	fki_as_drain_list(km);
+	{
+		struct fki_high_txn *txn, *tmp;
+		unsigned long flags;
+
+		spin_lock_irqsave(&km->lock, flags);
+		list_for_each_entry_safe(txn, tmp, &km->high_txns, list) {
+			unsigned long idx;
+
+			list_del(&txn->list);
+			for (idx = 0; idx < txn->npages; idx++) {
+				if (txn->pages[idx].stashed && txn->pages[idx].cptr)
+					l4h_slot_delete(txn->pages[idx].cptr);
+			}
+			kfree(txn);
+		}
+		spin_unlock_irqrestore(&km->lock, flags);
+	}
 	if (km->ops_ref_inited) {
 		percpu_ref_exit(&km->ops_ref);
 		km->ops_ref_inited = false;
@@ -747,10 +783,43 @@ static int ensure_high_pt(struct fki_kmem *km, unsigned long va)
 	return 0;
 }
 
+static struct fki_high_txn *fki_high_txn_find_locked(struct fki_kmem *km,
+						     unsigned long cur_va,
+						     unsigned long *idx_out)
+{
+	struct fki_high_txn *txn;
+
+	list_for_each_entry(txn, &km->high_txns, list) {
+		if (cur_va >= txn->va && cur_va < txn->va + txn->size) {
+			if (idx_out)
+				*idx_out = (cur_va - txn->va) >> PAGE_SHIFT;
+			return txn;
+		}
+	}
+	return NULL;
+}
+
+static void fki_dyn_slot_clear_locked(struct fki_kmem *km, unsigned long cur_va, bool was_stored)
+{
+	unsigned long vpn = cur_va >> PAGE_SHIFT;
+	unsigned long idx = 0;
+	struct fki_high_txn *txn = fki_high_txn_find_locked(km, cur_va, &idx);
+
+	if (txn && txn->pages[idx].stashed) {
+		xa_store(&km->dyn_slots, vpn, XA_ZERO_ENTRY, GFP_ATOMIC);
+		return;
+	}
+	if (was_stored)
+		xa_erase(&km->dyn_slots, vpn);
+	else
+		xa_release(&km->dyn_slots, vpn);
+}
+
 enum fki_hm_kind {
 	FKI_HM_NONE = 0,
 	FKI_HM_NEW,
 	FKI_HM_REPROT,
+	FKI_HM_RESTORE,
 };
 
 struct fki_hm_page {
@@ -758,6 +827,8 @@ struct fki_hm_page {
 	unsigned long new_slot;
 	unsigned long prev_pfn;
 	unsigned long prev_prot;
+	struct fki_high_txn *txn;
+	unsigned long txn_idx;
 	u8 kind;
 };
 
@@ -837,21 +908,33 @@ int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 		unsigned long vpn = cur_va >> PAGE_SHIFT;
 		void *old;
 
-		if (pt_idx != last_pt_idx) {
-			err = ensure_high_pt(km, cur_va);
-			if (err)
-				break;
-			last_pt_idx = pt_idx;
-		}
 		old = xa_load(&km->dyn_slots, vpn);
 		if (!old) {
+			unsigned long txn_idx = 0;
+			struct fki_high_txn *txn = fki_high_txn_find_locked(km, cur_va, &txn_idx);
+
+			if (txn && txn->restoring && txn->pages[txn_idx].stashed &&
+			    txn->pages[txn_idx].cptr != 0 &&
+			    txn->pages[txn_idx].pfn == pgs[i].new_pfn) {
+				pgs[i].kind = FKI_HM_RESTORE;
+				pgs[i].new_slot = txn->pages[txn_idx].cptr;
+				pgs[i].txn = txn;
+				pgs[i].txn_idx = txn_idx;
+				continue;
+			}
+			if (pt_idx != last_pt_idx) {
+				err = ensure_high_pt(km, cur_va);
+				if (err)
+					break;
+				last_pt_idx = pt_idx;
+			}
 			err = xa_reserve(&km->dyn_slots, vpn, GFP_ATOMIC);
 			if (err)
 				break;
 			pgs[i].new_slot = l4h_cap_copy(L4H_FRAME_CPTR(pgs[i].new_pfn << PAGE_SHIFT),
 						       L4H_RIGHTS_ALL);
 			if (!pgs[i].new_slot) {
-				xa_release(&km->dyn_slots, vpn);
+				fki_dyn_slot_clear_locked(km, cur_va, false);
 				err = -ENOMEM;
 				break;
 			}
@@ -869,12 +952,13 @@ int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 	}
 	if (err) {
 		for (j = 0; j < i; j++) {
-			unsigned long vpn = (va + (j << PAGE_SHIFT)) >> PAGE_SHIFT;
+			unsigned long cur_va = va + (j << PAGE_SHIFT);
 
-			if (pgs[j].kind == FKI_HM_NEW)
-				xa_release(&km->dyn_slots, vpn);
-			if (pgs[j].new_slot)
-				l4h_slot_delete(pgs[j].new_slot);
+			if (pgs[j].kind == FKI_HM_NEW) {
+				fki_dyn_slot_clear_locked(km, cur_va, false);
+				if (pgs[j].new_slot)
+					l4h_slot_delete(pgs[j].new_slot);
+			}
 		}
 		spin_unlock_irqrestore(&km->lock, flags);
 		goto out_free;
@@ -885,7 +969,21 @@ int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 		unsigned long cur_va = va + (i << PAGE_SHIFT);
 		unsigned long vpn = cur_va >> PAGE_SHIFT;
 
-		if (pgs[i].kind == FKI_HM_REPROT) {
+		if (pgs[i].kind == FKI_HM_RESTORE) {
+			if (l4h_page_map(pgs[i].new_slot, high_vs, cur_va, (int)eff_lprot) != 0) {
+				err = -EIO;
+				break;
+			}
+			if (xa_err(xa_store(&km->dyn_slots, vpn,
+					    fki_as_mk_entry(pgs[i].new_slot, pgs[i].new_pfn, eff_lprot),
+					    GFP_ATOMIC))) {
+				l4h_page_unmap(pgs[i].new_slot);
+				err = -ENOMEM;
+				break;
+			}
+			pgs[i].txn->pages[pgs[i].txn_idx].cptr = 0;
+			pgs[i].txn->pages[pgs[i].txn_idx].stashed = false;
+		} else if (pgs[i].kind == FKI_HM_REPROT) {
 			void *old = xa_load(&km->dyn_slots, vpn);
 			unsigned long old_cptr = old ? fki_as_entry_cptr(old) : 0;
 
@@ -932,7 +1030,12 @@ int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 			unsigned long cur_va = va + (j << PAGE_SHIFT);
 			unsigned long vpn = cur_va >> PAGE_SHIFT;
 
-			if (pgs[j].kind == FKI_HM_REPROT) {
+			if (pgs[j].kind == FKI_HM_RESTORE) {
+				l4h_page_unmap(pgs[j].new_slot);
+				xa_store(&km->dyn_slots, vpn, XA_ZERO_ENTRY, GFP_ATOMIC);
+				pgs[j].txn->pages[pgs[j].txn_idx].cptr = pgs[j].new_slot;
+				pgs[j].txn->pages[pgs[j].txn_idx].stashed = true;
+			} else if (pgs[j].kind == FKI_HM_REPROT) {
 				if (pgs[j].prev_prot != eff_lprot) {
 					void *cur = xa_load(&km->dyn_slots, vpn);
 					unsigned long cptr = cur ? fki_as_entry_cptr(cur) : 0;
@@ -948,18 +1051,19 @@ int fki_high_map(unsigned long va, fki_u64 xpa, unsigned long size, int prot)
 				}
 			} else {
 				/* FKI_HM_NEW */
-				xa_erase(&km->dyn_slots, vpn);
+				fki_dyn_slot_clear_locked(km, cur_va, true);
 				l4h_slot_delete(pgs[j].new_slot);
 				pgs[j].new_slot = 0;
 			}
 		}
 		for (j = mapped; j < npages; j++) {
-			unsigned long vpn = (va + (j << PAGE_SHIFT)) >> PAGE_SHIFT;
+			unsigned long cur_va = va + (j << PAGE_SHIFT);
 
-			if (pgs[j].kind == FKI_HM_NEW)
-				xa_release(&km->dyn_slots, vpn);
-			if (pgs[j].new_slot)
-				l4h_slot_delete(pgs[j].new_slot);
+			if (pgs[j].kind == FKI_HM_NEW) {
+				fki_dyn_slot_clear_locked(km, cur_va, false);
+				if (pgs[j].new_slot)
+					l4h_slot_delete(pgs[j].new_slot);
+			}
 		}
 	}
 	spin_unlock_irqrestore(&km->lock, flags);
@@ -1004,18 +1108,136 @@ static void fki_high_unmap_km(struct fki_kmem *km, unsigned long va, unsigned lo
 
 		for (cur_va = lo[i]; cur_va < hi[i]; cur_va += PAGE_SIZE) {
 			unsigned long vpn = cur_va >> PAGE_SHIFT;
-			void *old = xa_erase(&km->dyn_slots, vpn);
+			unsigned long idx = 0;
+			struct fki_high_txn *txn = fki_high_txn_find_locked(km, cur_va, &idx);
 
-			if (old) {
-				unsigned long old_slot = fki_as_entry_cptr(old);
+			if (txn) {
+				void *old = xa_load(&km->dyn_slots, vpn);
 
-				if (old_slot)
-					l4h_slot_delete(old_slot);
+				if (!txn->pages[idx].stashed) {
+					if (old) {
+						unsigned long old_slot = fki_as_entry_cptr(old);
+
+						if (old_slot && l4h_page_unmap(old_slot) == 0) {
+							txn->pages[idx].cptr = old_slot;
+							txn->pages[idx].pfn = fki_as_entry_pfn(old);
+							txn->pages[idx].prot = (u8)fki_as_entry_prot(old);
+							txn->pages[idx].stashed = true;
+							xa_store(&km->dyn_slots, vpn, XA_ZERO_ENTRY, GFP_ATOMIC);
+						} else {
+							xa_erase(&km->dyn_slots, vpn);
+							if (old_slot)
+								l4h_slot_delete(old_slot);
+						}
+					}
+				} else if (old) {
+					unsigned long old_slot = fki_as_entry_cptr(old);
+
+					if (old_slot)
+						l4h_slot_delete(old_slot);
+					xa_store(&km->dyn_slots, vpn, XA_ZERO_ENTRY, GFP_ATOMIC);
+				}
+			} else {
+				void *old = xa_erase(&km->dyn_slots, vpn);
+
+				if (old) {
+					unsigned long old_slot = fki_as_entry_cptr(old);
+
+					if (old_slot)
+						l4h_slot_delete(old_slot);
+				}
 			}
 		}
 	}
 	spin_unlock_irqrestore(&km->lock, flags);
 }
+
+void *fki_high_txn_begin(unsigned long va, unsigned long size)
+{
+	struct fki_kmem *km = fki_kmem_get();
+	struct fki_high_txn *txn, *cur;
+	unsigned long va_end, npages, flags;
+
+	if (!km)
+		return NULL;
+	if (READ_ONCE(km->dead) || !size || ((va | size) & ~PAGE_MASK) ||
+	    check_add_overflow(va, size, &va_end)) {
+		fki_kmem_put(km);
+		return NULL;
+	}
+	npages = size >> PAGE_SHIFT;
+	txn = kzalloc(struct_size(txn, pages, npages), GFP_ATOMIC);
+	if (!txn) {
+		fki_kmem_put(km);
+		return NULL;
+	}
+	txn->km = km;
+	txn->va = va;
+	txn->size = size;
+	txn->npages = npages;
+
+	spin_lock_irqsave(&km->lock, flags);
+	if (READ_ONCE(km->dead)) {
+		spin_unlock_irqrestore(&km->lock, flags);
+		kfree(txn);
+		fki_kmem_put(km);
+		return NULL;
+	}
+	list_for_each_entry(cur, &km->high_txns, list) {
+		if (va < cur->va + cur->size && cur->va < va_end) {
+			spin_unlock_irqrestore(&km->lock, flags);
+			kfree(txn);
+			fki_kmem_put(km);
+			return NULL;
+		}
+	}
+	list_add(&txn->list, &km->high_txns);
+	spin_unlock_irqrestore(&km->lock, flags);
+	return txn;
+}
+EXPORT_SYMBOL(fki_high_txn_begin);
+
+void fki_high_txn_restore(void *handle)
+{
+	struct fki_high_txn *txn = handle;
+	struct fki_kmem *km;
+	unsigned long flags;
+
+	if (!txn)
+		return;
+	km = txn->km;
+	spin_lock_irqsave(&km->lock, flags);
+	txn->restoring = true;
+	spin_unlock_irqrestore(&km->lock, flags);
+}
+EXPORT_SYMBOL(fki_high_txn_restore);
+
+void fki_high_txn_end(void *handle)
+{
+	struct fki_high_txn *txn = handle;
+	struct fki_kmem *km;
+	unsigned long flags, idx;
+
+	if (!txn)
+		return;
+	km = txn->km;
+	spin_lock_irqsave(&km->lock, flags);
+	list_del(&txn->list);
+	for (idx = 0; idx < txn->npages; idx++) {
+		if (txn->pages[idx].stashed) {
+			unsigned long vpn = (txn->va + (idx << PAGE_SHIFT)) >> PAGE_SHIFT;
+
+			if (txn->pages[idx].cptr)
+				l4h_slot_delete(txn->pages[idx].cptr);
+			if (xa_load(&km->dyn_slots, vpn) == NULL)
+				xa_release(&km->dyn_slots, vpn);
+		}
+	}
+	spin_unlock_irqrestore(&km->lock, flags);
+	kfree(txn);
+	fki_kmem_put(km);
+}
+EXPORT_SYMBOL(fki_high_txn_end);
 
 void fki_high_unmap(unsigned long va, unsigned long size)
 {
