@@ -1400,7 +1400,7 @@ static int run_m2b(void)
 	if (img.region.pa & 0x1fffff) { logs("xnu: region not 2 MiB aligned"); return -22; }
 	/* boot_args::kaddr/MemoryMap are 32-bit physical addresses in Apple's x86 boot protocol. */
 	if (img.region.pa + img.region.size > 0x100000000ULL) {
-		logs("xnu: x86 DRAM must be below 4 GiB; boot fki with carve_base below 4 GiB");
+		logs("xnu: x86 DRAM must be below 4 GiB (the runtime ZONE_DMA32 allocation did not land there)");
 		fki_contig_free(&img.region);
 		return -22;
 	}

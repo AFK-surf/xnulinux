@@ -528,43 +528,19 @@ rebuilds cleanly (`BUILD_RC=0`) with the generated patch matching the staged tre
 This is a bare phase-1 `kernel.development` smoke test, not a macOS disk boot. Do **not** use
 `scripts/xnulinux-boot.sh` (arm64 full-system path). Every `sudo`/`insmod` step is Donnie's.
 
-### The carve-out
+### Memory: no boot parameter, no reboot
 
-The first `memmap=512M$3G` example was wrong: `0xc0000000-0xcfffffff` is PCI MMIO / device
-reserved on this machine (`efi: Remove mem86: MMIO range=[0xc0000000-0xcfffffff]`), not RAM.
-FKI would reject it. The verified safe window comes from `sudo cat /proc/iomem`:
-
-```text
-memmap=384M$312M      carve_base=0x13800000      carve_mb=384
-```
-
-Range `0x13800000-0x2b7fffff` (312..696 MiB) is entirely inside low System RAM
-`0x00100000-0x316ddfff`, is 2 MiB aligned at both ends, sits below the 4 GiB limit of
-`boot_args::kaddr`/`MemoryMap`, is below the initrd at `0x2b901f98` (~1 MiB gap), and does not
-touch the kernel (loaded above 4 GiB at `0x190400000`). Linux's CMA is empty (`CmaFree: 0`),
-so the carve is required, not optional.
+The earlier `memmap=384M$312M` carve-out was dropped: it needed an edit to `/etc/default/grub`
+and broke boot on this SteamOS box. fki now allocates the DRAM at load time with
+`alloc_contig_pages(..., GFP_DMA32)` (x86 only), which places a power-of-two block below 4 GiB
+(512 MiB for `ram_mb=256`, 2 MiB aligned) and migrates movable page cache out of the way.
+`/proc/iomem` and the kernel command line are left alone. Load fki **without** `carve_base`/`carve_mb`.
+If the allocation fails (`contiguous allocation failed`), free memory (`sync; echo 3 | sudo tee
+/proc/sys/vm/drop_caches`) and retry; a fresh boot is the most reliable.
 
 ### Steps, in order
 
-1. Add the argument (once) and reboot:
-
-```bash
-sudo cp /etc/default/grub /etc/default/grub.bak-xnu
-if ! grep -q 'memmap=384M\$312M' /etc/default/grub; then
-  sudo sed -i '/^GRUB_CMDLINE_LINUX_DEFAULT=/ s/"$/ memmap=384M$312M"/' /etc/default/grub
-fi
-sudo grub-mkconfig -o /boot/efi/EFI/steamos/grub.cfg
-grep '^GRUB_CMDLINE_LINUX_DEFAULT' /etc/default/grub
-sudo reboot
-```
-
-2. After reboot, confirm the range is no longer Linux System RAM:
-
-```bash
-sudo cat /proc/iomem | grep -i -E '13800000|2b800000|System RAM' | head -40
-```
-
-3. Stage the image and the firmware search path (the sysfs path resets every boot):
+1. Stage the image and the firmware search path (the sysfs path resets every boot):
 
 ```bash
 mkdir -p /home/deck/xnulinux-build/firmware
@@ -575,18 +551,17 @@ printf '%s' /home/deck/xnulinux-build/firmware | \
 lsmod | grep -E '^(fki|xnu) ' || echo 'fki/xnu not loaded'
 ```
 
-4. Terminal A — clear and watch kernel logs:
+2. Terminal A — clear and watch kernel logs:
 
 ```bash
 sudo dmesg -C
 sudo dmesg -w
 ```
 
-5. Terminal B — load the helper, then the hosted kernel:
+3. Terminal B — load the helper, then the hosted kernel:
 
 ```bash
-sudo insmod /home/deck/xnulinux-build/modules/fki-ko/fki.ko \
-  carve_base=0x13800000 carve_mb=384
+sudo insmod /home/deck/xnulinux-build/modules/fki-ko/fki.ko
 ```
 
 ```bash
@@ -596,11 +571,10 @@ sudo insmod /home/deck/xnulinux-build/modules/xnu-ko/xnu.ko \
 ```
 
 `insmod xnu.ko` blocks while XNU runs; `kmax`/`idle_max` are the bounded-run guardrails.
-Expected log fragments: `fki: 384 MiB at 0x13800000...`,
-`xnu: contiguous DRAM at phys 0x13800000`, `xnu: x86 bootstrap window mapped`,
+Expected log fragments: `xnu: contiguous DRAM at phys 0x...` (below 0x100000000), `xnu: x86 bootstrap window mapped`,
 `xnu: entering kernel`, then `xnu:`-prefixed XNU `kprintf` lines.
 
-6. If it does not end itself, Terminal C:
+4. If it does not end itself, Terminal C:
 
 ```bash
 echo 1 | sudo tee /sys/module/xnu/parameters/stop_run
@@ -608,7 +582,7 @@ echo 1 | sudo tee /sys/module/xnu/parameters/stop_run
 
 `stop_run` is observed only at the next host call; if XNU hangs without one, reboot.
 
-7. After `insmod` returns, unload and clear the firmware path:
+5. After `insmod` returns, unload and clear the firmware path:
 
 ```bash
 sudo rmmod xnu
@@ -616,18 +590,10 @@ sudo rmmod fki
 : | sudo tee /sys/module/firmware_class/parameters/path
 ```
 
-8. Remove the boot argument to restore full RAM:
-
-```bash
-sudo sed -i 's/ memmap=384M\$312M//' /etc/default/grub
-sudo grub-mkconfig -o /boot/efi/EFI/steamos/grub.cfg
-sudo reboot
-```
-
 ### Failure signatures
 
 - `cannot read image, err -2` — firmware path or `image=` name wrong.
-- `contiguous allocation failed` — carve missing, too small, or wrong parameters.
-- `x86 DRAM must be below 4 GiB` — carve base+size crosses 4 GiB.
+- `contiguous allocation failed` — no free 512 MiB contiguous block in ZONE_DMA32; drop caches or reboot and retry.
+- `x86 DRAM must be below 4 GiB` — the allocation did not land in DMA32; stop and report.
 - `x86 window slot in use by Linux: 0` — stop; do not force it.
 - Hang with no further `xnu:` lines — reboot; `stop_run` needs a host call to be seen.

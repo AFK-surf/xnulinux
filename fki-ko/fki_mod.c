@@ -690,7 +690,16 @@ int fki_contig_alloc(unsigned long size, struct fki_region *r)
 		return -ENOENT;
 	while ((n << PAGE_SHIFT) < size)
 		n <<= 1;
+#ifdef CONFIG_X86_64
+	/*
+	 * Apple's x86 boot protocol (boot_args::kaddr/MemoryMap) takes 32-bit physical addresses, so a hosted x86 XNU's DRAM
+	 * must sit below 4 GiB. Asking for ZONE_DMA32 lets this runtime allocation land there with no memmap= or any other
+	 * boot parameter: page cache and other movable pages in the zone are migrated out of the way.
+	 */
+	pg = p_alloc_contig(n, GFP_KERNEL | GFP_DMA32 | __GFP_NOWARN, numa_node_id(), NULL);
+#else
 	pg = p_alloc_contig(n, GFP_KERNEL | __GFP_NOWARN, numa_node_id(), NULL);
+#endif
 	if (!pg)
 		return -ENOMEM;
 	r->va = page_address(pg);
