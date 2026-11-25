@@ -325,7 +325,10 @@ EXPORT_SYMBOL(fki_thread_wake);
 
 void fki_msleep(unsigned int ms)
 {
-	msleep(ms);
+	unsigned long t = msecs_to_jiffies(ms) + 1;
+
+	while (t)	/* as msleep, but not counted in the load average */
+		t = schedule_timeout_idle(t);
 }
 EXPORT_SYMBOL(fki_msleep);
 
@@ -729,7 +732,7 @@ static void fki_idle_body(void *p)
 
 	local_irq_enable();
 	preempt_enable();
-	set_current_state(TASK_UNINTERRUPTIBLE);
+	set_current_state(TASK_IDLE);	/* uninterruptible, and not counted in the load average: the foreign kernel is idle */
 	WRITE_ONCE(fki_idle_task[smp_processor_id()], current);
 	smp_mb();	/* pairs with fki_kick_cpu: it sees this task, or this sees the word it set first */
 	if (!a->wake || !READ_ONCE(*a->wake))
