@@ -188,7 +188,7 @@ index 48e5ccf..ed731ce 100644
  protected:
  	IOMemoryDescriptor * _parent;
 diff --git a/iokit/Kernel/IOKitKernelInternal.h b/iokit/Kernel/IOKitKernelInternal.h
-index b33a663..a9861a5 100644
+index b33a663..9e01228 100644
 --- a/iokit/Kernel/IOKitKernelInternal.h
 +++ b/iokit/Kernel/IOKitKernelInternal.h
 @@ -62,6 +62,60 @@ struct IOMemoryDescriptorMapAllocRef {
@@ -252,6 +252,17 @@ index b33a663..a9861a5 100644
  
  mach_vm_address_t
  IOKernelAllocateWithPhysicalRestrict(
+@@ -174,6 +228,10 @@ struct IOMemoryDescriptorReserved {
+ 	vm_tag_t                      userTag;
+ 	task_t                        creator;
+ 	OSPtr<OSDictionary>           contextObjects;
++	vm_map_t                      el0RedirectSafeMap;
++	uint64_t                      el0MappingsGen;
++	uint64_t                      el0RedirectGen;
++	bool                          el0RedirectStateValid;
+ };
+ 
+ #if defined(__x86_64__)
 diff --git a/iokit/Kernel/IOLib.cpp b/iokit/Kernel/IOLib.cpp
 index ff22ba5..e2763c9 100644
 --- a/iokit/Kernel/IOLib.cpp
@@ -331,7 +342,7 @@ index ff22ba5..e2763c9 100644
  
  		address += page_size;
 diff --git a/iokit/Kernel/IOMemoryDescriptor.cpp b/iokit/Kernel/IOMemoryDescriptor.cpp
-index cc2c1af..3d05088 100644
+index cc2c1af..136d07c 100644
 --- a/iokit/Kernel/IOMemoryDescriptor.cpp
 +++ b/iokit/Kernel/IOMemoryDescriptor.cpp
 @@ -965,6 +965,12 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
@@ -1090,7 +1101,7 @@ index cc2c1af..3d05088 100644
  IOReturn
  IOMemoryDescriptor::doUnmap(
  	vm_map_t                addressMap,
-@@ -5701,73 +6126,433 @@ IOMemoryDescriptor::doUnmap(
+@@ -5701,72 +6126,460 @@ IOMemoryDescriptor::doUnmap(
  	return err;
  }
  
@@ -1228,14 +1239,15 @@ index cc2c1af..3d05088 100644
 +	gIOMemoryRedirectStack = &frame;
  
 -		do{
--			if (!fAddress) {
 +	/*
 +	 * 1. Filter descriptors:
 +	 *    - For !doRedirect (unblocking), skip descriptors not currently redirected (idempotent).
-+	 *    - For doRedirect (blocking), process even already-redirected descriptors so changing
-+	 *      safeTask (e.g. taskA -> NULL) still revokes previously-exempted dynamic aliases.
++	 *    - For doRedirect (blocking), skip already-redirected descriptors with no mappings or
++	 *      matching (safeMap, el0MappingsGen) zero-alloc idempotently; otherwise reprocess so
++	 *      changing safeTask or newly-added mappings are revoked.
 +	 *    Pre-allocate iterators and touched capacity.
 +	 */
++	vm_map_t safeMap = safeTask ? get_task_map(safeTask) : VM_MAP_NULL;
 +	uint32_t totalMappings = 0;
 +	uint32_t activeDescCount = 0;
 +	for (uint32_t i = 0; i < count; i++) {
@@ -1244,10 +1256,24 @@ index cc2c1af..3d05088 100644
 +			needTransition[i] = false;
 +			continue;
 +		}
++		OSSet *mset = descs[i]->_mappings.get();
++		IOMemoryDescriptorReserved *r = descs[i]->reserved;
++		if (doRedirect && wasRedirected) {
++			if ((!mset || mset->getCount() == 0) ||
++			    (r != NULL && r->el0RedirectStateValid &&
++			     r->el0RedirectSafeMap == safeMap &&
++			     r->el0RedirectGen == r->el0MappingsGen)) {
++				needTransition[i] = false;
++				continue;
++			}
++		}
 +		needTransition[i] = true;
 +		activeDescCount++;
-+		OSSet *mset = descs[i]->_mappings.get();
 +		if (mset && mset->getCount() > 0) {
++			if (doRedirect && !descs[i]->getKernelReserved()) {
++				err = kIOReturnNoMemory;
++				break;
++			}
 +			uint32_t mc = mset->getCount();
 +			if (totalMappings > UINT32_MAX - mc) {
 +				err = kIOReturnNoMemory;
@@ -1498,6 +1524,9 @@ index cc2c1af..3d05088 100644
 +						}
 +					}
 +					descs[i]->_flags |= kIOMemoryRedirected;
++					if (descs[i]->reserved) {
++						descs[i]->reserved->el0RedirectStateValid = false;
++					}
 +				}
 +			}
 +		}
@@ -1512,8 +1541,17 @@ index cc2c1af..3d05088 100644
 +			}
 +			if (doRedirect) {
 +				descs[i]->_flags |= kIOMemoryRedirected;
++				if (descs[i]->reserved) {
++					descs[i]->reserved->el0RedirectSafeMap = safeMap;
++					descs[i]->reserved->el0RedirectGen = descs[i]->reserved->el0MappingsGen;
++					descs[i]->reserved->el0RedirectStateValid = true;
++				}
 +			} else {
 +				descs[i]->_flags &= ~kIOMemoryRedirected;
++				if (descs[i]->reserved) {
++					descs[i]->reserved->el0RedirectStateValid = false;
++					descs[i]->reserved->el0RedirectSafeMap = VM_MAP_NULL;
++				}
 +				IORecursiveLockWakeup( gIOMemoryLock, (void *)descs[i], false );
 +			}
 +		}
@@ -1573,11 +1611,10 @@ index cc2c1af..3d05088 100644
 +		LOCK;
 +
 +		do{
-+			if (!fAddress) {
+ 			if (!fAddress) {
  				break;
  			}
- 			if (!fAddressMap) {
-@@ -5776,26 +6561,31 @@ IOMemoryMap::redirect( task_t safeTask, bool doRedirect )
+@@ -5776,26 +6589,34 @@ IOMemoryMap::redirect( task_t safeTask, bool doRedirect )
  
  			if ((!safeTask || (get_task_map(safeTask) != fAddressMap))
  			    && (0 == (fOptions & kIOMapStatic))) {
@@ -1608,12 +1645,15 @@ index cc2c1af..3d05088 100644
 +		if (kIOReturnSuccess == err && kIOReturnSuccess != memErr) {
 +			err = memErr;
 +		}
++	} else if (!doRedirect && fMemory && !el0IsRedirecting(fMemory.get()) &&
++	    (fMemory->_flags & kIOMemoryRedirected) && fMemory->reserved) {
++		fMemory->reserved->el0RedirectStateValid = false;
  	}
 +	UNLOCK;
  
  	return err;
  }
-@@ -5865,9 +6655,56 @@ IOMemoryMap::taggedRelease(const void *tag) const
+@@ -5865,9 +6686,56 @@ IOMemoryMap::taggedRelease(const void *tag) const
  	super::taggedRelease(tag, 2);
  }
  
@@ -1670,7 +1710,7 @@ index cc2c1af..3d05088 100644
  	unmap();
  
  	if (fMemory) {
-@@ -5881,11 +6718,6 @@ IOMemoryMap::free()
+@@ -5881,11 +6749,6 @@ IOMemoryMap::free()
  		fSuperMap.reset();
  	}
  
@@ -1682,7 +1722,7 @@ index cc2c1af..3d05088 100644
  	super::free();
  }
  
-@@ -6125,6 +6957,10 @@ IOMemoryDescriptor::createMappingInTask(
+@@ -6125,6 +6988,10 @@ IOMemoryDescriptor::createMappingInTask(
  	IOMemoryMap * result;
  	IOMemoryMap * mapping;
  
@@ -1693,7 +1733,7 @@ index cc2c1af..3d05088 100644
  	if (0 == length) {
  		length = getLength();
  	}
-@@ -6184,17 +7020,33 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
+@@ -6184,17 +7051,33 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
  				physMem = fMemory;
  			}
  
@@ -1736,7 +1776,7 @@ index cc2c1af..3d05088 100644
  					IOUnmapPages( fAddressMap, fAddress, fLength );
  					if ((false)) {
  						physMem->redirect(NULL, true);
-@@ -6202,12 +7054,25 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
+@@ -6202,12 +7085,25 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
  				}
  			}
  
@@ -1763,7 +1803,7 @@ index cc2c1af..3d05088 100644
  						err = kIOReturnError;
  					}
  				}
-@@ -6215,6 +7080,36 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
+@@ -6215,6 +7111,36 @@ IOMemoryMap::redirect(IOMemoryDescriptor * newBackingMemory,
  					upl_commit(fRedirUPL, NULL, 0);
  					upl_deallocate(fRedirUPL);
  					fRedirUPL = NULL;
@@ -1800,7 +1840,7 @@ index cc2c1af..3d05088 100644
  				}
  				if ((false) && physMem) {
  					physMem->redirect(NULL, false);
-@@ -6247,6 +7142,9 @@ IOMemoryDescriptor::makeMapping(
+@@ -6247,6 +7173,9 @@ IOMemoryDescriptor::makeMapping(
  	__block IOMemoryMap * result  = NULL;
  
  	IOMemoryMap *  mapping = (IOMemoryMap *) __address;
@@ -1810,7 +1850,7 @@ index cc2c1af..3d05088 100644
  	mach_vm_size_t offset  = mapping->fOffset + __offset;
  	mach_vm_size_t length  = mapping->fLength;
  
-@@ -6272,12 +7170,24 @@ IOMemoryDescriptor::makeMapping(
+@@ -6272,12 +7201,24 @@ IOMemoryDescriptor::makeMapping(
  			    || ((_flags & kIOMemoryTypeMask) == kIOMemoryTypePhysical64)) {
  				phys = getPhysicalSegment(offset, &physLen, kIOMemoryMapperNone);
  				if (!phys || (physLen < length)) {
@@ -1835,7 +1875,7 @@ index cc2c1af..3d05088 100644
  					continue;
  				}
  				offset = 0;
-@@ -6315,6 +7225,8 @@ IOMemoryDescriptor::makeMapping(
+@@ -6315,6 +7256,8 @@ IOMemoryDescriptor::makeMapping(
  			result = mapping;
  			mapDesc->addMapping(result);
  			result->setMemoryDescriptor(mapDesc.get(), offset);
@@ -1844,7 +1884,17 @@ index cc2c1af..3d05088 100644
  		} else {
  			mapping->release();
  			mapping = NULL;
-@@ -6643,3 +7555,376 @@ _IOMemoryDescriptorMixedData::getLength() const
+@@ -6336,6 +7279,9 @@ IOMemoryDescriptor::addMapping(
+ 		}
+ 		if (_mappings) {
+ 			_mappings->setObject( mapping );
++			if (reserved) {
++				reserved->el0MappingsGen++;
++			}
+ 		}
+ 	}
+ }
+@@ -6643,3 +7589,376 @@ _IOMemoryDescriptorMixedData::getLength() const
  {
  	return _data ? _length : 0;
  }
@@ -2907,7 +2957,7 @@ index b65f76c..2d18613 100644
  		max_cpus_initialized = MAX_CPUS_WAIT;
  		lck_mtx_sleep(&max_cpus_lock, LCK_SLEEP_DEFAULT, &max_cpus_initialized, THREAD_UNINT);
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 79d0bc1..92a2386 100644
+index 79d0bc1..a61ca05 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -51,6 +51,7 @@
@@ -3566,7 +3616,7 @@ index 79d0bc1..92a2386 100644
  	return true;
  }
  
-@@ -5475,39 +5982,509 @@ pmap_protect(
+@@ -5475,39 +5982,563 @@ pmap_protect(
  	pmap_protect_options(pmap, b, e, prot, 0, NULL);
  }
  
@@ -3690,13 +3740,28 @@ index 79d0bc1..92a2386 100644
  
 -	if (__improbable((end < start) || (end > ((start + pt_attr_twig_size(pt_attr)) & ~pt_attr_twig_offmask(pt_attr))))) {
 -		panic("%s: invalid address range %p, %p", __func__, (void*)start, (void*)end);
++static struct pmap_el0_undo_chunk *
++el0_undo_chunk_alloc(void)
++{
++	return kalloc_type(struct pmap_el0_undo_chunk, Z_WAITOK);
++}
++
++static void
++el0_undo_chunk_free(struct pmap_el0_undo_chunk *c)
++{
++	if (c != NULL) {
++		kfree_type(struct pmap_el0_undo_chunk, c);
+ 	}
++}
+ 
+-#if DEVELOPMENT || DEBUG
 +void
 +pmap_el0_protect_undo_destroy(
 +	struct pmap_el0_protect_undo *undo)
 +{
 +	if (undo == NULL) {
 +		return;
- 	}
++	}
 +	el0_undo_unregister(undo);
 +	undo->capture_self_enter = false;
 +	undo->cap_start = 0;
@@ -3704,13 +3769,13 @@ index 79d0bc1..92a2386 100644
 +	struct pmap_el0_undo_chunk *c = undo->inline_chunk.next;
 +	while (c != NULL) {
 +		struct pmap_el0_undo_chunk *next = c->next;
-+		kfree_data(c, sizeof(*c));
++		el0_undo_chunk_free(c);
 +		c = next;
 +	}
 +	c = undo->spare_chunks;
 +	while (c != NULL) {
 +		struct pmap_el0_undo_chunk *next = c->next;
-+		kfree_data(c, sizeof(*c));
++		el0_undo_chunk_free(c);
 +		c = next;
 +	}
 +	undo->inline_chunk.next = NULL;
@@ -3726,10 +3791,7 @@ index 79d0bc1..92a2386 100644
 +	undo->rolling_back = false;
 +	undo->capture_overflow = false;
 +}
- 
--#if DEVELOPMENT || DEBUG
--	if (options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
--		if ((prot & VM_PROT_ALL) == VM_PROT_NONE) {
++
 +static bool
 +pmap_el0_protect_undo_reserve_chunks(
 +	struct pmap_el0_protect_undo *undo,
@@ -3759,11 +3821,11 @@ index 79d0bc1..92a2386 100644
 +	struct pmap_el0_undo_chunk *local_head = NULL;
 +	struct pmap_el0_undo_chunk *local_tail = NULL;
 +	for (uint32_t i = 0; i < need_chunks; i++) {
-+		struct pmap_el0_undo_chunk *nc = kalloc_data(sizeof(*nc), Z_WAITOK);
++		struct pmap_el0_undo_chunk *nc = el0_undo_chunk_alloc();
 +		if (nc == NULL) {
 +			while (local_head != NULL) {
 +				struct pmap_el0_undo_chunk *next = local_head->next;
-+				kfree_data(local_head, sizeof(*local_head));
++				el0_undo_chunk_free(local_head);
 +				local_head = next;
 +			}
 +			return false;
@@ -3829,6 +3891,46 @@ index 79d0bc1..92a2386 100644
 +	}
 +	undo->capture_self_enter = enable;
 +	pmap_simple_unlock(&el0_undo_list_lock);
++}
++
++void
++pmap_el0_protect_undo_begin_rollback(
++	struct pmap_el0_protect_undo *undo)
++{
++	if (undo == NULL) {
++		return;
++	}
++	pmap_simple_lock(&el0_undo_list_lock);
++	undo->capture_self_enter = false;
++	undo->cap_start = 0;
++	undo->cap_end = 0;
++	undo->rolling_back = true;
++	pmap_simple_unlock(&el0_undo_list_lock);
++}
++
++void
++pmap_el0_protect_undo_mark_self_rolling_back(void)
++{
++	if (os_atomic_load(&el0_active_undo_count, acquire) == 0) {
++		return;
++	}
++	thread_t self = current_thread();
++	pmap_simple_lock(&el0_undo_list_lock);
++	for (struct pmap_el0_protect_undo *u = el0_active_undos; u != NULL; u = u->active_next) {
++		if (u->owner == self && u->capture_self_enter && !u->rolling_back) {
++			u->capture_self_enter = false;
++			u->cap_start = 0;
++			u->cap_end = 0;
++			u->rolling_back = true;
++		}
++	}
++	pmap_simple_unlock(&el0_undo_list_lock);
++}
++
++bool
++pmap_el0_self_is_capturing_va(vm_map_address_t v)
++{
++	return el0_self_is_capturing_va(v);
 +}
 +
 +static void
@@ -4039,7 +4141,7 @@ index 79d0bc1..92a2386 100644
 +	unsigned int options)
 +{
 +#if DEVELOPMENT || DEBUG
-+	if (options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
+ 	if (options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
 +#else
 +	if (linux64_el0 && pmap == kernel_pmap && (options & PMAP_OPTIONS_PROTECT_IMMEDIATE)) {
 +#endif
@@ -4092,7 +4194,7 @@ index 79d0bc1..92a2386 100644
 +#else
 +	if (linux64_el0 && pmap == kernel_pmap && (options & PMAP_OPTIONS_PROTECT_IMMEDIATE)) {
 +#endif
-+		if ((prot & VM_PROT_ALL) == VM_PROT_NONE) {
+ 		if ((prot & VM_PROT_ALL) == VM_PROT_NONE) {
  			should_have_removed = TRUE;
  		}
  	} else
@@ -4100,7 +4202,7 @@ index 79d0bc1..92a2386 100644
  	{
  		/* Determine the new protection. */
  		switch (prot) {
-@@ -5516,6 +6493,9 @@ pmap_protect_options_internal(
+@@ -5516,6 +6547,9 @@ pmap_protect_options_internal(
  			break;
  		case VM_PROT_READ | VM_PROT_WRITE:
  		case VM_PROT_ALL:
@@ -4110,7 +4212,7 @@ index 79d0bc1..92a2386 100644
  			return end;         /* nothing to do */
  		case VM_PROT_EXECUTE:
  			set_XO = true;
-@@ -5570,9 +6550,7 @@ pmap_protect_options_internal(
+@@ -5570,9 +6604,7 @@ pmap_protect_options_internal(
  				break;
  			}
  			pt_entry_t spte;
@@ -4120,7 +4222,7 @@ index 79d0bc1..92a2386 100644
  
  			spte = *((volatile pt_entry_t*)pte_p);
  
-@@ -5613,6 +6591,10 @@ pmap_protect_options_internal(
+@@ -5613,6 +6645,10 @@ pmap_protect_options_internal(
  			pt_entry_t      tmplate;
  
  			if (pmap == kernel_pmap) {
@@ -4131,7 +4233,7 @@ index 79d0bc1..92a2386 100644
  #if DEVELOPMENT || DEBUG
  				if ((options & PMAP_OPTIONS_PROTECT_IMMEDIATE) && (prot & VM_PROT_WRITE)) {
  					force_write = TRUE;
-@@ -5654,14 +6636,63 @@ pmap_protect_options_internal(
+@@ -5654,14 +6690,63 @@ pmap_protect_options_internal(
  				} else {
  					/* do NOT clear "NX"! */
  					tmplate |= pt_attr_leaf_x(pt_attr);
@@ -4197,7 +4299,7 @@ index 79d0bc1..92a2386 100644
  			if (force_write) {
  				/*
  				 * TODO: Run CS/Monitor checks here.
-@@ -5673,7 +6704,6 @@ pmap_protect_options_internal(
+@@ -5673,7 +6758,6 @@ pmap_protect_options_internal(
  					 * referenced.
  					 */
  					ppattr_pa_set_bits(pa, PP_ATTR_REFERENCED | PP_ATTR_MODIFIED);
@@ -4205,7 +4307,7 @@ index 79d0bc1..92a2386 100644
  
  					if (ppattr_test_reffault(pai)) {
  						ppattr_clear_reffault(pai);
-@@ -5691,32 +6721,29 @@ pmap_protect_options_internal(
+@@ -5691,32 +6775,29 @@ pmap_protect_options_internal(
  				 */
  				if (managed) {
  					ppattr_pa_set_bits(pa, PP_ATTR_REFERENCED);
@@ -4247,7 +4349,7 @@ index 79d0bc1..92a2386 100644
  	} else {
  		va = end;
  	}
-@@ -5725,6 +6752,112 @@ pmap_protect_options_internal(
+@@ -5725,6 +6806,112 @@ pmap_protect_options_internal(
  	return va;
  }
  
@@ -4360,7 +4462,7 @@ index 79d0bc1..92a2386 100644
  void
  pmap_protect_options(
  	pmap_t pmap,
-@@ -5755,12 +6888,14 @@ pmap_protect_options(
+@@ -5755,12 +6942,14 @@ pmap_protect_options(
  
  #if DEVELOPMENT || DEBUG
  	if (options & PMAP_OPTIONS_PROTECT_IMMEDIATE) {
@@ -4376,7 +4478,7 @@ index 79d0bc1..92a2386 100644
  	{
  		/* Determine the new protection. */
  		switch (prot) {
-@@ -5845,6 +6980,14 @@ pmap_map_block(
+@@ -5845,6 +7034,14 @@ pmap_map_block(
   *
   * @return KERN_SUCCESS.
   */
@@ -4391,7 +4493,7 @@ index 79d0bc1..92a2386 100644
  kern_return_t
  pmap_map_block_addr(
  	pmap_t pmap,
-@@ -5862,8 +7005,43 @@ pmap_map_block_addr(
+@@ -5862,8 +7059,43 @@ pmap_map_block_addr(
  	const uint64_t pmap_page_size = PAGE_SIZE;
  #endif
  
@@ -4436,7 +4538,7 @@ index 79d0bc1..92a2386 100644
  			panic("%s: failed pmap_enter_addr, "
  			    "pmap=%p, va=%#llx, pa=%llu, size=%u, prot=%#x, flags=%#x",
  			    __FUNCTION__,
-@@ -5874,6 +7052,97 @@ pmap_map_block_addr(
+@@ -5874,6 +7106,97 @@ pmap_map_block_addr(
  		pa += pmap_page_size;
  	}
  
@@ -4462,7 +4564,7 @@ index 79d0bc1..92a2386 100644
 +			if (parent != NULL) {
 +				struct pmap_el0_undo_chunk *inline_copy = NULL;
 +				if (startup_phase >= STARTUP_SUB_ZALLOC) {
-+					inline_copy = kalloc_data(sizeof(*inline_copy), Z_WAITOK);
++					inline_copy = el0_undo_chunk_alloc();
 +				}
 +				if (inline_copy == NULL) {
 +					pmap_el0_protect_undo_rollback_ex(pmap, &block_undo, true);
@@ -4534,7 +4636,7 @@ index 79d0bc1..92a2386 100644
  	return KERN_SUCCESS;
  }
  
-@@ -5917,16 +7186,310 @@ pmap_enter(
+@@ -5917,16 +7240,310 @@ pmap_enter(
  	return pmap_enter_addr(pmap, v, ((pmap_paddr_t)pn) << PAGE_SHIFT, prot, fault_type, flags, wired);
  }
  
@@ -4846,7 +4948,7 @@ index 79d0bc1..92a2386 100644
  
  	__unreachable_ok_push
  	if (TEST_PAGE_RATIO_4) {
-@@ -5954,7 +7517,39 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
+@@ -5954,7 +7571,39 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
  	__unreachable_ok_pop
  
  	if (success && *old_pte != new_pte) {
@@ -4887,7 +4989,7 @@ index 79d0bc1..92a2386 100644
  
  		if (pte_is_valid(*old_pte)) {
  			bool need_strong_sync = false;
-@@ -6195,7 +7790,9 @@ pmap_construct_pte(
+@@ -6195,7 +7844,9 @@ pmap_construct_pte(
  				*pp_attr_bits |= PP_ATTR_REFERENCED;
  			}
  		} else {
@@ -4898,7 +5000,7 @@ index 79d0bc1..92a2386 100644
  				pte |= pt_attr_leaf_rona(pt_attr);
  			} else {
  				pte |= pt_attr_leaf_ro(pt_attr);
-@@ -6208,8 +7805,8 @@ pmap_construct_pte(
+@@ -6208,8 +7859,8 @@ pmap_construct_pte(
  	return pte;
  }
  
@@ -4909,7 +5011,7 @@ index 79d0bc1..92a2386 100644
  	pmap_t pmap,
  	vm_map_address_t v,
  	pmap_paddr_t pa,
-@@ -6217,7 +7814,10 @@ pmap_enter_options_internal(
+@@ -6217,7 +7868,10 @@ pmap_enter_options_internal(
  	vm_prot_t fault_type,
  	unsigned int flags,
  	boolean_t wired,
@@ -4921,7 +5023,7 @@ index 79d0bc1..92a2386 100644
  {
  	ppnum_t         pn = (ppnum_t)atop(pa);
  	pt_entry_t      pte;
-@@ -6228,7 +7828,8 @@ pmap_enter_options_internal(
+@@ -6228,7 +7882,8 @@ pmap_enter_options_internal(
  	bool            ro_va = false;
  	unsigned int    wimg_bits;
  	bool            committed = false, drop_refcnt = false, had_valid_mapping = false, skip_footprint_debit = false;
@@ -4931,7 +5033,7 @@ index 79d0bc1..92a2386 100644
  	kern_return_t   kr = KERN_SUCCESS;
  	uint16_t pp_attr_bits;
  	volatile uint16_t *refcnt;
-@@ -6309,18 +7910,26 @@ pmap_enter_options_internal(
+@@ -6309,18 +7964,26 @@ pmap_enter_options_internal(
  	 *	pmap is always expanded to include enough hardware
  	 *	pages to map one VM page.
  	 */
@@ -4967,7 +5069,7 @@ index 79d0bc1..92a2386 100644
  		}
  	}
  
-@@ -6373,6 +7982,27 @@ pmap_enter_options_internal(
+@@ -6373,6 +8036,27 @@ pmap_enter_options_internal(
  			}
  		}
  
@@ -4995,7 +5097,7 @@ index 79d0bc1..92a2386 100644
  		if (had_valid_mapping && (pte_to_pa(spte) != pa)) {
  			/*
  			 * There is already a mapping here & it's for a different physical page.
-@@ -6502,7 +8132,13 @@ pmap_enter_options_internal(
+@@ -6502,7 +8186,13 @@ pmap_enter_options_internal(
  #endif
  
  
@@ -5010,7 +5112,7 @@ index 79d0bc1..92a2386 100644
  			if (!committed) {
  				pvh_unlock(pai);
  				continue;
-@@ -6644,7 +8280,12 @@ pmap_enter_options_internal(
+@@ -6644,7 +8334,12 @@ pmap_enter_options_internal(
  			}
  #endif
  
@@ -5024,7 +5126,7 @@ index 79d0bc1..92a2386 100644
  			if (committed) {
  				had_valid_mapping = pte_is_valid(spte);
  				assert(!had_valid_mapping || (pte_to_pa(spte) == pa));
-@@ -6697,6 +8338,66 @@ pmap_enter_options_internal(
+@@ -6697,6 +8392,66 @@ pmap_enter_options_internal(
  	return kr;
  }
  
@@ -5091,7 +5193,7 @@ index 79d0bc1..92a2386 100644
  kern_return_t
  pmap_enter_options_addr(
  	pmap_t pmap,
-@@ -6828,6 +8529,9 @@ pmap_change_wiring_internal(
+@@ -6828,6 +8583,9 @@ pmap_change_wiring_internal(
  	}
  
  	assertf(pte_is_valid(*pte_p), "invalid pte %p (=0x%llx)", pte_p, (uint64_t)*pte_p);
@@ -5101,7 +5203,7 @@ index 79d0bc1..92a2386 100644
  	if (wired != pte_is_wired(*pte_p)) {
  		uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
  
-@@ -6972,6 +8676,366 @@ pmap_find_phys(
+@@ -6972,6 +8730,366 @@ pmap_find_phys(
   * @return The physical address if the translation was successful, or zero if
   *         no valid mappings were found for the given virtual address.
   */
@@ -5468,7 +5570,7 @@ index 79d0bc1..92a2386 100644
  pmap_paddr_t
  kvtophys(vm_offset_t va)
  {
-@@ -8173,17 +10237,29 @@ arm_force_fast_fault_with_flush_range(
+@@ -8173,17 +10291,29 @@ arm_force_fast_fault_with_flush_range(
  		assert(!pte_is_xs(pt_attr, spte));
  #endif /* HAS_FEAT_XS */
  		if ((allow_mode & VM_PROT_READ) != VM_PROT_READ) {
@@ -5504,7 +5606,7 @@ index 79d0bc1..92a2386 100644
  				}
  			} else {
  				if ((tmplate & ARM_PTE_APMASK) == pt_attr_leaf_rw(pt_attr)) {
-@@ -8220,6 +10296,7 @@ arm_force_fast_fault_with_flush_range(
+@@ -8220,6 +10350,7 @@ arm_force_fast_fault_with_flush_range(
  				}
  			}
  			write_pte_fast(pte_p, tmplate);
@@ -5512,7 +5614,7 @@ index 79d0bc1..92a2386 100644
  		}
  
  fff_skip_pve_pass1:
-@@ -8500,6 +10577,7 @@ arm_clear_fast_fault(
+@@ -8500,6 +10631,7 @@ arm_clear_fast_fault(
  				tlb_flush_needed = true;
  			}
  			write_pte_fast(pte_p, tmplate);
@@ -5520,7 +5622,7 @@ index 79d0bc1..92a2386 100644
  			result = TRUE;
  		}
  
-@@ -8935,6 +11013,19 @@ pmap_map_cpu_windows_copy_internal(
+@@ -8935,6 +11067,19 @@ pmap_map_cpu_windows_copy_internal(
  	need_strong_sync = pte_is_xs(native_pt_attr, pte);
  #endif
  	write_pte_fast(ptep, pte);
@@ -5540,7 +5642,7 @@ index 79d0bc1..92a2386 100644
  	/*
  	 * Invalidate tlb. Cover nested cpu_copywindow_vaddr usage with the interrupted context
  	 * in pmap_unmap_cpu_windows_copy() after clearing the pte and before tlb invalidate.
-@@ -8977,6 +11068,10 @@ pmap_unmap_cpu_windows_copy_internal(
+@@ -8977,6 +11122,10 @@ pmap_unmap_cpu_windows_copy_internal(
  	__builtin_arm_dsb(DSB_SY);
  	ptep = pmap_pte(kernel_pmap, cpu_copywindow_vaddr);
  	write_pte_strong(ptep, ARM_PTE_EMPTY);
@@ -5551,7 +5653,7 @@ index 79d0bc1..92a2386 100644
  	PMAP_UPDATE_TLBS(kernel_pmap, cpu_copywindow_vaddr, cpu_copywindow_vaddr + PAGE_SIZE, pmap_cpu_data->copywindow_strong_sync[index], true);
  }
  
-@@ -9159,6 +11254,11 @@ pmap_set_nested_internal(
+@@ -9159,6 +11308,11 @@ pmap_set_nested_internal(
  	}
  
  	pmap_get_pt_ops(pmap)->free_id(pmap);
@@ -5563,7 +5665,7 @@ index 79d0bc1..92a2386 100644
  }
  
  __mockable void
-@@ -9617,6 +11717,23 @@ pmap_sign_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
+@@ -9617,6 +11771,23 @@ pmap_sign_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
  		panic("attempt to sign user pointer without process independent key");
  	}
  
@@ -5587,7 +5689,7 @@ index 79d0bc1..92a2386 100644
  	void *res = NULL;
  	uint64_t current_intr_state = pmap_interrupts_disable();
  
-@@ -9655,6 +11772,23 @@ pmap_auth_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
+@@ -9655,6 +11826,23 @@ pmap_auth_user_ptr_internal(void *value, ptrauth_key key, uint64_t discriminator
  		panic("attempt to auth user pointer without process independent key");
  	}
  
@@ -5611,7 +5713,7 @@ index 79d0bc1..92a2386 100644
  	void *res = NULL;
  	uint64_t current_intr_state = pmap_interrupts_disable();
  
-@@ -10442,6 +12576,10 @@ unnest_subord_done:
+@@ -10442,6 +12630,10 @@ unnest_subord_done:
  	}
  
  	FLUSH_PTE_STRONG();
@@ -5622,7 +5724,7 @@ index 79d0bc1..92a2386 100644
  	PMAP_UPDATE_TLBS(grand, start, addr, false, false);
  
  	pmap_unlock(grand, PMAP_LOCK_EXCLUSIVE);
-@@ -11339,6 +13477,9 @@ pmap_update_cache_attributes_locked(
+@@ -11339,6 +13531,9 @@ pmap_update_cache_attributes_locked(
  		} else {
  			write_pte_fast(pte_p, tmplate);
  		}
@@ -5632,7 +5734,7 @@ index 79d0bc1..92a2386 100644
  		tlb_flush_needed = true;
  
  cache_skip_pve:
-@@ -12980,6 +15121,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
+@@ -12980,6 +15175,8 @@ pmap_user_va_bits(pmap_t pmap __unused)
  #if __ARM_MIXED_PAGE_SIZE__
  	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
  	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
@@ -5641,7 +5743,7 @@ index 79d0bc1..92a2386 100644
  #else
  	return 64 - T0SZ_BOOT;
  #endif
-@@ -14853,7 +16996,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+@@ -14853,7 +17050,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
  
  		/* Disable PAN; pmap shouldn't be the kernel pmap. */
  #if __ARM_PAN_AVAILABLE__
@@ -5652,7 +5754,7 @@ index 79d0bc1..92a2386 100644
  #endif /* __ARM_PAN_AVAILABLE__ */
  	}
  
-@@ -14872,7 +17017,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
+@@ -14872,7 +17071,9 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
  
  	if (pmap != NULL) {
  #if __ARM_PAN_AVAILABLE__
@@ -9159,10 +9261,10 @@ index 44b993c..4ce279b 100644
  
  	return 0;
 diff --git a/osfmk/vm/pmap.h b/osfmk/vm/pmap.h
-index 67ebd6a..c3500a6 100644
+index 67ebd6a..1c0eb74 100644
 --- a/osfmk/vm/pmap.h
 +++ b/osfmk/vm/pmap.h
-@@ -707,6 +707,99 @@ extern void             pmap_protect_options(   /* Change protections. */
+@@ -707,6 +707,104 @@ extern void             pmap_protect_options(   /* Change protections. */
  	unsigned int    options,
  	void            *arg);
  
@@ -9227,6 +9329,11 @@ index 67ebd6a..c3500a6 100644
 +	bool            enable,
 +	vm_map_address_t cap_start,
 +	vm_map_address_t cap_end);
++extern void             pmap_el0_protect_undo_begin_rollback(
++	struct pmap_el0_protect_undo *undo);
++extern void             pmap_el0_protect_undo_mark_self_rolling_back(void);
++extern bool             pmap_el0_self_is_capturing_va(
++	vm_map_address_t v);
 +extern void             pmap_el0_protect_undo_rollback(
 +	pmap_t          pmap,
 +	struct pmap_el0_protect_undo *undo);
@@ -9262,7 +9369,7 @@ index 67ebd6a..c3500a6 100644
  extern void(pmap_pageable)(
  	pmap_t          pmap,
  	vm_map_offset_t start,
-@@ -740,6 +833,17 @@ extern kern_return_t pmap_unnest_options(pmap_t,
+@@ -740,6 +838,17 @@ extern kern_return_t pmap_unnest_options(pmap_t,
      unsigned int);
  extern boolean_t pmap_adjust_unnest_parameters(pmap_t, vm_map_offset_t *, vm_map_offset_t *);
  extern void             pmap_advise_pagezero_range(pmap_t, uint64_t);
@@ -9281,10 +9388,44 @@ index 67ebd6a..c3500a6 100644
  
  extern boolean_t        pmap_is_noencrypt(ppnum_t);
 diff --git a/osfmk/vm/vm_fault.c b/osfmk/vm/vm_fault.c
-index 79f983b..2b60460 100644
+index 79f983b..d6921f8 100644
 --- a/osfmk/vm/vm_fault.c
 +++ b/osfmk/vm/vm_fault.c
-@@ -4178,11 +4178,20 @@ vm_fault_enter(
+@@ -1322,6 +1322,16 @@ vm_fault_page(
+ 						return VM_FAULT_INTERRUPTED;
+ 					}
+ 				}
++				if (fault_info != NULL && fault_info->fi_el0_no_cow &&
++				    (object->shadow != VM_OBJECT_NULL ||
++				     object->vo_copy != VM_OBJECT_NULL)) {
++					vm_fault_cleanup(object, first_m);
++					thread_interrupt_level(interruptible_state);
++					if (error_code != NULL) {
++						*error_code = KERN_NOT_SUPPORTED;
++					}
++					return VM_FAULT_MEMORY_ERROR;
++				}
+ 				continue;
+ 			}
+ 			if (m->vmp_laundry) {
+@@ -2405,6 +2415,16 @@ dont_look_for_page:
+ 			break;
+ 		}
+ 
++		if (fault_info != NULL && fault_info->fi_el0_no_cow) {
++			vm_fault_page_release_page(m, &clear_absent_on_error);
++			vm_fault_cleanup(object, first_m);
++			thread_interrupt_level(interruptible_state);
++			if (error_code != NULL) {
++				*error_code = KERN_NOT_SUPPORTED;
++			}
++			return VM_FAULT_MEMORY_ERROR;
++		}
++
+ 		/*
+ 		 * Try to get the lock on the copy_object.
+ 		 */
+@@ -4178,11 +4198,20 @@ vm_fault_enter(
  	int             pmap_options = fault_info->pmap_options;
  
  	assert(need_retry != NULL);
@@ -9305,7 +9446,7 @@ index 79f983b..2b60460 100644
  	fault_type = fault_info->fi_change_wiring ? VM_PROT_NONE : caller_prot;
  
  	assertf(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL, "m=%p", m);
-@@ -4191,6 +4200,9 @@ vm_fault_enter(
+@@ -4191,6 +4220,9 @@ vm_fault_enter(
  	    fault_info, type_of_fault, &page_needs_data_sync, page_needs_sleep);
  	object = VM_PAGE_OBJECT(m);
  
@@ -9315,7 +9456,7 @@ index 79f983b..2b60460 100644
  	vm_fault_enqueue_page(object, m, wired, fault_info->fi_change_wiring, wire_tag, fault_info->no_cache, type_of_fault, kr);
  
  	if (__probable((kr == KERN_SUCCESS) && !(*page_needs_sleep))) {
-@@ -4208,6 +4220,18 @@ vm_fault_enter(
+@@ -4208,6 +4240,18 @@ vm_fault_enter(
  		    &prot, caller_prot, fault_type, wired, pmap_options, need_retry, object_lock_type);
  	}
  
@@ -9334,7 +9475,7 @@ index 79f983b..2b60460 100644
  	return kr;
  }
  
-@@ -6738,7 +6762,8 @@ handle_copy_delay:
+@@ -6738,7 +6782,8 @@ handle_copy_delay:
  	 * while it holds the entry lock, so doing so in the reverse order here
  	 * could cause a deadlock.
  	 */
@@ -9344,7 +9485,7 @@ index 79f983b..2b60460 100644
  	    &retry_object, &entry, &retry_offset, &retry_prot, &wired,
  	    fault_info, &real_map, ctx, vml_ctx_for_vaddr,
  	    true /* try_lock_entry */);
-@@ -7112,13 +7137,20 @@ handle_copy_delay:
+@@ -7112,13 +7157,20 @@ handle_copy_delay:
  		 */
  		assert(!vm_should_override_mte_cacheattr(block_map_pmap, object, block_map_va, block_map_pa));
  #endif /* HAS_MTE */
@@ -9372,7 +9513,7 @@ index 79f983b..2b60460 100644
  
  		if (kr != KERN_SUCCESS) {
  			goto cleanup;
-@@ -7291,6 +7323,59 @@ vm_fault_wire_resident_pages(
+@@ -7291,6 +7343,63 @@ vm_fault_wire_resident_pages(
  	}
  
  	if (VME_OBJECT(entry)->phys_contiguous) {
@@ -9404,6 +9545,9 @@ index 79f983b..2b60460 100644
 +		    va += effective_page_size) {
 +			vm_map_offset_t cur_pmap_addr = pmap_addr + (va - entry->vme_start);
 +			if (!pmap_el0_kmap_pte_ready(pmap, cur_pmap_addr, prot)) {
++				extern unsigned int linux64_el0;
++				bool had_valid_before = (linux64_el0 && pmap == kernel_pmap) ?
++				    pmap_el0_kmap_pte_ready(pmap, cur_pmap_addr, VM_PROT_READ) : false;
 +				struct vm_object_fault_info fault_info = {
 +					.interruptible = THREAD_UNINT,
 +					.behavior = VM_BEHAVIOR_SEQUENTIAL,
@@ -9421,10 +9565,11 @@ index 79f983b..2b60460 100644
 +				if (rc != KERN_SUCCESS) {
 +					return rc;
 +				}
-+				extern unsigned int linux64_el0;
 +				if (linux64_el0 && pmap == kernel_pmap &&
 +				    !pmap_el0_kmap_pte_ready(pmap, cur_pmap_addr, prot)) {
-+					pmap_remove(pmap, cur_pmap_addr, cur_pmap_addr + effective_page_size);
++					if (!pmap_el0_self_is_capturing_va(cur_pmap_addr) && !had_valid_before) {
++						pmap_remove(pmap, cur_pmap_addr, cur_pmap_addr + effective_page_size);
++					}
 +					return KERN_NOT_SUPPORTED;
 +				}
 +			}
@@ -9432,18 +9577,21 @@ index 79f983b..2b60460 100644
  		return KERN_SUCCESS;
  	}
  
-@@ -7312,8 +7397,9 @@ vm_fault_wire_resident_pages(
+@@ -7312,8 +7421,12 @@ vm_fault_wire_resident_pages(
  	for (va = entry->vme_start;
  	    va < end_addr;
  	    va += effective_page_size) {
++		extern unsigned int linux64_el0;
 +		vm_map_offset_t cur_pmap_addr = pmap_addr + (va - entry->vme_start);
++		bool had_valid_before = (linux64_el0 && pmap == kernel_pmap) ?
++		    pmap_el0_kmap_pte_ready(pmap, cur_pmap_addr, VM_PROT_READ) : false;
  		rc = vm_fault_wire_fast(map, va, prot, wire_tag, entry, pmap,
 -		    pmap_addr + (va - entry->vme_start),
 +		    cur_pmap_addr,
  		    physpage_p);
  
  		if (rc != KERN_SUCCESS) {
-@@ -7327,8 +7413,7 @@ vm_fault_wire_resident_pages(
+@@ -7327,8 +7440,7 @@ vm_fault_wire_resident_pages(
  			}
  			rc = vm_fault_internal(map, va, prot, wire_tag,
  			    pmap,
@@ -9453,23 +9601,29 @@ index 79f983b..2b60460 100644
  			    physpage_p,
  			    &fault_info,
  			    vml_ctx);
-@@ -7343,6 +7428,15 @@ vm_fault_wire_resident_pages(
+@@ -7343,8 +7455,21 @@ vm_fault_wire_resident_pages(
  			DTRACE_VM2(softlock, int, 1, (uint64_t *), NULL);
  		}
  
 +		if (rc == KERN_SUCCESS) {
-+			extern unsigned int linux64_el0;
 +			if (linux64_el0 && pmap == kernel_pmap &&
 +			    !pmap_el0_kmap_pte_ready(pmap, cur_pmap_addr, prot)) {
-+				pmap_remove(pmap, cur_pmap_addr, cur_pmap_addr + effective_page_size);
++				if (!pmap_el0_self_is_capturing_va(cur_pmap_addr) && !had_valid_before) {
++					pmap_remove(pmap, cur_pmap_addr, cur_pmap_addr + effective_page_size);
++				}
 +				rc = KERN_NOT_SUPPORTED;
 +			}
 +		}
 +
  		if (rc != KERN_SUCCESS) {
  			vm_object_offset_t current_offset = va - entry->vme_start;
++			if (linux64_el0 && pmap == kernel_pmap) {
++				pmap_el0_protect_undo_mark_self_rolling_back();
++			}
  			/*
-@@ -7361,6 +7455,59 @@ vm_fault_wire_resident_pages(
+ 			 * fault_unwire the pages we've fault_wired.
+ 			 * regularly unwire the pages we haven't.
+@@ -7361,6 +7486,58 @@ vm_fault_wire_resident_pages(
  	return KERN_SUCCESS;
  }
  
@@ -9519,7 +9673,6 @@ index 79f983b..2b60460 100644
 +			}
 +		}
 +		if (pmap == kernel_pmap && !pmap_el0_kmap_pte_ready(pmap, va, prot)) {
-+			pmap_remove(pmap, va, va + effective_page_size);
 +			return KERN_NOT_SUPPORTED;
 +		}
 +	}
@@ -9529,7 +9682,7 @@ index 79f983b..2b60460 100644
  /*
   * For this to happen, the object likely was shrunk during the call to vm_wire
   */
-@@ -7393,14 +7540,15 @@ __vm_fault_wire_object_offset_oob_panic(
+@@ -7393,14 +7570,15 @@ __vm_fault_wire_object_offset_oob_panic(
   * @param tag           the tag the wiring should be billed to
   * @param interruptible the interruptibility of the wiring
   */
@@ -9548,7 +9701,19 @@ index 79f983b..2b60460 100644
  {
  	vm_page_t               page;
  	vm_page_t               top_page;
-@@ -7436,6 +7584,14 @@ vm_fault_wire_object_pages(
+@@ -7422,9 +7600,11 @@ vm_fault_wire_object_pages(
+ 	fault_info.hi_offset = fault_info.lo_offset + wire_size;
+ 	fault_info.stealth = TRUE;
+ 	fault_info.fi_change_wiring = TRUE;
++	fault_info.fi_el0_no_cow = reject_cow_or_copy;
+ 
+ 
+ 	do { /* while (amount_left > 0) */
++		error = 0;
+ 		prot = VM_PROT_WRITE | VM_PROT_READ;
+ 
+ 		/* cap cluster size at maximum UPL size */
+@@ -7436,6 +7616,14 @@ vm_fault_wire_object_pages(
  
  		vm_page_grab_prime();
  		vm_object_lock(object);
@@ -9563,7 +9728,40 @@ index 79f983b..2b60460 100644
  		if (object->internal && start_offset + wire_size > object->vo_size) {
  			__vm_fault_wire_object_offset_oob_panic(map, object,
  			    offset, wire_size, object->vo_size);
-@@ -7544,10 +7700,34 @@ vm_fault_wire_object_pages(
+@@ -7489,6 +7677,12 @@ vm_fault_wire_object_pages(
+ 			vm_object_unlock(object);
+ 			OS_FALLTHROUGH;
+ 		case VM_FAULT_MEMORY_ERROR:
++			if (reject_cow_or_copy && error == KERN_NOT_SUPPORTED) {
++				if (wire_size > amount_left) {
++					vm_fault_unwire_object_pages(map, object, start_offset, wire_size - amount_left);
++				}
++				return KERN_NOT_SUPPORTED;
++			}
+ 			/*
+ 			 * We may have gotten this due to a guard page. We allow
+ 			 * "wiring" of guard pages under the assumption they will
+@@ -7526,6 +7720,19 @@ vm_fault_wire_object_pages(
+ 		assert(object == VM_PAGE_OBJECT(page));
+ 
+ 		vm_page_lockspin_queues();
++		if (reject_cow_or_copy && page->vmp_wire_count >= MAX_WIRE_COUNT) {
++			vm_page_unlock_queues();
++			vm_page_wakeup_done(object, page);
++			if (top_page != VM_PAGE_NULL) {
++				VM_PAGE_FREE(top_page);
++			}
++			vm_object_paging_end(object);
++			vm_object_unlock(object);
++			if (wire_size > amount_left) {
++				vm_fault_unwire_object_pages(map, object, start_offset, wire_size - amount_left);
++			}
++			return KERN_RESOURCE_SHORTAGE;
++		}
+ 		vm_page_wire(page, tag, TRUE);
+ 		vm_page_unlock_queues();
+ 		vm_page_wakeup_done(object, page);
+@@ -7544,10 +7751,34 @@ vm_fault_wire_object_pages(
  	return KERN_SUCCESS;
  }
  
@@ -9579,10 +9777,7 @@ index 79f983b..2b60460 100644
 +	return vm_fault_wire_object_pages_internal(map, object, offset,
 +	    wire_size, tag, interruptible, false);
 +}
- 
--/*!
-- * @abstract
-- * Find a page to later be unwired
++
 +kern_return_t
 +vm_fault_wire_object_pages_no_cow(
 +	vm_map_t                map,
@@ -9595,7 +9790,10 @@ index 79f983b..2b60460 100644
 +	return vm_fault_wire_object_pages_internal(map, object, offset,
 +	    wire_size, tag, interruptible, true);
 +}
-+
+ 
+-/*!
+- * @abstract
+- * Find a page to later be unwired
 +/*
 + * Helper for vm_fault_unwire. Finds the page to unwire at fault_offset.
   * a vm_page_wakeup_done(object, page) and a vm_fault_cleanup(object, top_page)
@@ -9803,7 +10001,7 @@ index 4f2045c..a72ac7c 100644
  	/*
  	 * Finally, give any remaining allocable space to the data region.
 diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
-index fd9e108..b245099 100644
+index fd9e108..389284f 100644
 --- a/osfmk/vm/vm_map.c
 +++ b/osfmk/vm/vm_map.c
 @@ -74,6 +74,7 @@
@@ -11253,7 +11451,7 @@ index fd9e108..b245099 100644
  			/* reserve a contiguous range */
  			kr = vm_map_enter(target_map,
  			    &map_addr,
-@@ -5797,6 +6929,85 @@ vm_map_protect_preflight(
+@@ -5797,6 +6929,93 @@ vm_map_protect_preflight(
   *	specified, the maximum protection is to be set;
   *	otherwise, only the current protection is affected.
   */
@@ -11279,6 +11477,7 @@ index fd9e108..b245099 100644
 +	bool need_populate;
 +	bool added_autowire;
 +	bool obj_wired;
++	bool prewire_pinned;
 +};
 +
 +static bool
@@ -11328,6 +11527,13 @@ index fd9e108..b245099 100644
 +			    p->entry_end - p->entry_start);
 +			p->obj_wired = false;
 +		}
++		if (p->prewire_pinned && p->object != VM_OBJECT_NULL) {
++			vm_object_lock(p->object);
++			assert(p->object->vo_el0_prewire_count > 0);
++			p->object->vo_el0_prewire_count--;
++			vm_object_unlock(p->object);
++			p->prewire_pinned = false;
++		}
 +		if (p->object != VM_OBJECT_NULL) {
 +			vm_object_deallocate(p->object);
 +			p->object = VM_OBJECT_NULL;
@@ -11339,7 +11545,19 @@ index fd9e108..b245099 100644
  kern_return_t
  vm_map_protect(
  	vm_map_t                original_map,
-@@ -5906,10 +7117,23 @@ vm_map_protect(
+@@ -5829,6 +7048,11 @@ vm_map_protect(
+ 	}
+ 
+ 	if (new_prot & VM_PROT_COPY) {
++		extern unsigned int linux64_el0;
++		if (linux64_el0 && original_map->pmap == kernel_pmap) {
++			vmlp_api_end(VM_MAP_PROTECT, KERN_NOT_SUPPORTED);
++			return KERN_NOT_SUPPORTED;
++		}
+ 		vm_map_offset_t         new_start;
+ 		vm_prot_t               cur_prot, max_prot;
+ 		vm_map_kernel_flags_t   kflags;
+@@ -5906,10 +7130,23 @@ vm_map_protect(
  
  	vmlp_range_event(original_map, start, end - start);
  
@@ -11363,7 +11581,7 @@ index fd9e108..b245099 100644
  		vmlp_api_end(VM_MAP_PROTECT, KERN_INVALID_ADDRESS);
  		return KERN_INVALID_ADDRESS;
  	}
-@@ -5921,10 +7145,12 @@ vm_map_protect(
+@@ -5921,10 +7158,12 @@ vm_map_protect(
  	entry = vm_map_lookup(original_map, start);
  	if (entry == VM_MAP_ENTRY_NULL) {
  		vm_map_ilk_unlock(original_map);
@@ -11377,7 +11595,7 @@ index fd9e108..b245099 100644
  		if ((start & (SUPERPAGE_SIZE - 1))) { /* extend request to whole entry */
  			start = SUPERPAGE_ROUND_DOWN(start);
  		}
-@@ -5943,32 +7169,320 @@ vm_map_protect(
+@@ -5943,30 +7182,327 @@ vm_map_protect(
  	kr = vm_map_range_ex_lock(ctx, &original_map, start, end,
  	    VMRL_EX_ATOMIC | VMRL_EX_ILK_LOCKED | VMRL_EX_SIMPLIFY | VMRL_EX_NO_MIN_MAX_CHECK);
  	if (KERN_SUCCESS != kr) {
@@ -11411,8 +11629,6 @@ index fd9e108..b245099 100644
 -			    (get_bsdtask_info(current_task())
 -			    ? proc_name_address(get_bsdtask_info(current_task()))
 -			    : "?"),
--			    __FUNCTION__,
--			    (uint64_t)start,
 +	if (el0_is_kmap) {
 +		bool had_prewired = (el0_prewire_count > 0);
 +		bool prewire_mismatch = false;
@@ -11590,6 +11806,15 @@ index fd9e108..b245099 100644
 +			for (uint32_t i = 0; i < el0_prewire_count; i++) {
 +				struct el0_protect_entry_rec *p = &el0_prewire[i];
 +				vm_map_size_t plen = p->entry_end - p->entry_start;
++				vm_object_lock(p->object);
++				if (p->object->vo_el0_prewire_count == UINT32_MAX) {
++					vm_object_unlock(p->object);
++					stage1_kr = KERN_RESOURCE_SHORTAGE;
++					break;
++				}
++				p->object->vo_el0_prewire_count++;
++				vm_object_unlock(p->object);
++				p->prewire_pinned = true;
 +				stage1_kr = vm_fault_wire_object_pages_no_cow(p->cur_map, p->object,
 +				    p->offset, plen, p->wire_tag, THREAD_UNINT);
 +				if (stage1_kr != KERN_SUCCESS) {
@@ -11713,12 +11938,10 @@ index fd9e108..b245099 100644
 +			    (get_bsdtask_info(current_task())
 +			    ? proc_name_address(get_bsdtask_info(current_task()))
 +			    : "?"),
-+			    __FUNCTION__,
-+			    (uint64_t)start,
+ 			    __FUNCTION__,
+ 			    (uint64_t)start,
  			    (uint64_t)end,
- 			    new_prot,
- 			    cur_map, entry,
-@@ -5985,6 +7499,7 @@ vm_map_protect(
+@@ -5985,6 +7521,7 @@ vm_map_protect(
  		}
  
  		old_prot = entry->protection;
@@ -11726,7 +11949,7 @@ index fd9e108..b245099 100644
  
  		if (set_max) {
  			entry->max_protection = new_prot;
-@@ -6041,15 +7556,84 @@ vm_map_protect(
+@@ -6041,15 +7578,84 @@ vm_map_protect(
  		 *	write-protect fault occurred, it will be fixed up
  		 *	properly, COW or not.
  		 */
@@ -11812,7 +12035,7 @@ index fd9e108..b245099 100644
  				prot &= ~VM_PROT_WRITE;
  			} else {
  				assert(!VME_OBJECT(entry)->code_signed);
-@@ -6063,7 +7647,7 @@ vm_map_protect(
+@@ -6063,7 +7669,7 @@ vm_map_protect(
  					 * attempt to access the mapping
  					 * next.
  					 */
@@ -11821,7 +12044,7 @@ index fd9e108..b245099 100644
  				}
  			}
  
-@@ -6102,23 +7686,221 @@ vm_map_protect(
+@@ -6102,23 +7708,227 @@ vm_map_protect(
  				prot = VM_PROT_NONE;
  			}
  
@@ -12001,6 +12224,9 @@ index fd9e108..b245099 100644
 +	}
 +
 +	if (protect_kr != KERN_SUCCESS) {
++		if (el0_is_kmap) {
++			pmap_el0_protect_undo_begin_rollback(&el0_undo_ptes);
++		}
 +		for (uint32_t i = el0_entry_count; i > 0; i--) {
 +			struct el0_protect_entry_rec *rec = &el0_entries[i - 1];
 +			if (rec->added_autowire) {
@@ -12010,7 +12236,7 @@ index fd9e108..b245099 100644
 +					vm_fault_unwire(rec->cur_map, rec->entry, false, rec->cur_map->pmap,
 +					    rec->entry->vme_start, rec->entry->vme_end);
 +				}
- 			}
++			}
 +			rec->entry->protection = rec->old_prot;
 +			rec->entry->max_protection = rec->old_max_prot;
 +		}
@@ -12025,6 +12251,9 @@ index fd9e108..b245099 100644
 +	}
 +
 +	/* Commit irreversible unwire/remove only after all protects and populates succeeded */
++	if (el0_is_kmap) {
++		pmap_el0_protect_undo_begin_rollback(&el0_undo_ptes);
++	}
 +	for (uint32_t i = 0; i < el0_entry_count; i++) {
 +		struct el0_protect_entry_rec *rec = &el0_entries[i];
 +		if (rec->need_unwire) {
@@ -12033,11 +12262,11 @@ index fd9e108..b245099 100644
 +				rec->entry->zero_wired_pages = FALSE;
 +				vm_fault_unwire(rec->cur_map, rec->entry, false, rec->cur_map->pmap,
 +				    rec->entry->vme_start, rec->entry->vme_end);
-+			}
-+		}
+ 			}
+ 		}
 +		if (rec->need_remove) {
 +			pmap_remove_options(rec->cur_map->pmap, rec->entry->vme_start, rec->entry->vme_end, rec->pmap_options);
- 		}
++		}
  	}
  
 +	pmap_el0_protect_undo_destroy(&el0_undo_ptes);
@@ -12048,7 +12277,7 @@ index fd9e108..b245099 100644
  
  	vmlp_api_end(VM_MAP_PROTECT, KERN_SUCCESS);
  	return KERN_SUCCESS;
-@@ -6457,11 +8239,11 @@ vm_map_wire_count_sub(vm_map_t map, vm_map_entry_t entry, bool user_wire)
+@@ -6457,11 +8267,11 @@ vm_map_wire_count_sub(vm_map_t map, vm_map_entry_t entry, bool user_wire)
  
  	entry->wired_count--;
  	vme_btref_consider_and_put(entry);
@@ -12062,7 +12291,7 @@ index fd9e108..b245099 100644
  		 *
  		 * Also wakeup if the wire count is less than one.
  		 */
-@@ -6753,9 +8535,12 @@ vm_map_wire_stabilize_entry_object(vm_map_t map, vm_map_entry_t entry)
+@@ -6753,9 +8563,12 @@ vm_map_wire_stabilize_entry_object(vm_map_t map, vm_map_entry_t entry)
   * NOT_WIRED: nothing about the entry is wired.
   */
  __enum_decl(vm_wire_state_t, unsigned char, {
@@ -12078,7 +12307,7 @@ index fd9e108..b245099 100644
  });
  
  /*
-@@ -6773,6 +8558,7 @@ typedef struct wire_copy_node {
+@@ -6773,6 +8586,7 @@ typedef struct wire_copy_node {
  	vm_wire_state_t                 wire_state;
  	bool                            is_sub_map;
  	vm_object_t                     object;
@@ -12086,7 +12315,7 @@ index fd9e108..b245099 100644
  } *wire_copy_list_t;
  
  
-@@ -6970,11 +8756,57 @@ vm_map_wire_sanitize(
+@@ -6970,11 +8784,57 @@ vm_map_wire_sanitize(
   * return KERN_SUCCESS if the preflight was successful
   * otherwise, the preflight of space failed and we cannot wire the entry.
   */
@@ -12144,7 +12373,7 @@ index fd9e108..b245099 100644
  	struct wire_copy_list_head     *copy_list,
  	vm_map_size_t                  * const size_that_would_be_wired)
  {
-@@ -6988,7 +8820,30 @@ vm_map_wire_copy_entry_and_preflight_space(
+@@ -6988,7 +8848,30 @@ vm_map_wire_copy_entry_and_preflight_space(
  	 * Also increment the wire count.
  	 */
  	bool entry_already_wired = entry->wired_count != 0;
@@ -12176,7 +12405,7 @@ index fd9e108..b245099 100644
  		kr = vm_map_wire_count_add(map, entry, user_wire);
  		if (kr != KERN_SUCCESS) {
  			kfree_type(struct wire_copy_node, wire_copy);
-@@ -7008,12 +8863,13 @@ vm_map_wire_copy_entry_and_preflight_space(
+@@ -7008,12 +8891,13 @@ vm_map_wire_copy_entry_and_preflight_space(
  	wire_copy->end = entry->vme_end;
  	wire_copy->offset = VME_OFFSET(entry);
  	wire_copy->is_sub_map = entry->is_sub_map;
@@ -12191,7 +12420,7 @@ index fd9e108..b245099 100644
  		wire_copy->object = VM_OBJECT_NULL;
  	} else {
  		wire_copy->object = VME_OBJECT(entry);
-@@ -7055,8 +8911,8 @@ int wire_restarts_due_to_kernel_wiring;
+@@ -7055,8 +8939,8 @@ int wire_restarts_due_to_kernel_wiring;
   * @param prot_u - the protections the entry must have. A mapping with all
   * the protections of the corresponding entry will still be entered into the pmap.
   */
@@ -12202,7 +12431,7 @@ index fd9e108..b245099 100644
  	vm_map_t                original_map,
  	vm_map_offset_ut        start_u,
  	vm_map_offset_ut        end_u,
-@@ -7064,7 +8920,8 @@ vm_map_wire_impl(
+@@ -7064,7 +8948,8 @@ vm_map_wire_impl(
  	vm_tag_t                tag,
  	boolean_t               user_wire,
  	ppnum_t                *physpage_p,
@@ -12212,7 +12441,7 @@ index fd9e108..b245099 100644
  {
  	/*
  	 * original_map is the map passed in by the caller.
-@@ -7134,7 +8991,7 @@ restart:
+@@ -7134,7 +9019,7 @@ restart:
  		};
  	} else {
  		ctx->vmlc_preflight = ^kern_return_t (vm_map_lock_ctx_t vctx, vm_map_entry_t vme) {
@@ -12221,7 +12450,7 @@ index fd9e108..b245099 100644
  		};
  	}
  
-@@ -7190,7 +9047,8 @@ restart:
+@@ -7190,7 +9075,8 @@ restart:
  		 * NOT_WIRED if the entry wasn't previously wired.
  		 */
  		kr = vm_map_wire_copy_entry_and_preflight_space(cur_map,
@@ -12231,7 +12460,7 @@ index fd9e108..b245099 100644
  		if (kr != KERN_SUCCESS) {
  			vm_map_range_ex_unlock(ctx, &original_map);
  
-@@ -7206,8 +9064,11 @@ restart:
+@@ -7206,8 +9092,11 @@ restart:
  	 * To do this, wire all the pages in our copies.
  	 */
  	TAILQ_FOREACH(cur_copy, &copy_list, chain) {
@@ -12245,7 +12474,7 @@ index fd9e108..b245099 100644
  			continue;
  		}
  
-@@ -7261,223 +9122,902 @@ restart:
+@@ -7261,223 +9150,902 @@ restart:
  
  		assert(cur_copy->wire_state != NOT_WIRED);
  
@@ -12331,13 +12560,13 @@ index fd9e108..b245099 100644
 +				if (el0_autowire &&
 +				    (!(entry->protection & (VM_PROT_READ | VM_PROT_WRITE)) ||
 +				    el0_entry_unpopulated_device_pager(entry))) {
-+					vm_fault_unwire_object_pages(cur_map, cur_copy->object,
-+					    cur_copy->offset, cur_copy->end - cur_copy->start);
-+					cur_copy->wire_state = ALREADY_AUTOWIRED;
-+				} else if (el0_autowire && entry->vme_el0_autowire) {
  					vm_fault_unwire_object_pages(cur_map, cur_copy->object,
  					    cur_copy->offset, cur_copy->end - cur_copy->start);
 -					cur_copy->wire_state = NOT_WIRED;
++					cur_copy->wire_state = ALREADY_AUTOWIRED;
++				} else if (el0_autowire && entry->vme_el0_autowire) {
++					vm_fault_unwire_object_pages(cur_map, cur_copy->object,
++					    cur_copy->offset, cur_copy->end - cur_copy->start);
 +					cur_copy->wire_state = ALREADY_AUTOWIRED;
 +					if (el0_entry_missing_pte(cur_map, entry)) {
 +						vm_prot_t res_prot = entry->protection & (VM_PROT_READ | VM_PROT_WRITE);
@@ -13342,7 +13571,7 @@ index fd9e108..b245099 100644
  static __attribute__((always_inline, warn_unused_result))
  kern_return_t
  vm_map_unwire_sanitize(
-@@ -8344,10 +10884,14 @@ vm_map_delete_preflight(
+@@ -8344,10 +10912,14 @@ vm_map_delete_preflight(
  
  		if (vmrl_is_kernel_pmap(ctx)) {
  			assert(entry->user_wired_count == 0);
@@ -13358,7 +13587,7 @@ index fd9e108..b245099 100644
  				wired_count -= 1;
  			}
  		} else {
-@@ -8369,8 +10913,29 @@ vm_map_delete_preflight(
+@@ -8369,8 +10941,29 @@ vm_map_delete_preflight(
  }
  
  static void
@@ -13390,7 +13619,7 @@ index fd9e108..b245099 100644
  	if (entry->user_wired_count) {
  		/*
  		 * Collapse the wire count to 1, which will cause
-@@ -8379,7 +10944,12 @@ vm_map_delete_handle_wired(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags
+@@ -8379,7 +10972,12 @@ vm_map_delete_handle_wired(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags
  		entry->user_wired_count = 1;
  	}
  
@@ -13404,7 +13633,7 @@ index fd9e108..b245099 100644
  		vm_map_wire_count_sub(map, entry, entry->user_wired_count != 0);
  	}
  
-@@ -8518,7 +11088,8 @@ vm_map_delete_handle_entry(
+@@ -8518,7 +11116,8 @@ vm_map_delete_handle_entry(
  	vm_map_t                map,
  	vm_map_entry_t          entry,
  	vm_map_entry_t          sentinel,
@@ -13414,7 +13643,7 @@ index fd9e108..b245099 100644
  {
  	vm_map_offset_t e_start = entry->vme_start;
  	vm_map_offset_t e_end   = entry->vme_end;
-@@ -8529,7 +11100,7 @@ vm_map_delete_handle_entry(
+@@ -8529,7 +11128,7 @@ vm_map_delete_handle_entry(
  	 */
  
  	if (entry->wired_count) {
@@ -13423,7 +13652,7 @@ index fd9e108..b245099 100644
  	}
  
  	/*
-@@ -8799,12 +11370,61 @@ vm_map_delete_and_iunlock_internal(
+@@ -8799,12 +11398,61 @@ vm_map_delete_and_iunlock_internal(
  		kr = KERN_SUCCESS;
  	}
  	if (kr == KERN_SUCCESS) {
@@ -13485,7 +13714,7 @@ index fd9e108..b245099 100644
  		while ((entry = vm_map_range_ex_pop_with_error(ctx, &kr))) {
  			if (vm_map_lock_ctx_is_descended(ctx)) {
  				/*
-@@ -8814,7 +11434,12 @@ vm_map_delete_and_iunlock_internal(
+@@ -8814,7 +11462,12 @@ vm_map_delete_and_iunlock_internal(
  				 */
  				panic("Attempt to delete through transparent submap.");
  			}
@@ -13499,7 +13728,7 @@ index fd9e108..b245099 100644
  				if (ctx->vmlc_map != orig_map) {
  					/*
  					 * wait_for_space wakeup below does not
-@@ -9002,7 +11627,7 @@ vm_map_remove_entry(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags)
+@@ -9002,7 +11655,7 @@ vm_map_remove_entry(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags)
  	VM_ENTRY_ASSERT_EXCL_OWNER(entry);
  	assert(!entry->vme_permanent);
  
@@ -13508,7 +13737,7 @@ index fd9e108..b245099 100644
  }
  
  kern_return_t
-@@ -10547,6 +13172,14 @@ vm_map_copyout_kernel_buffer(
+@@ -10547,6 +13200,14 @@ vm_map_copyout_kernel_buffer(
  		if (kr != KERN_SUCCESS) {
  			return kr;
  		}
@@ -13523,7 +13752,7 @@ index fd9e108..b245099 100644
  #if KASAN
  		if (map->pmap == kernel_pmap) {
  			kasan_notify_address(*addr, copy->size);
-@@ -10904,7 +13537,8 @@ vm_map_copyout_internal(
+@@ -10904,7 +13565,8 @@ vm_map_copyout_internal(
  	}
  
  	adjustment = vmsr_start(rsv) - vm_copy_start;
@@ -13533,7 +13762,7 @@ index fd9e108..b245099 100644
  		/*
  		 * We're not allowed to consume "copy", so we'll have to
  		 * copy its map entries into the destination map below.
-@@ -11071,7 +13705,7 @@ after_adjustments:
+@@ -11071,7 +13733,7 @@ after_adjustments:
  	 *	Link in the copy
  	 */
  
@@ -13542,7 +13771,7 @@ index fd9e108..b245099 100644
  		vm_map_copy_insert(dst_map, copy, rsv, vmk_flags);
  		if (copy != original_copy) {
  			/* the copy discarded in vm_map_copy_insert() might have been one which
-@@ -11081,8 +13715,11 @@ after_adjustments:
+@@ -11081,8 +13743,11 @@ after_adjustments:
  		}
  	} else {
  		vm_map_copy_remap(dst_map, copy, rsv, vmk_flags,
@@ -13556,7 +13785,7 @@ index fd9e108..b245099 100644
  			/* if vm_map_copy_adjust_to_target() created a local copy, free it now */
  			vm_map_copy_discard(copy);
  			copy = original_copy;
-@@ -11091,6 +13728,26 @@ after_adjustments:
+@@ -11091,6 +13756,26 @@ after_adjustments:
  
  
  	vm_map_ilk_unlock(dst_map);
@@ -13583,7 +13812,7 @@ index fd9e108..b245099 100644
  	vmlp_api_end(VM_MAP_COPYOUT_INTERNAL, KERN_SUCCESS);
  
  	return KERN_SUCCESS;
-@@ -17283,6 +19940,11 @@ vm_map_remap(
+@@ -17283,6 +19968,11 @@ vm_map_remap(
  		max_protection = VM_PROT_READ;
  	}
  
@@ -13712,10 +13941,18 @@ index a92c3c0..fb96ef2 100644
  		*object_handle = IP_NULL;
  	}
 diff --git a/osfmk/vm/vm_object.c b/osfmk/vm/vm_object.c
-index da261ba..ed44d2a 100644
+index da261ba..f385041 100644
 --- a/osfmk/vm/vm_object.c
 +++ b/osfmk/vm/vm_object.c
-@@ -333,6 +333,7 @@ static const struct vm_object vm_object_template = {
+@@ -303,6 +303,7 @@ static const struct vm_object vm_object_template = {
+ 	.vo_copy = VM_OBJECT_NULL,
+ 	.vo_copy_version = 0,
+ 	.vo_inherit_copy_none = false,
++	.vo_el0_prewire_count = 0,
+ 	.shadow = VM_OBJECT_NULL,
+ 	.vo_shadow_offset = (vm_object_offset_t) 0,
+ 	.pager = MEMORY_OBJECT_NULL,
+@@ -333,6 +334,7 @@ static const struct vm_object vm_object_template = {
  	.named = FALSE,
  	.shadow_severed = FALSE,
  	.phys_contiguous = FALSE,
@@ -13723,7 +13960,7 @@ index da261ba..ed44d2a 100644
  	.nophyscache = FALSE,
  	/* End bitfields */
  
-@@ -5842,12 +5843,20 @@ vm_object_populate_with_private(
+@@ -5842,12 +5844,20 @@ vm_object_populate_with_private(
  
  		/* shadows on contiguous memory are not allowed */
  		/* we therefore can use the offset field */
@@ -13745,7 +13982,33 @@ index da261ba..ed44d2a 100644
  	vm_object_unlock(object);
  
  	return KERN_SUCCESS;
-@@ -6805,6 +6814,7 @@ MACRO_END
+@@ -6626,6 +6636,7 @@ vm_object_transpose(
+ 	object1_locked = TRUE;
+ 	if (!object1->alive || object1->terminating ||
+ 	    object1->vo_copy || object1->shadow || object1->shadowed ||
++	    object1->vo_el0_prewire_count != 0 ||
+ 	    object1->purgable != VM_PURGABLE_DENY) {
+ 		/*
+ 		 * We don't deal with copy or shadow objects (yet).
+@@ -6655,12 +6666,17 @@ vm_object_transpose(
+ 	object2_locked = TRUE;
+ 	if (!object2->alive || object2->terminating ||
+ 	    object2->vo_copy || object2->shadow || object2->shadowed ||
++	    object2->vo_el0_prewire_count != 0 ||
+ 	    object2->purgable != VM_PURGABLE_DENY) {
+ 		retval = KERN_INVALID_VALUE;
+ 		goto done;
+ 	}
+ 	vm_object_paging_only_wait(object2, THREAD_UNINT);
+ 
++	if (object1->vo_el0_prewire_count != 0 || object2->vo_el0_prewire_count != 0) {
++		retval = KERN_INVALID_VALUE;
++		goto done;
++	}
+ 
+ 	if (object1->vo_size != object2->vo_size ||
+ 	    object1->vo_size != transpose_size) {
+@@ -6805,6 +6821,7 @@ MACRO_END
  	__TRANSPOSE_FIELD(named);
  	/* "shadow_severed" refers to the object not its contents */
  	__TRANSPOSE_FIELD(phys_contiguous);
@@ -13754,10 +14017,20 @@ index da261ba..ed44d2a 100644
  	__TRANSPOSE_FIELD(no_pager_reason);
  	/* "cached_list.next" points to transposed object */
 diff --git a/osfmk/vm/vm_object_xnu.h b/osfmk/vm/vm_object_xnu.h
-index a496f76..a6fe15c 100644
+index a496f76..a9fb2fc 100644
 --- a/osfmk/vm/vm_object_xnu.h
 +++ b/osfmk/vm/vm_object_xnu.h
-@@ -371,7 +371,8 @@ struct vm_object {
+@@ -123,7 +123,8 @@ struct vm_object_fault_info {
+ 	/* boolean_t */ fi_used_for_tpro:1,
+ 	/* boolean_t */ fi_change_wiring:1,
+ 	/* boolean_t */ fi_no_sleep:1,
+-	    __vm_object_fault_info_unused_bits:19;
++	/* boolean_t */ fi_el0_no_cow:1,
++	    __vm_object_fault_info_unused_bits:18;
+ 	int             pmap_options;
+ };
+ 
+@@ -371,7 +372,8 @@ struct vm_object {
  	                                    * so this shouldn't be used for
  	                                    * policy decisions */
  	    has_been_clipped:1,            /* true if it's ever been clipped */
@@ -13767,6 +14040,14 @@ index a496f76..a6fe15c 100644
  
  #if VM_OBJECT_ACCESS_TRACKING
  	uint32_t        access_tracking_reads;
+@@ -426,6 +428,7 @@ struct vm_object {
+ 	 */
+ 	vm_map_serial_t vmo_provenance;
+ 	uint32_t vmo_pl_req_in_progress; /* page list request in progress */
++	uint32_t vo_el0_prewire_count;   /* active EL0 vm_map_protect pre-wire holds */
+ 	uint32_t                vo_inherit_copy_none:1,
+ 	    __vo_unused_padding:31;
+ };
 diff --git a/osfmk/vm/vm_sanitize.c b/osfmk/vm/vm_sanitize.c
 index d1ff7d0..362f39f 100644
 --- a/osfmk/vm/vm_sanitize.c
