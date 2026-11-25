@@ -3,10 +3,11 @@ Each source file names its license in an SPDX-License-Identifier line; the full 
 
   GPL-2.0-only         fki-ko/, linux/, scripts/, tools/, tests/, docs/, gpu/xnu-drm/ (xnudrmd, test/), gpu/venus/
   GPL-2.0-or-later     gpu/xnu-cpu-metal/
-  APSL-2.0             xnu-ko/, xnu-patches/, kexts/
+  APSL-2.0             xnu-ko/, xnu-patches/, kexts/ (kexts/free/compat/ too)
   BSD-2-Clause-Patent  kexts/XnuDisplay/, kexts/XnuEthernet/, kexts/XnuInput/ (from macOS-DroidVM),
                        gpu/xnu-cpu-metal/src/xnu-cpu-metal-bundle/XnuCpuMetalShim.h (from UniXNU/AdrenoMetal)
-  MIT                  gpu/xnu-drm/darwin/, gpu/xnu-drm/xnudrm_proto.h; the patches to Mesa and virglrenderer
+  MPL-2.0              kexts/free/patches/corecrypto-arm64e-sptr.patch (a patch to corecrypto, under its license)
+  MIT                  gpu/xnu-drm/darwin/, gpu/xnu-drm/test/, gpu/xnu-drm/xnudrm_proto.h; the patches to Mesa and virglrenderer
                        (under their upstream's license, as are the patches to metal2vulkan: GPL-2.0-or-later)
 
 docs/images/ holds screenshots of macOS running on xnulinux; the macOS interface and wallpaper in them are Apple's.

@@ -24,8 +24,6 @@ mkdir -p $T/EXTERNAL_HEADERS/linux64
 for h in $P/include/*.h; do cmp -s $h $T/EXTERNAL_HEADERS/linux64/$(basename $h) || cp $h $T/EXTERNAL_HEADERS/linux64/; done
 t=$SECONDS; JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -15; echo "kernel: $((SECONDS - t)) s"
 if [ -e out/kc/kc27.bin ]; then
-  # the hosted system's extra Apple kexts (in kc27, not kept by default): IOSurface for actool, CoreImage and friends
-  for id in $(grep -v '^#' ~/w/poc/xnu-patches/kc-keep-extra.txt); do grep -qx "$id" configs/kc-keep.txt || echo "$id" >> configs/kc-keep.txt; done
   cp k27/segaddrs.sh /tmp/segaddrs.before
   python3 k27/kc27-layout.py out/kc/kc27.bin out/k27/kernel-k27.macho --write k27/segaddrs.sh | tail -2
   if ! cmp -s /tmp/segaddrs.before k27/segaddrs.sh; then
@@ -54,8 +52,15 @@ if [ -e out/kc/kc27.bin ]; then
     python3 scripts/build-native-kext.py $n $(dirname $j)/$n.cpp -I $NETINC --obj ${KEXT_OBJ:-k27-obj} || { echo "kext $n failed to build: left out"; continue; }
     NATIVE="$NATIVE $j"
   done
-  t=$SECONDS; K27_NO_BOOT=1 NATIVE="$NATIVE" bash k27/try.sh 0 2>&1 | tail -3; echo "collection: $((SECONDS - t)) s"
-  grep -iE 'error|unresolved|XnuCpuMetal' out/k27/kc-build.log | tail -8 || true
+  printf '%s\n' $NATIVE > out/k27/natives.txt	# the kexts of ours in this collection, for scripts/apple-kc/package.sh
+  # the collection (scripts/kclink): the kernel, xnulinux's kexts, and the Apple kexts of scripts/apple-kc/keep.txt from
+  # macOS 27.2's kernelcache
+  t=$SECONDS
+  python3 ~/w/poc/scripts/kclink/kclink.py out/kc/kc27.bin out/k27/kernel-k27.macho out/k27/kc-k27.bin \
+    --keep $(grep -v '^#' ~/w/poc/scripts/apple-kc/keep.txt) --native $NATIVE \
+    --rebind $(grep -v '^#' ~/w/poc/scripts/apple-kc/rebind.txt) > out/k27/kclink.log 2>&1 ||
+    { tail -5 out/k27/kclink.log; echo "kclink failed: out/k27/kclink.log"; exit 1; }
+  grep -E '^wrote|vtable check' out/k27/kclink.log; echo "collection: $((SECONDS - t)) s"
   # AMFI of the collection's macOS expects the code-signature platform version of that build; the system disk's binaries
   # carry their own (macOS 27.0.1: 26 where 27.2's AMFI expects 27)
   python3 ~/w/poc/scripts/kc-amfi-platform.py out/k27/kc-k27.bin ${AMFI_PLATFORM:-26}
