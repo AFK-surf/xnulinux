@@ -53,6 +53,7 @@ sudo dmesg -n "${CONLEVEL:-1}"
 # fki has the hosted kernel's DRAM from its load at boot (scripts/vm-install-fki-service.sh): reload it only when it changed,
 # with the same carve-out
 CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || echo 0x200000000) carve_mb=$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null || echo 8156)"
+CPULIST=$(cat /sys/module/fki/parameters/cpu_list 2>/dev/null | tr -d '\n'); [ -z "$CPULIST" ] || CARVE="$CARVE cpu_list=$CPULIST"
 if [ "$(cat /sys/module/fki/srcversion 2>/dev/null)" != "$(modinfo -F srcversion fki-ko/fki.ko)" ]; then
   sudo systemctl stop xnudrmd 2>/dev/null || true	# it holds fki's /dev/xnu-hostcall
   sudo rmmod fki 2>/dev/null || true
@@ -72,6 +73,7 @@ rm -f "$KEYSTORE"; truncate -s 1M "$KEYSTORE"	# fresh each boot, as the disk was
 # until it next calls the host, so a disk completion routed there waits that long, and with several XNU CPUs one waiting
 # for another's I/O can wait for good (as a hypervisor keeps device interrupts off its vCPUs' cores).
 NCPU=$(nproc --all)
+HOSTCPUS=	# Linux's CPUs that XNU does not take
 if [ "$NCPU" -gt "$CPUS" ]; then
   # XNU's CPUs: Linux CPUs 0..CPUS-1, or the first CPUS of fki's cpu_list
   XCPUS=$(cat /sys/module/fki/parameters/cpu_list 2>/dev/null | tr -d '\n')
@@ -82,6 +84,7 @@ for c in l: m &= ~(1 << c)
 print(format(m, 'x'))")
   echo "$MASK" | sudo tee /proc/irq/default_smp_affinity >/dev/null 2>&1 || true
   for f in /proc/irq/*/smp_affinity; do echo "$MASK" | sudo tee "$f" >/dev/null 2>&1 || true; done
+  HOSTCPUS=$(python3 -c "print(','.join(str(c) for c in range($NCPU) if 0x$MASK >> c & 1))")
 fi
 # Start xnudrmd BEFORE insmod xnu.ko and wait until it has opened /dev/xnu-hostcall and is serving:
 # fast-booting guests (e.g. 16K pages) can open XnuDrm within ~4-5 s of insmod; restarting xnudrmd after
@@ -90,7 +93,8 @@ sudo systemctl stop xnudrmd 2>/dev/null || true
 sudo systemctl reset-failed xnudrmd 2>/dev/null || true
 if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
   make -s -C gpu/xnu-drm >/dev/null
-  sudo systemd-run -q --unit xnudrmd --collect "$PWD/gpu/xnu-drm/xnudrmd"
+  # off XNU's CPUs, the render server it starts too: a thread woken on a CPU that XNU holds runs when XNU next calls the host
+  sudo systemd-run -q --unit xnudrmd --collect ${HOSTCPUS:+-p CPUAffinity="$HOSTCPUS"} "$PWD/gpu/xnu-drm/xnudrmd"
   DRM_READY=0
   DRM_INV=$(systemctl show -p InvocationID --value xnudrmd 2>/dev/null || true)
   for _ in $(seq 1 100); do
