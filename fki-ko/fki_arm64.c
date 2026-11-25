@@ -525,6 +525,8 @@ int fki_cpu_mpidr(int cpu, fki_u64 *mpidr)
 	u64 v = 0;
 	int err;
 
+	cpu = fki_cpu_map(cpu);
+
 	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return -EINVAL;
 	err = smp_call_function_single(cpu, fki_read_mpidr, &v, 1);

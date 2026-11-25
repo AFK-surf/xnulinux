@@ -76,8 +76,20 @@ void fki_random(void *buf, unsigned long len)
 }
 EXPORT_SYMBOL(fki_random);
 
+static int cpu_list[NR_CPUS];
+static int cpu_list_n;
+module_param_array(cpu_list, int, &cpu_list_n, 0444);
+
+int fki_cpu_map(int cpu)
+{
+	if (!cpu_list_n)
+		return cpu;
+	return cpu >= 0 && cpu < cpu_list_n ? cpu_list[cpu] : -1;
+}
+
 int fki_bind_cpu(int cpu)
 {
+	cpu = fki_cpu_map(cpu);
 	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return -EINVAL;
 	return set_cpus_allowed_ptr(current, cpumask_of(cpu));
@@ -86,7 +98,7 @@ EXPORT_SYMBOL(fki_bind_cpu);
 
 int fki_num_cpus(void)
 {
-	return num_online_cpus();
+	return cpu_list_n ? cpu_list_n : num_online_cpus();
 }
 EXPORT_SYMBOL(fki_num_cpus);
 
@@ -94,6 +106,7 @@ void *fki_thread_start(int (*fn)(void *), void *arg, int cpu, const char *name)
 {
 	struct task_struct *t;
 
+	cpu = fki_cpu_map(cpu);
 	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return NULL;
 	t = kthread_create(fn, arg, "%s", name);
@@ -142,7 +155,10 @@ EXPORT_SYMBOL(fki_thread_wake);
 
 void fki_msleep(unsigned int ms)
 {
-	msleep(ms);
+	unsigned long t = msecs_to_jiffies(ms) + 1;
+
+	while (t)
+		t = schedule_timeout_idle(t);
 }
 EXPORT_SYMBOL(fki_msleep);
 
@@ -187,7 +203,7 @@ static void fki_idle_body(void *p)
 
 	local_irq_enable();
 	preempt_enable();
-	set_current_state(TASK_UNINTERRUPTIBLE);
+	set_current_state(TASK_IDLE);
 	WRITE_ONCE(fki_idle_task[smp_processor_id()], current);
 	smp_mb();	/* pairs with fki_kick_cpu: it sees this task, or this sees the word it set first */
 	if (!a->wake || !READ_ONCE(*a->wake))
@@ -245,6 +261,7 @@ void fki_kick_cpu(int cpu)
 {
 	struct task_struct *t;
 
+	cpu = fki_cpu_map(cpu);
 	if (cpu < 0 || cpu >= nr_cpu_ids)
 		return;
 	smp_mb();	/* the caller's pending word before the idle task: pairs with fki_idle_body */

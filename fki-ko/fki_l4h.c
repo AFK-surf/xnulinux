@@ -81,6 +81,7 @@ EXPORT_SYMBOL(fki_cpu_id);
 
 int fki_cpu_mpidr(int cpu, fki_u64 *mpidr)
 {
+	cpu = fki_cpu_map(cpu);
 	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return -EINVAL;
 	/* Encodes Aff1:Aff0 so LINUX64_CPU_SLOT(mpidr) == cpu. */

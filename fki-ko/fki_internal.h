@@ -12,6 +12,7 @@ void fki_arch_exit(void);
 void fki_arch_linux_runs(void (*fn)(void *), void *arg);
 void fki_fpsimd_forget(void);
 
+int fki_cpu_map(int cpu);
 int fki_hostcall_init(void);
 void fki_hostcall_exit(void);
 #endif
