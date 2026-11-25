@@ -30,12 +30,29 @@ extern "C" {
 #endif
 
 /*
- * xnu.ko's entry point (0: not hosted) and the slide it applied. TPIDR_EL1 is Linux's per-CPU base: XNU's kernel keeps
- * its thread pointer in TPIDRRO_EL0 (per CPU), and user space gets its TSD there on each return to EL0.
+ * xnu.ko's entry point (0: not hosted) and the slide it applied. On ARM64, TPIDR_EL1 is Linux's per-CPU base: XNU's
+ * kernel keeps its thread pointer in TPIDRRO_EL0 (per CPU), and user space gets its TSD there on each return to EL0.
+ * On x86_64, GS base belongs to whichever world is running; the world switch saves and restores it.
  */
 extern unsigned long linux64_hook;
 extern unsigned long linux64_slide;
-/* This CPU's slot in the per-CPU arrays (LINUX64_CPU_SLOT of its MPIDR): valid before XNU knows its cpu number */
+/* This CPU's slot in the per-CPU arrays: valid before XNU knows its cpu number. */
+#ifdef __x86_64__
+/*
+ * CPUID leaf 1 returns the initial APIC ID in EBX[31:24]. Unlike cpu_number() this works before XNU's GS-based
+ * cpu_data is installed. The host uses the same slot for its per-CPU arrays (Linux cpu id on x86_64); for the first
+ * single-CPU boot both are zero, and the host must map APIC ids to Linux cpus once SMP is enabled.
+ */
+static inline unsigned
+linux64_cpu_slot(void)
+{
+	unsigned int eax, ebx;
+
+	__asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx) : "a"(1U), "c"(0U) : "memory");
+	return LINUX64_CPU_SLOT(ebx >> 24);
+}
+#else
+/* ARM64: affinity 0 and 1 of MPIDR_EL1, four bits each. */
 static inline unsigned
 linux64_cpu_slot(void)
 {
@@ -44,6 +61,7 @@ linux64_cpu_slot(void)
 	__asm__ volatile ("mrs %0, MPIDR_EL1" : "=r"(mpidr));
 	return LINUX64_CPU_SLOT(mpidr);
 }
+#endif
 
 /* Each CPU's interrupt-enable state: hardware interrupts stay masked while XNU runs; this flag is the virtual one */
 extern unsigned int linux64_vint[LINUX64_CPU_SLOTS];
@@ -54,6 +72,25 @@ extern unsigned int linux64_ipi_pending[LINUX64_CPU_SLOTS];
 extern unsigned long linux64_dbg[LINUX64_NCOUNTERS];
 
 /* A call into the host (enum linux64_call). The host's answer: 0 to go on. */
+#ifdef __x86_64__
+static inline unsigned long
+linux64_call2(enum linux64_call call, unsigned long a1, unsigned long a2)
+{
+	unsigned long ret = 0;
+
+	linux64_dbg[LINUX64_CTR_LAST_CALL] = (unsigned long)call;
+	if (linux64_hook) {
+		/*
+		 * The hook is xnu_world_upcall, not an XNU function pointer: a normal SysV indirect call passes
+		 * call/a1/a2 in rdi/rsi/rdx and returns the host's answer in rax. The world switch happens inside
+		 * the hook, so there is no pointer authentication and no special call sequence here.
+		 */
+		ret = ((unsigned long (*)(unsigned long, unsigned long, unsigned long))linux64_hook)
+		    ((unsigned long)call, a1, a2);
+	}
+	return ret;
+}
+#else
 static inline unsigned long
 linux64_call2(enum linux64_call call, unsigned long a1, unsigned long a2)
 {
@@ -71,6 +108,7 @@ linux64_call2(enum linux64_call call, unsigned long a1, unsigned long a2)
 	}
 	return x0;
 }
+#endif
 
 static inline unsigned long
 linux64_call(enum linux64_call call, const void *a1)

@@ -10,10 +10,11 @@
 /*
  * The interface between a hosted XNU (the LINUX64 machine layer) and its host, xnu.ko.
  *
- * xnu.ko calls arm_init with linux64_hook set to its entry point. XNU calls into the host with `blr linux64_hook`:
- * x0 = the call (enum linux64_call), x1 and x2 = its arguments; x0 on return is 0 to go on, non-zero when the host ends
- * the run. Requests are in XNU memory (the host and XNU share the kernel address space); `result` fields are filled by
- * the host: a count, or a negative Linux errno.
+ * xnu.ko calls arm_init (or the x86 hosted entry) with linux64_hook set to its world-switch upcall. XNU calls into
+ * the host through that hook: on ARM64 `blr linux64_hook` with x0 = the call (enum linux64_call), x1/x2 = arguments
+ * and x0 = the answer; on x86_64 a SysV indirect call with rdi/rsi/rdx and rax = the answer. Zero means go on,
+ * non-zero means the host ends the run. Requests are in XNU memory (the host and XNU share the kernel address space);
+ * `result` fields are filled by the host: a count, or a negative Linux errno.
  *
  * linux64_dbg[] (enum linux64_counter) is read by the host's monitor thread on another CPU while XNU runs.
  *
@@ -94,7 +95,12 @@ struct linux64_input_event {
  * MPIDR, four bits each. The host only starts CPUs whose slots differ.
  */
 #define LINUX64_CPU_SLOTS 256
+#ifdef __x86_64__
+/* x86_64 carries a Linux CPU id (or APIC id) here instead of an ARM MPIDR. */
+#define LINUX64_CPU_SLOT(cpu_id) ((unsigned)(cpu_id) & (LINUX64_CPU_SLOTS - 1))
+#else
 #define LINUX64_CPU_SLOT(mpidr) ((unsigned)(((mpidr) & 0xf) | (((mpidr) >> 4) & 0xf0)))
+#endif
 
 /*
  * linux64_el0_stat[cpu][0][class]: exceptions taken from user space, by class; [cpu][1][class]: counter ticks from

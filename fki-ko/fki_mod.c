@@ -24,11 +24,17 @@
 #include <linux/sched.h>
 #include <linux/cpumask.h>
 #include <linux/vmalloc.h>
+#ifdef CONFIG_ARM64
 #include <asm/arch_timer.h>
 #include <asm/neon.h>
 #include <asm/sysreg.h>
-#include <asm/tlbflush.h>
 #include <asm/barrier.h>
+#else
+#include <asm/fpu/api.h>
+#include <asm/processor.h>
+#include <asm/pgtable.h>
+#endif
+#include <asm/tlbflush.h>
 #include <linux/kprobes.h>
 #include <linux/hrtimer.h>
 #include <linux/kthread.h>
@@ -75,6 +81,9 @@ static struct cma **p_cma_area;	/* the default CMA area (cma= on the command lin
 static struct page *(*p_cma_alloc)(struct cma *, unsigned long, unsigned int, bool);	/* not exported on every kernel */
 static bool (*p_cma_release)(struct cma *, const struct page *, unsigned long);
 static set_memory_fn p_set_memory_x, p_set_memory_nx;
+#ifndef CONFIG_ARM64
+static void (*p_flush_tlb_all)(void);	/* x86 does not export flush_tlb_all to modules */
+#endif
 static unsigned long p_stext, p_end;
 static u64 *p_kimage_voffset;
 static int (*p_efi_mem_type)(unsigned long);	/* the firmware's memory map: is the carve-out RAM at all */
@@ -101,6 +110,9 @@ static int fki_resolve(void)
 	p_cma_alloc = (void *)lookup("cma_alloc");
 	p_cma_release = (void *)lookup("cma_release");
 	p_set_memory_nx = (set_memory_fn)lookup("set_memory_nx");
+#ifndef CONFIG_ARM64
+	p_flush_tlb_all = (void (*)(void))lookup("flush_tlb_all");
+#endif
 	p_stext = lookup("_stext");
 	p_end = lookup("_end");
 	p_kimage_voffset = (u64 *)lookup("kimage_voffset");
@@ -161,8 +173,9 @@ void fki_blob_put(void *handle)
 }
 EXPORT_SYMBOL(fki_blob_put);
 
+#ifdef CONFIG_ARM64
 #define FKI_SCTLR_EN (SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | SCTLR_ELx_ENDA | SCTLR_ELx_ENDB)
-
+#define FKI_NO_BTI __attribute__((target("branch-protection=none")))
 
 static __always_inline void keys_read(struct fki_pac_keys *k)
 {
@@ -184,6 +197,15 @@ static __always_inline void keys_write(const struct fki_pac_keys *k)
 	sysreg_clear_set(sctlr_el1, FKI_SCTLR_EN, k->sctlr_en & FKI_SCTLR_EN);
 	isb();
 }
+#else
+/* x86_64 has no pointer authentication keys: keep the ABI-sized blob opaque and inert. */
+#define FKI_NO_BTI
+static __always_inline void keys_read(struct fki_pac_keys *k)
+{
+	memset(k, 0, sizeof(*k));
+}
+static __always_inline void keys_write(const struct fki_pac_keys *k) { }
+#endif
 
 /*
  * The foreign kernel uses the FP/SIMD registers (its user threads' state, its own SIMD code) without Linux knowing.
@@ -196,13 +218,19 @@ static __always_inline void keys_write(const struct fki_pac_keys *k)
  */
 static void fki_fpsimd_forget(void)
 {
+#ifdef CONFIG_ARM64
 	struct user_fpsimd_state scratch;	/* where Linux would save a kernel-mode state over a context switch: none here */
 
 	kernel_neon_begin(&scratch);
 	kernel_neon_end(&scratch);
+#else
+	/* The foreign kernel may use XSAVE state; make Linux forget this CPU's owner. */
+	kernel_fpu_begin();
+	kernel_fpu_end();
+#endif
 }
 
-__attribute__((target("branch-protection=none"))) unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved)
+FKI_NO_BTI unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved)
 {
 	unsigned long flags;
 
@@ -215,7 +243,7 @@ __attribute__((target("branch-protection=none"))) unsigned long fki_enter(const 
 }
 EXPORT_SYMBOL(fki_enter);
 
-__attribute__((target("branch-protection=none"))) void fki_leave(unsigned long cookie, const struct fki_pac_keys *saved)
+FKI_NO_BTI void fki_leave(unsigned long cookie, const struct fki_pac_keys *saved)
 {
 	keys_write(saved);
 	local_irq_restore(cookie);
@@ -223,7 +251,7 @@ __attribute__((target("branch-protection=none"))) void fki_leave(unsigned long c
 }
 EXPORT_SYMBOL(fki_leave);
 
-__attribute__((target("branch-protection=none"))) void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save)
+FKI_NO_BTI void fki_pac_swap(const struct fki_pac_keys *load, struct fki_pac_keys *save)
 {
 	keys_read(save);
 	keys_write(load);
@@ -232,13 +260,21 @@ EXPORT_SYMBOL(fki_pac_swap);
 
 fki_u64 fki_counter_frequency(void)
 {
+#ifdef CONFIG_ARM64
 	return arch_timer_get_cntfrq();
+#else
+	return NSEC_PER_SEC;
+#endif
 }
 EXPORT_SYMBOL(fki_counter_frequency);
 
 fki_u64 fki_counter(void)
 {
+#ifdef CONFIG_ARM64
 	return __arch_counter_get_cntvct();
+#else
+	return ktime_get_ns();
+#endif
 }
 EXPORT_SYMBOL(fki_counter);
 
@@ -321,35 +357,107 @@ EXPORT_SYMBOL(fki_msleep);
 static unsigned long fki_fault_lo, fki_fault_hi;
 static int (*fki_fault_handler)(unsigned long far, unsigned long esr, void *regs);
 
+#ifndef CONFIG_ARM64
+/* SysV order for the generic x0..x30 slot numbers in the FKI ABI. */
+static unsigned long *fki_x86_gpr(struct pt_regs *regs, unsigned int n)
+{
+	switch (n) {
+	case 0: return &regs->ax;
+	case 1: return &regs->bx;
+	case 2: return &regs->cx;
+	case 3: return &regs->dx;
+	case 4: return &regs->si;
+	case 5: return &regs->di;
+	case 6: return &regs->bp;
+	case 7: return &regs->r8;
+	case 8: return &regs->r9;
+	case 9: return &regs->r10;
+	case 10: return &regs->r11;
+	case 11: return &regs->r12;
+	case 12: return &regs->r13;
+	case 13: return &regs->r14;
+	case 14: return &regs->r15;
+	default: return NULL;
+	}
+}
+
+/* A kprobe pre-handler returning 1 skips the probed call; resume at its return address. */
+static void fki_x86_skip_call(struct pt_regs *kregs)
+{
+	kregs->ip = *(unsigned long *)kregs->sp;
+	kregs->sp += sizeof(unsigned long);
+}
+#endif
+
 static int fki_fault_pre(struct kprobe *p, struct pt_regs *kregs)
 {
-	unsigned long far = kregs->regs[0], esr = kregs->regs[1];
-	struct pt_regs *regs = (struct pt_regs *)kregs->regs[2];
+	unsigned long far, esr;
+	struct pt_regs *regs;
 	int (*h)(unsigned long, unsigned long, void *) = READ_ONCE(fki_fault_handler);
 
-	if (!h || user_mode(regs))
+#ifdef CONFIG_ARM64
+	far = kregs->regs[0]; esr = kregs->regs[1];
+	regs = (struct pt_regs *)kregs->regs[2];
+#else
+	/* __do_kernel_fault(addr, error_code, regs) on x86_64. */
+	far = kregs->di; esr = kregs->si;
+	regs = (struct pt_regs *)kregs->dx;
+#endif
+	if (!h || !regs || user_mode(regs))
 		return 0;
 	if ((far < fki_fault_lo || far >= fki_fault_hi) &&
 	    (instruction_pointer(regs) < fki_fault_lo || instruction_pointer(regs) >= fki_fault_hi))
 		return 0;
 	if (h(far, esr, regs))
 		return 0;
+#ifdef CONFIG_ARM64
 	instruction_pointer_set(kregs, kregs->regs[30]);	/* __do_kernel_fault returns at once */
+#else
+	fki_x86_skip_call(kregs);
+#endif
 	return 1;
 }
 NOKPROBE_SYMBOL(fki_fault_pre);
 
 unsigned long fki_regs_pc(void *regs) { return instruction_pointer((struct pt_regs *)regs); }
 EXPORT_SYMBOL(fki_regs_pc);
+#ifdef CONFIG_ARM64
 unsigned long fki_regs_lr(void *regs) { return ((struct pt_regs *)regs)->regs[30]; }
+#else
+unsigned long fki_regs_lr(void *regs) { return 0; }	/* x86 has no link register */
+#endif
 EXPORT_SYMBOL(fki_regs_lr);
+#ifdef CONFIG_ARM64
 unsigned long fki_regs_pstate(void *regs) { return ((struct pt_regs *)regs)->pstate; }
+#else
+unsigned long fki_regs_pstate(void *regs) { return ((struct pt_regs *)regs)->flags; }
+#endif
 EXPORT_SYMBOL(fki_regs_pstate);
 void fki_regs_set_pc(void *regs, unsigned long pc) { instruction_pointer_set((struct pt_regs *)regs, pc); }
 EXPORT_SYMBOL(fki_regs_set_pc);
-void fki_regs_set_reg(void *regs, unsigned int n, unsigned long v) { if (n < 31) ((struct pt_regs *)regs)->regs[n] = v; }
+void fki_regs_set_reg(void *regs, unsigned int n, unsigned long v)
+{
+#ifdef CONFIG_ARM64
+	if (n < 31)
+		((struct pt_regs *)regs)->regs[n] = v;
+#else
+	unsigned long *p = fki_x86_gpr((struct pt_regs *)regs, n);
+
+	if (p)
+		*p = v;
+#endif
+}
 EXPORT_SYMBOL(fki_regs_set_reg);
-unsigned long fki_regs_reg(void *regs, unsigned int n) { return n < 31 ? ((struct pt_regs *)regs)->regs[n] : 0; }
+unsigned long fki_regs_reg(void *regs, unsigned int n)
+{
+#ifdef CONFIG_ARM64
+	return n < 31 ? ((struct pt_regs *)regs)->regs[n] : 0;
+#else
+	unsigned long *p = fki_x86_gpr((struct pt_regs *)regs, n);
+
+	return p ? *p : 0;
+#endif
+}
 EXPORT_SYMBOL(fki_regs_reg);
 
 static struct kprobe fki_fault_kp = { .symbol_name = "__do_kernel_fault", .pre_handler = fki_fault_pre };
@@ -361,17 +469,29 @@ static int fki_fault_registered;
  */
 static int fki_die_pre(struct kprobe *p, struct pt_regs *kregs)
 {
-	struct pt_regs *regs = (struct pt_regs *)kregs->regs[1];
-	unsigned long esr = kregs->regs[2];
+	struct pt_regs *regs;
+	unsigned long esr;
 	int (*h)(unsigned long, unsigned long, void *) = READ_ONCE(fki_fault_handler);
 
+#ifdef CONFIG_ARM64
+	regs = (struct pt_regs *)kregs->regs[1];
+	esr = kregs->regs[2];
+#else
+	/* die(const char *str, struct pt_regs *regs, long err) on x86_64. */
+	regs = (struct pt_regs *)kregs->si;
+	esr = kregs->dx;
+#endif
 	if (!h || !regs || user_mode(regs))
 		return 0;
 	if (instruction_pointer(regs) < fki_fault_lo || instruction_pointer(regs) >= fki_fault_hi)
 		return 0;
 	if (h(0, esr, regs))
 		return 0;
+#ifdef CONFIG_ARM64
 	instruction_pointer_set(kregs, kregs->regs[30]);	/* die returns at once */
+#else
+	fki_x86_skip_call(kregs);
+#endif
 	return 1;
 }
 NOKPROBE_SYMBOL(fki_die_pre);
@@ -487,6 +607,8 @@ static int fki_carve_check(unsigned long base, unsigned long len)
 			}
 		}
 	}
+#ifdef CONFIG_ARM64
+	/* On arm64 _stext/_end are virtual; kimage_voffset turns them into physical addresses. */
 	if (p_stext && p_end && p_kimage_voffset) {
 		unsigned long k_start = p_stext - *p_kimage_voffset;
 		unsigned long k_end = p_end - *p_kimage_voffset;
@@ -497,6 +619,7 @@ static int fki_carve_check(unsigned long base, unsigned long len)
 			return -EBUSY;
 		}
 	}
+#endif
 	if (region_intersects(base, len, IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) != REGION_DISJOINT) {
 		pr_err("fki: carve-out [%#lx, %#lx) overlaps IORESOURCE_SYSTEM_RAM; refusing to map (check mem= and carve_base)\n",
 		       base, end);
@@ -601,6 +724,7 @@ EXPORT_SYMBOL(fki_contig_free);
 
 int fki_window_l1(unsigned long va, unsigned long long **l1_va, fki_u64 *l1_pa)
 {
+#ifdef CONFIG_ARM64
 	u64 ttbr1 = read_sysreg(ttbr1_el1) & GENMASK_ULL(47, 1);
 	u64 *l0 = phys_to_virt(ttbr1 & ~0xfffULL);
 	u64 e = READ_ONCE(l0[(va >> 39) & 511]);
@@ -608,6 +732,16 @@ int fki_window_l1(unsigned long va, unsigned long long **l1_va, fki_u64 *l1_pa)
 	if ((e & 3) != 3)
 		return -ENOENT;
 	*l1_pa = e & GENMASK_ULL(47, 12);
+#else
+	/* x86_64: TTBR1's role is the kernel PGD pointed to by CR3. */
+	u64 cr3 = read_cr3_pa();
+	u64 *pgd = phys_to_virt(cr3 & GENMASK_ULL(51, 12));
+	u64 e = READ_ONCE(pgd[pgd_index(va)]);
+
+	if (!(e & 1))
+		return -ENOENT;
+	*l1_pa = e & GENMASK_ULL(51, 12);
+#endif
 	*l1_va = phys_to_virt(*l1_pa);
 	return 0;
 }
@@ -616,10 +750,17 @@ EXPORT_SYMBOL(fki_window_l1);
 void fki_window_set(unsigned long long *slot, fki_u64 desc)
 {
 	WRITE_ONCE(*slot, desc);
+#ifdef CONFIG_ARM64
 	dsb(ishst);
 	__tlbi(vmalle1is);
 	dsb(ish);
 	isb();
+#else
+	if (p_flush_tlb_all)
+		p_flush_tlb_all();
+	else
+		pr_warn_once("fki: flush_tlb_all unavailable; TLB may hold stale window entries\n");
+#endif
 }
 EXPORT_SYMBOL(fki_window_set);
 
@@ -629,6 +770,7 @@ EXPORT_SYMBOL(fki_window_set);
  * from a stack that is not this task's, the work runs on a stack of our own laid out like Linux's (the lower half of a
  * 2 * THREAD_SIZE aligned block, which the linear map gives an order-aligned page block).
  */
+#ifdef CONFIG_ARM64
 static void *fki_alt_stack[NR_CPUS];	/* allocated at load: an order-3 atomic allocation can fail once memory is fragmented */
 #define FKI_ALT_STACK_ORDER get_order(2 * THREAD_SIZE)
 
@@ -652,6 +794,7 @@ asm(
 "	.size	fki_run_on_stack, . - fki_run_on_stack\n"
 "	.popsection\n");
 void fki_run_on_stack(void (*fn)(void *), void *arg, void *top);	/* x0 = fn, x1 = arg, x2 = stack top */
+#endif
 
 static void fki_linux_runs_body(void (*fn)(void *), void *arg);
 
@@ -677,11 +820,21 @@ static void fki_runs_then_forget(void *p)
 
 static void fki_linux_runs(void (*fn)(void *), void *arg)
 {
+#ifdef CONFIG_ARM64
 	unsigned long daif = read_sysreg(daif);
+#else
+	unsigned long flags;
+#endif
 	struct fki_runs r = { fn, arg };
 
+#ifdef CONFIG_ARM64
 	fki_linux_runs_body(fki_runs_then_forget, &r);
 	write_sysreg(daif, daif);
+#else
+	local_save_flags(flags);
+	fki_linux_runs_body(fki_runs_then_forget, &r);
+	local_irq_restore(flags);
+#endif
 }
 
 void fki_linux_runs_ext(void (*fn)(void *), void *arg)
@@ -691,6 +844,7 @@ void fki_linux_runs_ext(void (*fn)(void *), void *arg)
 
 static void fki_linux_runs_body(void (*fn)(void *), void *arg)
 {
+#ifdef CONFIG_ARM64
 	unsigned long sp = current_stack_pointer;
 	int cpu = smp_processor_id();
 
@@ -699,6 +853,10 @@ static void fki_linux_runs_body(void (*fn)(void *), void *arg)
 		return;
 	}
 	fki_run_on_stack(fn, arg, (char *)fki_alt_stack[cpu] + THREAD_SIZE);
+#else
+	/* x86 entry code expects the current task stack; the XNU world always enters from one. */
+	fn(arg);
+#endif
 }
 
 struct fki_idle_args { fki_u64 ns; const volatile unsigned int *wake; };
@@ -734,7 +892,7 @@ static void fki_yield_body(void *p)
 
 void fki_idle_until(fki_u64 counter_deadline, fki_u64 max_ns, const volatile unsigned int *wake)
 {
-	u64 now = __arch_counter_get_cntvct(), freq = arch_timer_get_cntfrq(), ns;
+	u64 now = fki_counter(), freq = fki_counter_frequency(), ns;
 	struct fki_idle_args a;
 
 	if (counter_deadline <= now) {
@@ -790,7 +948,15 @@ void fki_kick_cpu(int cpu)
 }
 EXPORT_SYMBOL(fki_kick_cpu);
 
-static void fki_read_mpidr(void *p) { *(u64 *)p = read_cpuid_mpidr(); }
+static void fki_read_mpidr(void *p)
+{
+#ifdef CONFIG_ARM64
+	*(u64 *)p = read_cpuid_mpidr();
+#else
+	/* The x86_64 ABI carries a stable CPU identity instead; Linux's CPU id is enough for slotting. */
+	*(u64 *)p = smp_processor_id();
+#endif
+}
 
 int fki_cpu_mpidr(int cpu, fki_u64 *mpidr)
 {
@@ -930,6 +1096,7 @@ long fki_net_pending(void)
 }
 EXPORT_SYMBOL(fki_net_pending);
 
+#ifdef CONFIG_ARM64
 static void fki_free_alt_stacks(void)
 {
 	int cpu;
@@ -940,12 +1107,14 @@ static void fki_free_alt_stacks(void)
 		fki_alt_stack[cpu] = NULL;
 	}
 }
+#endif
 
 static int __init fki_init(void)
 {
 	struct net_device *dev;
 	int err, cpu;
 
+#ifdef CONFIG_ARM64
 	for_each_possible_cpu(cpu) {
 		struct page *pg = alloc_pages(GFP_KERNEL, FKI_ALT_STACK_ORDER);
 
@@ -956,6 +1125,10 @@ static int __init fki_init(void)
 		fki_alt_stack[cpu] = page_address(pg);
 		INIT_CSD(per_cpu_ptr(&fki_kick_csd, cpu), fki_kick_fn, NULL);
 	}
+#else
+	for_each_possible_cpu(cpu)
+		INIT_CSD(per_cpu_ptr(&fki_kick_csd, cpu), fki_kick_fn, NULL);
+#endif
 	skb_queue_head_init(&fki_net_rxq);
 	fki_reserve();
 	err = fki_hostcall_init();
@@ -990,7 +1163,9 @@ static void __exit fki_exit(void)
 		fki_netdev = NULL;
 	}
 	skb_queue_purge(&fki_net_rxq);
+#ifdef CONFIG_ARM64
 	fki_free_alt_stacks();
+#endif
 }
 module_init(fki_init);
 module_exit(fki_exit);

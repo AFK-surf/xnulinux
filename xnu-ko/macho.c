@@ -87,12 +87,18 @@ int macho_copy(struct xnu_image *img, void *dst)
 
 static inline u64_t sign(u64_t v, unsigned key, u64_t disc)
 {
+#ifdef __aarch64__
 	switch (key) {
 	case 0: asm volatile(".arch_extension pauth\n\tpacia %0, %1" : "+r"(v) : "r"(disc)); break;
 	case 1: asm volatile(".arch_extension pauth\n\tpacib %0, %1" : "+r"(v) : "r"(disc)); break;
 	case 2: asm volatile(".arch_extension pauth\n\tpacda %0, %1" : "+r"(v) : "r"(disc)); break;
 	default: asm volatile(".arch_extension pauth\n\tpacdb %0, %1" : "+r"(v) : "r"(disc)); break;
 	}
+#else
+	/* x86_64 has no pointer authentication: chained-fixup decoding remains, signing is inert. */
+	(void)key;
+	(void)disc;
+#endif
 	return v;
 }
 

@@ -1,0 +1,555 @@
+diff --git a/libkern/crypto/corecrypto_rand.c b/libkern/crypto/corecrypto_rand.c
+index d46815b..b0c274e 100644
+--- a/libkern/crypto/corecrypto_rand.c
++++ b/libkern/crypto/corecrypto_rand.c
+@@ -27,6 +27,8 @@
+  */
+ 
+ #include <libkern/crypto/crypto_internal.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <corecrypto/ccrng.h>
+ #include <libkern/crypto/rand.h>
+ 
+@@ -36,6 +38,11 @@ cc_rand_generate(void *out, size_t outlen)
+ 	struct ccrng_state *rng_state = NULL;
+ 	int error = -1;
+ 
++/* LINUX64-X86 */
++	if (g_crypto_funcs == NULL && linux64_hook) {
++		linux64_random(out, outlen);
++		return 0;
++	}
+ 	if (g_crypto_funcs) {
+ 		rng_state = g_crypto_funcs->ccrng_fn(&error);
+ 		if (rng_state != NULL) {
+@@ -58,6 +65,11 @@ crypto_random_generate(
+ 	void *random,
+ 	size_t random_size)
+ {
++/* LINUX64-X86 */
++	if (g_crypto_funcs == NULL && linux64_hook) {
++		linux64_random(random, random_size);
++		return;
++	}
+ 	g_crypto_funcs->random_generate_fn(ctx, random, random_size);
+ }
+ 
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index 7784e72..9cbd8e3 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -41,6 +41,8 @@
+ #include <vm/vm_map.h>
+ #include <console/video_console.h>
+ #include <console/serial_protos.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <kern/startup.h>
+ #include <kern/thread.h>
+ #include <kern/cpu_data.h>
+@@ -523,6 +525,11 @@ console_resume()
+ void
+ console_write(char *str, int size)
+ {
++/* LINUX64-X86 */
++	if (linux64_hook && str && size > 0) {
++		linux64_call2(LINUX64_CALL_CONSOLE_WRITE, (unsigned long)str, (unsigned long)size);
++		return;
++	}
+ 	if (disableConsoleOutput) {
+ 		return;
+ 	}
+diff --git a/osfmk/console/serial_general.c b/osfmk/console/serial_general.c
+index b1ca47a..01d64b5 100644
+--- a/osfmk/console/serial_general.c
++++ b/osfmk/console/serial_general.c
+@@ -33,6 +33,8 @@
+  */
+ 
+ #include <kern/spl.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <mach/std_types.h>
+ #include <types.h>
+ #include <kern/thread.h>
+@@ -43,6 +45,23 @@ extern void cons_cinput(char ch);               /* The BSD routine that gets cha
+ 
+ SECURITY_READ_ONLY_LATE(unsigned int) serialmode;                               /* Serial mode keyboard and console control */
+ 
++/* LINUX64-X86 */
++/* LINUX64: hosted console input comes from the host, polled like a UART. */
++static int
++linux64_console_getc(void)
++{
++	static char buf[64];
++	static int n, i;
++
++	if (i < n)
++		return (unsigned char)buf[i++];
++	struct linux64_buf_req q = { .buf = buf, .len = sizeof(buf), .result = 0 };
++	linux64_call(LINUX64_CALL_CONSOLE_READ, &q);
++	n = q.result > 0 ? (int)q.result : 0;
++	i = 0;
++	return n ? (unsigned char)buf[i++] : -1;
++}
++
+ /*
+  *  This routine will start a thread that polls the serial port, listening for
+  *  characters that have been typed.
+@@ -54,7 +73,7 @@ serial_keyboard_init(void)
+ 	kern_return_t   result;
+ 	thread_t                thread;
+ 
+-	if (!(serialmode & SERIALMODE_INPUT)) { /* Leave if we do not want a serial console */
++	if (!(serialmode & SERIALMODE_INPUT) && !linux64_hook) { /* Leave if we do not want a serial console */
+ 		return;
+ 	}
+ 
+@@ -82,7 +101,8 @@ serial_keyboard_poll(void)
+ 	uint64_t next;
+ 
+ 	while (1) {
+-		chr = _serial_getc(false); /* Get a character if there is one */
++/* LINUX64-X86 */
++		chr = linux64_hook ? linux64_console_getc() : _serial_getc(false);
+ 		if (chr < 0) { /* The serial buffer is empty */
+ 			break;
+ 		}
+diff --git a/osfmk/i386/i386_init.c b/osfmk/i386/i386_init.c
+index d66e3f8..9965b6c 100644
+--- a/osfmk/i386/i386_init.c
++++ b/osfmk/i386/i386_init.c
+@@ -124,6 +124,8 @@ extern void xcpm_bootstrap(void);
+ 
+ #include <libkern/kernel_mach_header.h>
+ #include <mach/dyld_kernel_fixups.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ 
+ 
+ int                     debug_task;
+@@ -134,6 +136,14 @@ bool                    serial_console_enabled = false;
+ 
+ static boot_args        *kernelBootArgs;
+ 
++/* LINUX64-X86 */
++/* The hosted machine layer's state; xnu.ko writes linux64_hook/slide before entering vstart. */
++uintptr_t               linux64_hook;
++uintptr_t               linux64_slide;
++unsigned int            linux64_vint[LINUX64_CPU_SLOTS];
++unsigned int            linux64_ipi_pending[LINUX64_CPU_SLOTS];
++unsigned long           linux64_dbg[LINUX64_NCOUNTERS];
++
+ extern int              disableConsoleOutput;
+ extern const char       version[];
+ extern const char       version_variant[];
+@@ -688,6 +698,24 @@ i386_slide_and_rebase_image(uintptr_t kstart_addr)
+  * Non-bootstrap processors are called with argument boot_args_start NULL.
+  * These processors switch immediately to the existing kernel page tables.
+  */
++/* LINUX64-X86 */
++/* LINUX64: a failed assert() has no XNU vector while hosted; let the host decide. */
++void
++linux64_assert_report(const char *file, int line, const char *expr)
++{
++	struct linux64_assert_info a = { file, line, expr };
++	linux64_call(LINUX64_CALL_ASSERT, &a);
++}
++
++/* LINUX64: secondary CPUs are not started until the APIC-id to Linux-cpu map is in place. */
++void linux64_cpu_entry(cpu_data_t *cpu_data_ptr);
++void
++linux64_cpu_entry(cpu_data_t *cpu_data_ptr)
++{
++	(void)cpu_data_ptr;
++	panic("LINUX64: x86 secondary CPU entry is not implemented");
++}
++
+ __attribute__((noreturn))
+ void
+ vstart(vm_offset_t boot_args_start)
+@@ -786,6 +814,9 @@ vstart(vm_offset_t boot_args_start)
+ 
+ 		cpu_data_alloc(TRUE);
+ 
++/* LINUX64-X86 */
++		/* LINUX64: XNU owns the IDT/GDT/TSS while it runs; the host saves and restores
++		 * Linux's descriptors on every world transition. Keep XNU's own setup native. */
+ 		cpu_desc_init(cpu_datap(0));
+ 		postcode(VSTART_CPU_DESC_INIT);
+ 		cpu_desc_load(cpu_datap(0));
+diff --git a/osfmk/i386/i386_vm_init.c b/osfmk/i386/i386_vm_init.c
+index ad7eecb..a4bdef5 100644
+--- a/osfmk/i386/i386_vm_init.c
++++ b/osfmk/i386/i386_vm_init.c
+@@ -85,6 +85,8 @@
+ 
+ #include <mach-o/loader.h>
+ #include <libkern/kernel_mach_header.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ 
+ #define P2ROUNDUP(x, align)             (-(-(x) & -(align)))
+ 
+@@ -281,7 +283,11 @@ i386_vm_init(uint64_t   maxmem,
+ 	static_base_address = ml_static_ptovirt(KERNEL_BASE_OFFSET);
+ 	base_address        = ml_static_ptovirt(args->kaddr);
+ 	vm_kernel_slide     = base_address - static_base_address;
+-	if (args->kslide) {
++/* LINUX64-X86 */
++	if (linux64_hook) {
++		/* xnu.ko already slid and rebased the image; its slide is authoritative. */
++		vm_kernel_slide = (vm_offset_t)linux64_slide;
++	} else if (args->kslide) {
+ 		kprintf("KASLR slide: 0x%016lx dynamic\n", vm_kernel_slide);
+ 		if (vm_kernel_slide != ((vm_offset_t)args->kslide)) {
+ 			panic("Kernel base inconsistent with slide - rebased?");
+diff --git a/osfmk/i386/machine_routines.c b/osfmk/i386/machine_routines.c
+index d7e433d..6249d61 100644
+--- a/osfmk/i386/machine_routines.c
++++ b/osfmk/i386/machine_routines.c
+@@ -27,6 +27,8 @@
+  */
+ 
+ #include <i386/machine_routines.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <i386/cpuid.h>
+ #include <i386/fpu.h>
+ #include <mach/processor.h>
+@@ -368,6 +370,10 @@ ml_get_interrupts_enabled(void)
+ {
+ 	unsigned long flags;
+ 
++/* LINUX64-X86 */
++	if (linux64_hook)
++		return (LINUX64_VINT != 0);
++
+ 	__asm__ volatile ("pushf; pop	%0":  "=r" (flags));
+ 	return (flags & EFL_IF) != 0;
+ }
+@@ -379,6 +385,16 @@ ml_set_interrupts_enabled(boolean_t enable)
+ 	unsigned long flags;
+ 	boolean_t istate;
+ 
++/* LINUX64-X86 */
++	if (linux64_hook) {
++		/* Hardware IF stays clear: Linux takes interrupts only during an upcall. */
++		istate = (LINUX64_VINT != 0);
++		LINUX64_VINT = (enable != FALSE);
++		if (enable && get_preemption_level() == 0 && (*ast_pending() & AST_URGENT))
++			ast_taken_kernel();
++		return istate;
++	}
++
+ 	__asm__ volatile ("pushf; pop	%0"  :  "=r" (flags));
+ 
+ 	assert(get_interrupt_level() ? (enable == FALSE) : TRUE);
+@@ -404,6 +420,10 @@ ml_set_interrupts_enabled(boolean_t enable)
+ boolean_t
+ ml_early_set_interrupts_enabled(boolean_t enable)
+ {
++/* LINUX64-X86 */
++	if (linux64_hook)
++		return FALSE;
++
+ 	if (enable == TRUE) {
+ 		kprintf("Caller attempted to enable interrupts too early in "
+ 		    "kernel startup. Halting.\n");
+diff --git a/osfmk/i386/pmCPU.c b/osfmk/i386/pmCPU.c
+index bb1900a..228ad53 100644
+--- a/osfmk/i386/pmCPU.c
++++ b/osfmk/i386/pmCPU.c
+@@ -48,6 +48,8 @@
+ #include <i386/rtclock_protos.h>
+ #include <kern/sched_prim.h>
+ #include <i386/lapic.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <i386/pal_routines.h>
+ #include <sys/kdebug.h>
+ #include <i386/tsc.h>
+@@ -113,6 +115,21 @@ machine_idle(void)
+ 	boolean_t do_process_pending_timers = FALSE;
+ 
+ 	ctime = mach_absolute_time();
++/* LINUX64-X86 */
++	if (linux64_hook) {
++		linux64_count(LINUX64_CTR_MACHINE_IDLE);
++		uint64_t deadline = my_cpu->rtclock_timer.deadline;
++		uint64_t ns = deadline > ctime ? (deadline - ctime) / 1000ULL : 0;
++		if (linux64_call2(LINUX64_CALL_IDLE, ns,
++		    (unsigned long)&linux64_ipi_pending[linux64_cpu_slot()]))
++			return;
++		if (ns == 0) {
++			linux64_ipi_pending[linux64_cpu_slot()] = 0;
++			linux64_count(LINUX64_CTR_RTCLOCK);
++			rtclock_intr(NULL);
++		}
++		return;
++	}
+ 	esdeadline = my_cpu->rtclock_timer.queue.earliest_soft_deadline;
+ 	ehdeadline = my_cpu->rtclock_timer.deadline;
+ /* Determine if pending timers exist */
+diff --git a/osfmk/i386/rtclock.c b/osfmk/i386/rtclock.c
+index 09fdf59..cfde933 100644
+--- a/osfmk/i386/rtclock.c
++++ b/osfmk/i386/rtclock.c
+@@ -69,6 +69,8 @@
+ #include <sys/kdebug.h>
+ #include <i386/tsc.h>
+ #include <i386/rtclock_protos.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #define UI_CPUFREQ_ROUNDING_FACTOR      10000000
+ 
+ int             rtclock_init(void);
+@@ -423,6 +425,12 @@ rtclock_intr(
+ 	uint64_t        rip;
+ 	boolean_t       user_mode = FALSE;
+ 
++/* LINUX64-X86 */
++	if (linux64_hook && tregs == NULL) {
++		timer_intr(FALSE, 0);
++		return 0;
++	}
++
+ 	assert(get_preemption_level() > 0);
+ 	assert(!ml_get_interrupts_enabled());
+ 
+diff --git a/osfmk/i386/trap.c b/osfmk/i386/trap.c
+index f0f332c..6a7643a 100644
+--- a/osfmk/i386/trap.c
++++ b/osfmk/i386/trap.c
+@@ -66,6 +66,8 @@
+ #include <types.h>
+ #include <i386/eflags.h>
+ #include <i386/trap_internal.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <i386/pmap.h>
+ #include <i386/fpu.h>
+ #include <i386/panic_notify.h>
+@@ -654,6 +656,40 @@ find_recovery_entry(vm_offset_t kern_ip)
+ 	return NULL;
+ }
+ 
++/* LINUX64-X86 */
++/* LINUX64: forwarded #PF: resolve exactly like kernel_trap's T_PAGE_FAULT case. */
++kern_return_t linux64_kernel_fault(uint64_t far, uint64_t code);
++kern_return_t
++linux64_kernel_fault(uint64_t far, uint64_t code)
++{
++	vm_prot_t prot = VM_PROT_READ;
++	vm_map_t map = kernel_map;
++
++	if (code & T_PF_WRITE)
++		prot |= VM_PROT_WRITE;
++	if (code & T_PF_EXECUTE)
++		prot |= VM_PROT_EXECUTE;
++	if (!VM_KERNEL_ADDRESS(far)) {
++		thread_t thread = current_thread();
++		if (thread == THREAD_NULL || thread->map == VM_MAP_NULL || thread->map == kernel_map)
++			return KERN_FAILURE;
++		map = thread->map;
++	}
++	return vm_fault(map, far, prot, FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0);
++}
++
++/* LINUX64: the copyio recovery address for a fault vm_fault could not resolve. */
++uint64_t linux64_kernel_fault_recover(uint64_t pc, uint64_t far, uint64_t code);
++uint64_t
++linux64_kernel_fault_recover(uint64_t pc, uint64_t far, uint64_t code)
++{
++	struct recovery const *rp;
++
++	(void)far; (void)code;
++	rp = find_recovery_entry(pc);
++	return rp == NULL ? 0 : (uint64_t)rp->recover_addr;
++}
++
+ /*
+  * Trap from kernel mode.  Only page-fault errors are recoverable,
+  * and then only in special circumstances.  All other errors are
+diff --git a/osfmk/kern/assert.h b/osfmk/kern/assert.h
+index 4224c9d..398c3f6 100644
+--- a/osfmk/kern/assert.h
++++ b/osfmk/kern/assert.h
+@@ -193,9 +193,25 @@ STATIC_IF_KEY_DECLARE_TRUE(mach_assert);
+ #define mach_assert_enabled_expr(ex) \
+ 	(mach_assert_enabled() || __builtin_constant_p(!(ex)))
+ 
++/* LINUX64-X86 */
++#if defined(XNU_KERNEL_PRIVATE) && (defined(__arm64__) || defined(__x86_64__))
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern unsigned long linux64_hook;
++extern void linux64_assert_report(const char *file, int line, const char *expr);
++#ifdef __cplusplus
++}
++#endif
++#define assert(ex) \
++	(mach_assert_enabled_expr(ex) && !(ex) \
++	? (linux64_hook ? linux64_assert_report(__FILE_NAME__, __LINE__, #ex) \
++	: (void)mach_assert_abort(#ex)) : (void)0)
++#else
+ #define assert(ex) \
+ 	(mach_assert_enabled_expr(ex) && !(ex) \
+ 	? (void)mach_assert_abort(#ex) : (void)0)
++#endif
+ 
+ #define assertf(ex, fmt, args...)  ({ \
+ 	if (mach_assert_enabled_expr(ex) && __builtin_expect(!(ex), 0L)) {      \
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 48f9405..77433b0 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -55,6 +55,8 @@
+  */
+ 
+ #include <mach_assert.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <mach_kdp.h>
+ #include <kdp/kdp.h>
+ #include <kdp/kdp_core.h>
+@@ -754,7 +756,16 @@ DebuggerTrapWithState(debugger_op db_op, const char *db_message, const char *db_
+ 	 * The rest of the cores are halted by IPI if possible; if that
+ 	 * fails it will fall back to dbgwrap.
+ 	 */
++/* LINUX64-X86 */
++	/* LINUX64: Linux does not deliver XNU's uncategorized trap, so call the
++	 * stackshot handler directly (it needs no trap frame) and skip it. */
++	if (linux64_hook && db_op == DBOP_STACKSHOT) {
++		handle_debugger_trap(0, 0, 0, NULL);
++		goto trapped;
++	}
++
+ 	TRAP_DEBUGGER;
++trapped:
+ 
+ 	ret = CPUDEBUGGERRET;
+ 
+@@ -1253,6 +1264,23 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ {
+ #pragma clang diagnostic pop
+ 
++/* LINUX64-X86 */
++#if defined(__arm64__) || defined(__x86_64__)
++	if (linux64_hook) {
++		static char linux64_panic_buf[512];
++		const char *msg = panic_format_str;
++		if (panic_args != NULL && panic_format_str != NULL) {
++			extern int vsnprintf(char *, size_t, const char *, va_list);
++			va_list ap;
++			va_copy(ap, *panic_args);
++			vsnprintf(linux64_panic_buf, sizeof(linux64_panic_buf), panic_format_str, ap);
++			va_end(ap);
++			msg = linux64_panic_buf;
++		}
++		linux64_call2(LINUX64_CALL_PANIC, (unsigned long)msg, panic_caller);
++	}
++#endif
++
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif
+diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
+index 2fc6931..4d11577 100644
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -155,6 +155,8 @@
+  */
+ 
+ #include <debug.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <mach_kdp.h>
+ #include <mach/boolean.h>
+ #include <kern/cpu_number.h>
+@@ -876,6 +878,18 @@ __printflike(1, 0)
+ static int
+ vprintf_internal(const char *fmt, va_list ap_in, void *caller)
+ {
++/* LINUX64-X86 */
++	if (linux64_hook && fmt) {
++		extern int vsnprintf(char *, size_t, const char *, va_list);
++		char buf[256];
++		va_list ap;
++		va_copy(ap, ap_in);
++		vsnprintf(buf, sizeof(buf), fmt, ap);
++		va_end(ap);
++		linux64_call(LINUX64_CALL_KPRINTF, buf);
++		(void)caller;
++		return 0;
++	}
+ 	if (fmt) {
+ 		struct console_printbuf_state info_data;
+ 
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+index 504b3fa..f552650 100644
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -27,6 +27,8 @@
+  */
+ 
+ #include <kern/locks.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <kern/cpu_number.h>
+ #include <libkern/section_keywords.h>
+ #include <libkern/crypto/sha2.h>
+@@ -370,6 +372,11 @@ random_cpu_init(int cpu)
+ __mockable void
+ read_random(void * buffer, u_int numbytes)
+ {
++/* LINUX64-X86 */
++	if (prng_funcs.generate == NULL && linux64_hook) {
++		linux64_random(buffer, numbytes);
++		return;
++	}
+ 	prng_funcs.refresh(prng_ctx);
+ 	read_random_generate(buffer, numbytes);
+ }
+diff --git a/osfmk/x86_64/pmap.c b/osfmk/x86_64/pmap.c
+index 1827a78..74ee7f5 100644
+--- a/osfmk/x86_64/pmap.c
++++ b/osfmk/x86_64/pmap.c
+@@ -110,6 +110,8 @@
+ #include <vm/vm_map_xnu.h>
+ #include <vm/vm_kern_xnu.h>
+ #include <mach/vm_param.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <mach/vm_prot.h>
+ #include <vm/vm_object_internal.h>
+ #include <vm/vm_page_internal.h>
+@@ -505,6 +507,13 @@ pmap_bootstrap(
+ 	kernel_pmap->pm_ucr3 = (uintptr_t)ID_MAP_VTOP(IdlePML4);
+ 	kernel_pmap->pm_eptp = 0;
+ 
++/* LINUX64-X86 */
++	if (linux64_hook) {
++		/* Hand XNU's kernel root to the host: it copies our upper-half entries into
++		 * Linux's CR3 so both kernels use one set of kernel mappings. */
++		linux64_call2(LINUX64_CALL_KERNEL_TABLES, (unsigned long)kernel_pmap->pm_pml4, 0);
++	}
++
+ 	pmap_pcid_initialize_kernel(kernel_pmap);
+ 
+ 	current_cpu_datap()->cpu_kernel_cr3 = cpu_shadowp(cpu_number())->cpu_kernel_cr3 = (addr64_t) kernel_pmap->pm_cr3;
+diff --git a/pexpert/i386/pe_kprintf.c b/pexpert/i386/pe_kprintf.c
+index 199df04..952fcea 100644
+--- a/pexpert/i386/pe_kprintf.c
++++ b/pexpert/i386/pe_kprintf.c
+@@ -30,6 +30,8 @@
+  *    i386 platform expert debugging output initialization.
+  */
+ #include <stdarg.h>
++/* LINUX64-X86 */
++#include <linux64/linux64.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/debug.h>

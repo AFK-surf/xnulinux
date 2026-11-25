@@ -9,12 +9,28 @@
  *        module through linux64_hook (the interface: linux64_abi.h).
  */
 #include <linux/module.h>
+#include <linux/smp.h>
 #include "../fki-ko/fki.h"
 #include "xrt.h"
 #include "macho.h"
 #include "adt.h"
 #include "world.h"
 #include "../xnu-patches/include/linux64_abi.h"
+
+#ifndef ENOSYS
+#define ENOSYS 38
+#endif
+
+/*
+ * PAC keys exist only on arm64. x86's fki_enter() ignores its keys argument, so hand it
+ * a zeroed dummy: this keeps the arm64 call sites unchanged and the x86 world struct lean.
+ */
+#ifdef CONFIG_X86_64
+static struct fki_pac_keys xnu_x86_no_keys;
+#define XNU_KEYS (&xnu_x86_no_keys)
+#else
+#define XNU_KEYS (XNU_KEYS)
+#endif
 
 static char *image = "xnu/kernel.macho";
 module_param(image, charp, 0444);
@@ -53,7 +69,37 @@ static unsigned long long cpu_mpidr[XNU_MAX_CPUS];
 static void *cpu_thread[XNU_MAX_CPUS];
 static volatile int cpu_running[XNU_MAX_CPUS];
 static u64_t a_cpu_entry;			/* XNU's linux64_cpu_entry */
-static inline unsigned this_slot(void) { unsigned long m; __asm__ volatile("mrs %0, mpidr_el1" : "=r"(m)); return LINUX64_CPU_SLOT(m); }
+static inline unsigned this_slot(void)
+{
+#ifdef CONFIG_ARM64
+	unsigned long m;
+
+	__asm__ volatile("mrs %0, mpidr_el1" : "=r"(m));
+	return LINUX64_CPU_SLOT(m);
+#else
+	return smp_processor_id() & (LINUX64_CPU_SLOTS - 1);
+#endif
+}
+
+#ifdef CONFIG_X86_64
+/* The C wrappers resolve this CPU's save area; world_x86.S does the actual switch. */
+long xnu_world_call(unsigned long fn, unsigned long arg)
+{
+	return xnu_world_switch_in(xnu_worlds[this_slot()], fn, arg);
+}
+
+long xnu_world_upcall(unsigned long stage, unsigned long a1, unsigned long a2)
+{
+	/*
+	 * XNU enters with its own %gs (cpu_data) live, so smp_processor_id()/this_slot() cannot be
+	 * used here. Only XNU CPU 0 runs today (linux64_cpu_entry parks secondaries), and that is
+	 * the boot CPU whose state lives in xnu_W. The assembly upcall turns Linux's %gs back on
+	 * before it calls the C hook handler.
+	 */
+	return xnu_world_upcall_asm(&xnu_W, stage, a1, a2);
+}
+#endif
+
 /* Writing 1 ends the run at XNU's next call into the host; insmod returns and the module can be removed */
 static int stop_run;
 module_param(stop_run, int, 0644);
@@ -61,7 +107,14 @@ static int assert_fatal;	/* 1: a failed XNU assert() ends the run; 0: report it 
 module_param(assert_fatal, int, 0444);
 
 static struct xnu_image img;
+#ifndef CONFIG_X86_64
 static struct fki_region l2page;
+#endif
+#ifdef CONFIG_X86_64
+static struct fki_region x86_pdpage;
+static unsigned long long *x86_pdpt;
+static unsigned x86_pdpt_slot;
+#endif
 static unsigned long long *window_slot, *window_l1;
 static unsigned char window_owned[512];
 static u64_t diag_va[6];
@@ -133,7 +186,9 @@ module_param(preboot_uuid, charp, 0444);
  */
 static char *root_uuid;
 module_param(root_uuid, charp, 0444);
+#ifndef CONFIG_X86_64
 static char root_matching[256];
+#endif
 static void *in_file; static fki_u64 in_off;
 struct xnu_world xnu_W;
 
@@ -156,14 +211,14 @@ typedef unsigned int (*crc32_fn)(unsigned int, const void *, unsigned long);
 static int run_m1(void)
 {
 	struct fki_pac_keys saved; unsigned long c;
-	c = fki_enter(&xnu_W.xnu_keys, &saved);
+	c = fki_enter(XNU_KEYS, &saved);
 	int n = macho_rebase(&img);
 	fki_leave(c, &saved);
 	logkv("xnu: threaded fixups applied", (u64_t)n);
 	if (n < 0) return n;
 	u64_t v = macho_sym(&img, "_version"), sl = macho_sym(&img, "_strlen"), cr = macho_sym(&img, "_crc32");
 	if (!v || !sl || !cr) { logs("xnu: symbols missing"); return 0; }
-	c = fki_enter(&xnu_W.xnu_keys, &saved);
+	c = fki_enter(XNU_KEYS, &saved);
 	unsigned long len = ((strlen_fn)sl)((const char *)v);
 	unsigned int crc = ((crc32_fn)cr)(0, (const void *)v, len);
 	fki_leave(c, &saved);
@@ -188,6 +243,34 @@ struct boot_args_v2 {			/* pexpert/arm64/boot.h layout */
 	char CommandLine[BOOT_LINE];
 	u64_t bootFlags, memSizeActual;
 };
+
+/* pexpert/pexpert/i386/boot.h: the exact 4096-byte x86 boot_args. */
+struct boot_args_x86 {
+	u16 Revision, Version;
+	u8 efiMode, debugMode;
+	u16 flags;
+	char CommandLine[BOOT_LINE];
+	u32 MemoryMap, MemoryMapSize, MemoryMapDescriptorSize, MemoryMapDescriptorVersion;
+	struct { u32 v_baseAddr, v_display, v_rowBytes, v_width, v_height, v_depth; } VideoV1;
+	u32 deviceTreeP, deviceTreeLength;
+	u32 kaddr, ksize;
+	u32 efiRuntimeServicesPageStart, efiRuntimeServicesPageCount;
+	u64 efiRuntimeServicesVirtualPageStart;
+	u32 efiSystemTable, kslide;
+	u32 performanceDataStart, performanceDataSize;
+	u32 keyStoreDataStart, keyStoreDataSize;
+	u64 bootMemStart, bootMemSize, PhysicalMemorySize, FSBFrequency, pciConfigSpaceBaseAddress;
+	u32 pciConfigSpaceStartBusNumber, pciConfigSpaceEndBusNumber, csrActiveConfig, csrCapabilities, boot_SMC_plimit;
+	u16 bootProgressMeterStart, bootProgressMeterEnd;
+	struct { u32 v_display, v_rowBytes, v_width, v_height, v_depth; u8 v_rotate, v_resv_byte[3];
+		u32 v_resv[6]; u64 v_baseAddr; } Video;
+	u32 apfsDataStart, apfsDataSize;
+	u64 KC_hdrs_vaddr;
+	u64 arvRootHashStart, arvRootHashSize, arvManifestStart, arvManifestSize;
+	u64 bsARVRootHashStart, bsARVRootHashSize, bsARVManifestStart, bsARVManifestSize;
+	u32 __reserved4[692];
+};
+_Static_assert(sizeof(struct boot_args_x86) == 4096, "x86 boot_args layout");
 
 /*
  * The machine's model (the device tree root's "model", hw.model): user space takes the product type from it
@@ -266,7 +349,12 @@ extern void xnu_world_fault_abort(void);
  * stack x18 then points into (the return address pushed on the first CPU's would be popped from the second's). XNU never
  * saves x18 per thread, so the register follows the CPU: what this calls pushes and pops on the current CPU's.
  */
-unsigned long xnu_fault_deferred(unsigned long *frame) __attribute__((no_sanitize("shadow-call-stack")));
+#ifdef CONFIG_ARM64
+#define XNU_NO_SCS __attribute__((no_sanitize("shadow-call-stack")))
+#else
+#define XNU_NO_SCS
+#endif
+unsigned long xnu_fault_deferred(unsigned long *frame) XNU_NO_SCS;
 unsigned long xnu_fault_deferred(unsigned long *frame)
 {
 	unsigned long far = xnu_deferred.far, esr = xnu_deferred.esr, pc = xnu_deferred.pc;
@@ -285,6 +373,7 @@ unsigned long xnu_fault_deferred(unsigned long *frame)
 	 */
 	long kr = xnu_kfault(far, esr);
 	if (this_slot() != s0) {
+#ifdef CONFIG_ARM64
 		/*
 		 * vm_fault blocked and the thread came back on another CPU. xnu_fault_tramp's eret restores every register
 		 * of the faulting context from frame, x18 included: that would be the first CPU's shadow stack pointer, and
@@ -292,8 +381,10 @@ unsigned long xnu_fault_deferred(unsigned long *frame)
 		 * uses it too (corrupted shadow stacks, FPAC in whatever Linux code runs next). x18 follows the CPU.
 		 */
 		unsigned long x18;
+
 		__asm__ volatile("mov %0, x18" : "=r"(x18));
 		frame[18] = x18;
+#endif
 		kfault_moved++;
 	}
 	if (kr == 0) {
@@ -306,7 +397,7 @@ unsigned long xnu_fault_deferred(unsigned long *frame)
 		}
 		/* a fault loop runs with interrupts masked: let Linux take its interrupts now and then (RCU, network) */
 		if ((repeats & 63) == 63)
-			((void (*)(unsigned long, unsigned long, unsigned long))xnu_world_upcall)(LINUX64_CALL_PREEMPTED, 0, 0);
+			xnu_world_upcall(LINUX64_CALL_PREEMPTED, 0, 0);
 		return pc;
 	}
 	/* inside copyin/copyout: the routine's recovery path returns EFAULT to its caller, as XNU's own abort handler does */
@@ -326,6 +417,7 @@ unsigned long xnu_fault_deferred(unsigned long *frame)
 	return (unsigned long)xnu_world_fault_abort;
 }
 
+#ifndef CONFIG_X86_64
 static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 {
 	if (!in_xnu)
@@ -391,6 +483,8 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 	return 0;
 }
 
+#endif /* !CONFIG_X86_64 */
+
 /* A secondary CPU's host thread: its own world, entered at linux64_cpu_entry(cpu_data); returns when the run ends */
 static unsigned long cpu_start_arg[XNU_MAX_CPUS];
 static int park_secondaries;	/* diagnostics: 1 keeps secondary CPUs out of XNU */
@@ -448,10 +542,12 @@ long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 	unsigned in_s = this_slot();	/* the thread is bound to its CPU while in the host */
 	upcalls_slot[in_s]++;
 	last_call_slot[in_s] = call;
+#ifdef CONFIG_ARM64
 	{
 		/* debugging: an XNU stack Linux's overflow check would reject (bit 14 of sp set) */
 		static int told;
 		unsigned long sp;
+
 		__asm__ volatile("mov %0, sp" : "=r"(sp));
 		if ((sp & 0x4000) && told < 3) {
 			told++;
@@ -459,6 +555,7 @@ long xnu_hook(unsigned long call, unsigned long a1, unsigned long a2)
 			logkv("xnu:   call", call);
 		}
 	}
+#endif
 	in_xnu = 0;
 	if (*(volatile int *)&stop_run) {	/* the host asked the run to end (scripts/xnulinux-boot.sh stop): XNU is abandoned here */
 		logs("xnu: run stopped by the host (stop_run)");
@@ -696,6 +793,7 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
  * Boot handoff. The XNU "DRAM" region is described by (virtBase, physBase, size): XNU sees base_va as the
  * kernel virtual address of physBase. The image's vmlow sits at base_va + image_off.
  */
+#ifndef CONFIG_X86_64
 static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t size, u64_t image_off, u64_t image_size)
 {
 	u64_t off_args = (image_off + image_size + 0x3fff) & ~0x3fffULL;
@@ -913,6 +1011,70 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 }
 
 
+#endif /* !CONFIG_X86_64 */
+
+/* x86 boot handoff: vstart takes the virtual address of boot_args and reads an EFI memory map. */
+static struct boot_args_x86 *build_boot_x86(unsigned char *base_va, u64_t phys, u64_t size,
+    u64_t image_off, u64_t image_size)
+{
+	u64_t off_args = (image_off + image_size + 0xfff) & ~0xfffULL;
+	u64_t off_map = off_args + 4096;
+	struct boot_args_x86 *ba = (void *)(base_va + off_args);
+	struct { u32 Type, Pad; u64 PhysicalStart, VirtualStart, NumberOfPages, Attribute; } *map;
+	int berr;
+
+	/* XNU's CPU 0 is Linux CPU 0: bind here before vstart reads %gs (cpu_data) and installs its IDT. */
+	berr = fki_bind_cpu(0);
+	if (berr) { logkv("xnu: cannot bind to cpu0, err", (u64_t)berr); return 0; }
+	if (cpus < 1) cpus = 1;
+	if (cpus > XNU_MAX_CPUS) cpus = XNU_MAX_CPUS;
+	if (cpus > fki_num_cpus()) cpus = fki_num_cpus();
+	for (int i = 0; i < LINUX64_CPU_SLOTS; i++) linux_cpu_of_slot[i] = -1;
+	for (int c = 0; c < cpus; c++) {
+		cpu_mpidr[c] = c;			/* x86: XNU CPU n is Linux CPU n */
+		linux_cpu_of_slot[c & (LINUX64_CPU_SLOTS - 1)] = (signed char)c;
+		xnu_worlds[c & (LINUX64_CPU_SLOTS - 1)] = c ? &worlds[c] : &xnu_W;
+	}
+
+	memset(ba, 0, sizeof(*ba));
+	ba->Revision = 0;			/* kBootArgsRevision2_0 */
+	ba->Version = 2;			/* kBootArgsVersion */
+	ba->efiMode = 64;			/* kBootArgsEfiMode64 */
+	ba->flags = 1 << 3;			/* kBootArgsFlagCSRActiveConfig */
+	x_memcpy(ba->CommandLine, cmdline, x_strlen(cmdline) + 1);
+	{
+		const char *pg = vm16k ? cmdline_16k : cmdline_4k;
+		x_memcpy(ba->CommandLine + x_strlen(ba->CommandLine), pg, x_strlen(pg) + 1);
+	}
+	if (bootargs && x_strlen(ba->CommandLine) + 1 + x_strlen(bootargs) < sizeof(ba->CommandLine)) {
+		char *e = ba->CommandLine + x_strlen(ba->CommandLine);
+		*e++ = ' ';
+		x_memcpy(e, bootargs, x_strlen(bootargs) + 1);
+	}
+	map = (void *)(base_va + off_map);
+	map->Type = 7;				/* kEfiConventionalMemory */
+	map->Pad = 0;
+	map->PhysicalStart = phys;
+	map->VirtualStart = 0;
+	map->NumberOfPages = size >> 12;
+	map->Attribute = 0;
+	ba->MemoryMap = (u32)phys + off_map;
+	ba->MemoryMapSize = sizeof(*map);
+	ba->MemoryMapDescriptorSize = sizeof(*map);
+	ba->MemoryMapDescriptorVersion = 1;
+	ba->kaddr = (u32)(phys + image_off);
+	ba->ksize = (u32)image_size;
+	ba->PhysicalMemorySize = size;
+	ba->bootMemStart = phys;
+	ba->bootMemSize = size;
+	ba->kslide = 0;				/* loaded at the link address */
+	ba->KC_hdrs_vaddr = 0;		/* no chained fixups: not slid */
+	logkv("xnu: x86 boot args at", (u64_t)ba);
+	logkv("xnu: x86 boot args phys", phys + off_args);
+	logkv("xnu: x86 memory map bytes", ba->MemoryMapSize);
+	return ba;
+}
+
 /*
  * Monitor: XNU runs with interrupts masked on its CPU, so when it spins nothing reaches Linux. A helper
  * thread on another CPU prints XNU's debug counters (linux64_dbg, see the XNU patch) every 2 s.
@@ -1006,7 +1168,11 @@ static int monitor_fn(void *arg)
 				if ((c && !cpu_running[c]) || upcalls_slot[s] != seen[c]) { seen[c] = upcalls_slot[s]; still[c] = 0; continue; }
 				if (++still[c] == 1) {
 					struct xnu_world *w = xnu_worlds[s];
+#ifdef CONFIG_X86_64
+					unsigned long fp = 0;	/* no XNU frame chain in the x86 save area */
+#else
 					unsigned long fp = w->xnu_regs[10];
+#endif
 					{
 						char ab[160]; char *q = ab;
 						put_str(&q, "xnu: XNU CPU "); q = put_dec(q, (unsigned long)c);
@@ -1018,7 +1184,11 @@ static int monitor_fn(void *arg)
 					logkv("xnu: XNU CPU silent for 2 s (no host call), cpu", (u64_t)c);
 					logkv("xnu:   its last host call", last_call_slot[s]);
 					logkv("xnu:   still inside it (1) or back in XNU (0)", in_call_slot[s]);
+#ifdef CONFIG_X86_64
+					logkv("xnu:   rsp at that call", w->xnu_rsp);
+#else
 					logkv("xnu:   lr at that call", w->xnu_regs[11]);
+#endif
 					for (int f = 0; f < 16 && fp >= XNU_VA_LO && fp < XNU_VA_HI && !(fp & 7); f++) {
 						logkv("xnu:   frame", ((unsigned long *)fp)[1]);
 						fp = ((unsigned long *)fp)[0];
@@ -1070,12 +1240,17 @@ static int fb_fn(void *arg)
 
 static int enter_arm_init(struct boot_args_v2 *ba)
 {
+#ifdef CONFIG_X86_64
+	/* Loaded at its link address: no slide, no ARM threaded fixups, no kernel collection. */
+	if (img.filetype == MH_FILESET) { logs("xnu: x86 does not support a kernel collection"); return -22; }
+	if (img.slide) { logs("xnu: x86 hosted image must not slide"); return -22; }
+#else
 	if (img.filetype == MH_FILESET) {
 		/* kernel collection at its link address: XNU applies the chained fixups itself; nothing slides */
 		if (img.slide) { logs("xnu: a kernel collection must not slide"); return -22; }
 		logs("xnu: kernel collection: XNU applies its chained fixups (kernel_collection_slide)");
 	} else {
-		struct fki_pac_keys saved; unsigned long c = fki_enter(&xnu_W.xnu_keys, &saved);
+		struct fki_pac_keys saved; unsigned long c = fki_enter(XNU_KEYS, &saved);
 		int n = macho_rebase(&img);
 		fki_leave(c, &saved);
 		logkv("xnu: threaded fixups applied", (u64_t)n);
@@ -1085,14 +1260,24 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		int segs = macho_slide_header(&img, &mh_unslid);
 		logkv("xnu: load commands slid (segments)", (u64_t)segs);
 	}
-	u64_t a_init = macho_sym(&img, "_arm_init"), a_hook = macho_sym(&img, "_linux64_hook"),
-	      a_slide = macho_sym(&img, "_linux64_slide");
-	logkv("xnu: arm_init at", a_init);
-	if (!a_init || !a_hook || !a_slide) { logs("xnu: arm_init or linux64_hook missing (kernel without the LINUX64 patch?)"); return -2; }
+#endif
+#ifdef CONFIG_X86_64
+	u64_t a_init = macho_sym(&img, "_vstart");
+#else
+	u64_t a_init = macho_sym(&img, "_arm_init");
+#endif
+	u64_t a_hook = macho_sym(&img, "_linux64_hook"), a_slide = macho_sym(&img, "_linux64_slide");
+	logkv("xnu: kernel entry at", a_init);
+	if (!a_init || !a_hook || !a_slide) { logs("xnu: kernel entry or linux64_hook missing (kernel without the LINUX64 patch?)"); return -2; }
 	*(u64_t *)a_hook = (u64_t)xnu_world_upcall;
 	*(u64_t *)a_slide = img.slide;
 
-	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba; diag_va[3] = (u64_t)ba->deviceTreeP;
+	diag_va[0] = a_init; diag_va[1] = img.vmlow; diag_va[2] = (u64_t)ba;
+#ifdef CONFIG_X86_64
+	diag_va[3] = 0;			/* x86 boot_args has a 32-bit deviceTreeP at a different offset */
+#else
+	diag_va[3] = (u64_t)ba->deviceTreeP;
+#endif
 	diag_va[4] = macho_sym(&img, "_port_crumb");
 	diag_va[5] = macho_sym(&img, "_strlen");
 	xnu_dbg = (const unsigned long *)macho_sym(&img, "_linux64_dbg");
@@ -1106,16 +1291,21 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		if (fb_off && fb_dump && fb_dump_ms > 0 && img.region.va)
 			fb_thread = fki_thread_start(fb_fn, 0, monitor_cpu >= 0 ? monitor_cpu : host_cpu, "xnu-fb");
 	}
+#ifndef CONFIG_X86_64
+	/* x86: XNU owns its IDT and handles #PF with its own kernel_trap; no Linux fault forwarding. */
 	xnu_kfault = (void *)macho_sym(&img, "_linux64_kernel_fault");
 	xnu_kfault_recover = (void *)macho_sym(&img, "_linux64_kernel_fault_recover");
 	if (xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
 		logs("xnu: kernel faults on XNU addresses go to XNU's vm_fault");
+#endif
+#ifdef CONFIG_ARM64
 	{
 		/*
 		 * XNU's user half starts as Linux's TTBR0. Its TCR stays Linux's (T0SZ 16, 4-level): a 4K XNU user pmap's
 		 * hardware root (hw_ttep) is an L0 table whose first entry points at its L1 (ttep), as the walk showed.
 		 */
 		unsigned long long tcr, ttbr0;
+
 		__asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
 		__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
 		/*
@@ -1127,21 +1317,24 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		xnu_W.xnu_tcr = tcr & ~(1ULL << 22);
 		xnu_W.xnu_ttbr0 = ttbr0;
 	}
+#endif
 	a_cpu_entry = macho_sym(&img, "_linux64_cpu_entry");
+#ifndef CONFIG_X86_64
 	for (int c = 1; c < cpus; c++) {	/* the secondary CPUs' save areas start as the boot CPU's: XNU's keys, user TTBR0/TCR */
 		worlds[c].xnu_keys = xnu_W.xnu_keys;
 		worlds[c].xnu_tcr = xnu_W.xnu_tcr;
 		worlds[c].xnu_ttbr0 = xnu_W.xnu_ttbr0;
 	}
+#endif
 	if (cpus > 1 && !a_cpu_entry) { logs("xnu: kernel without linux64_cpu_entry: one CPU"); cpus = 1; }
 	for (int c = 1; c < cpus; c++) {	/* each secondary CPU's host thread, waiting for XNU to start that CPU */
 		cpu_start_arg[c] = 0;
 		cpu_thread[c] = fki_thread_start(cpu_fn, (void *)(unsigned long)c, c, "xnu-cpu");
 		if (!cpu_thread[c]) { logkv("xnu: cannot make a thread for CPU, running with CPUs below it:", (u64_t)c); cpus = c; }
 	}
-	logs("xnu: entering arm_init");
+	logs("xnu: entering kernel");
 	in_xnu = 1;
-	long r = xnu_world_call(a_init, (unsigned long)ba);
+	long r = xnu_world_call(a_init, (unsigned long)ba);	/* virtual address of boot_args for both arches */
 	in_xnu = 0;
 	stop_run = 1;		/* the other CPUs end at their next call into the host (kicked out of idle) */
 	for (int c = 1; c < cpus; c++) {
@@ -1150,16 +1343,19 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		fki_thread_stop(cpu_thread[c]);
 		cpu_thread[c] = 0;
 	}
+#ifndef CONFIG_X86_64
 	fki_fault_unregister();
 	logkv("xnu: kernel faults forwarded to XNU", kfaults);
+#endif
 	fki_thread_stop(monitor);
 	monitor = 0;
 	fki_thread_stop(fb_thread);
 	fb_thread = 0;
-	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: arm_init returned (unexpected), r =", (u64_t)r);
+	logkv(r ? "xnu: run ended by stage hook, r =" : "xnu: kernel entry returned (unexpected), r =", (u64_t)r);
 	return 0;
 }
 
+#ifndef CONFIG_X86_64
 /* M2a: the image in a vmalloc region with synthetic physical addresses. */
 static int run_m2a(void)
 {
@@ -1168,6 +1364,8 @@ static int run_m2a(void)
 	if (!ba) return -22;
 	return enter_arm_init(ba);
 }
+
+#endif /* !CONFIG_X86_64 */
 
 /*
  * M2b: XNU at its own link address in the top foreign window, on physically contiguous memory with real
@@ -1178,10 +1376,59 @@ static int run_m2a(void)
 static int run_m2b(void)
 {
 	u64_t image_size = img.vmhigh - img.vmlow;
-	if (img.vmlow < 0xffffffe000000000ULL) { logs("xnu: unexpected link address"); return -22; }
 	u64_t image_off = img.vmlow - XNU_WINDOW_BASE;
 	u64_t want = image_off + image_size + 0x60000 + BOOT_EXTRA + ((u64_t)ram_mb << 20);
-	int err = fki_contig_alloc(want, &img.region);
+	int err;
+
+#ifdef CONFIG_X86_64
+	/*
+	 * x86_64 bootstrap window. XNU links in the top PML4 slot (ffffff8000000000..,
+	 * PML4 511 / PDPT 0), which Linux leaves unused. Install one PDPT entry pointing
+	 * at a temporary page directory with 2 MiB pages so vstart can execute and we can
+	 * lay down the image and boot args. XNU's vstart then installs its own IDT/GDT/TSS
+	 * and switches CR3; the world switch restores Linux's state on every upcall.
+	 */
+	fki_u64 pdpt_pa;
+
+	if (img.vmlow < 0xffffff8000000000ULL || img.vmhigh > 0xffffffc000000000ULL) {
+		logs("xnu: unexpected x86 link address"); return -22;
+	}
+	err = fki_contig_alloc(want, &img.region);
+	if (err) { logkv("xnu: contiguous allocation failed, err", (u64_t)err); return err; }
+	logkv("xnu: contiguous DRAM at phys", img.region.pa);
+	logkv("xnu: contiguous DRAM size", img.region.size);
+	if (img.region.pa & 0x1fffff) { logs("xnu: region not 2 MiB aligned"); return -22; }
+	/* boot_args::kaddr/MemoryMap are 32-bit physical addresses in Apple's x86 boot protocol. */
+	if (img.region.pa + img.region.size > 0x100000000ULL) {
+		logs("xnu: x86 DRAM must be below 4 GiB; boot fki with carve_base below 4 GiB");
+		fki_contig_free(&img.region);
+		return -22;
+	}
+	err = fki_window_l1(XNU_WINDOW_BASE, &x86_pdpt, &pdpt_pa);
+	if (err) { logs("xnu: no top-level table for the x86 window"); return err; }
+	x86_pdpt_slot = (XNU_WINDOW_BASE >> 30) & 511;
+	if (x86_pdpt[x86_pdpt_slot]) { logkv("xnu: x86 window slot in use by Linux:", x86_pdpt_slot); return -16; }
+	err = fki_contig_alloc(4096, &x86_pdpage);
+	if (err) return err;
+	{
+		unsigned long long *pd = x86_pdpage.va;
+		for (unsigned i = 0; i < 512; i++)
+			pd[i] = ((img.region.pa + ((u64_t)i << 21)) | (1ULL << 7) | 3ULL);
+	}
+	fki_window_set(&x86_pdpt[x86_pdpt_slot], x86_pdpage.pa | 3ULL);
+	logs("xnu: x86 bootstrap window mapped");
+
+	unsigned char *base = (unsigned char *)XNU_WINDOW_BASE;
+	err = macho_copy(&img, base + image_off);
+	if (err) return err;
+	struct boot_args_x86 *ba = build_boot_x86(base, img.region.pa, img.region.size, image_off, image_size);
+	if (!ba) return -22;
+	logkv("xnu: x86 image copied to", (u64_t)(base + image_off));
+	return enter_arm_init((void *)ba);
+#else
+	if (img.vmlow < 0xffffffe000000000ULL) { logs("xnu: unexpected link address"); return -22; }
+
+	err = fki_contig_alloc(want, &img.region);
 	if (err) { logkv("xnu: contiguous allocation failed, err", (u64_t)err); return err; }
 	logkv("xnu: contiguous DRAM at phys", img.region.pa);
 	logkv("xnu: contiguous DRAM size", img.region.size);
@@ -1226,6 +1473,7 @@ static int run_m2b(void)
 	struct boot_args_v2 *ba = build_boot(base, img.region.pa, img.region.size, image_off, image_size);
 	if (!ba) return -22;
 	return enter_arm_init(ba);
+#endif
 }
 
 static int __init xnu_init(void)
@@ -1272,7 +1520,11 @@ static int __init xnu_init(void)
 	}
 	err = fki_blob_get(image, &data, &size, &blob);
 	if (err) { logkv("xnu: cannot read image, err", (u64_t)err); return err; }
+#ifdef CONFIG_X86_64
+	err = macho_load(&img, data, size, ~0UL);	/* parse only: run_m2b places the image itself */
+#else
 	err = macho_load(&img, data, size, mode == 3 ? ~0UL : mode == 2 ? (unsigned long)ram_mb << 20 : 0);
+#endif
 	if (err) { logkv("xnu: load failed", (u64_t)err); fki_blob_put(blob); blob = 0; return err; }
 	logkv("xnu: image vmlow", img.vmlow);
 	logkv("xnu: image size", img.vmhigh - img.vmlow);
@@ -1281,10 +1533,15 @@ static int __init xnu_init(void)
 		logkv("xnu: region size", img.region.size);
 	}
 
-	fki_random(&xnu_W.xnu_keys, sizeof(xnu_W.xnu_keys));
-	xnu_W.xnu_keys.sctlr_en = ~0ULL;
+	fki_random(XNU_KEYS, sizeof(*XNU_KEYS));
+	XNU_KEYS->sctlr_en = ~0ULL;
 
+#ifdef CONFIG_X86_64
+	/* x86 has no ARM L1 window trick in mode 2a: always use the contiguous path. */
+	return mode == 1 ? run_m1() : run_m2b();
+#else
 	return mode == 1 ? run_m1() : mode == 3 ? run_m2b() : run_m2a();
+#endif
 }
 
 static void __exit xnu_exit(void)
@@ -1294,10 +1551,19 @@ static void __exit xnu_exit(void)
 		for (int i = 0; i < 512; i++) if (window_owned[i]) { window_l1[i] = 0; last = i; }
 		if (last >= 0) fki_window_set(&window_l1[last], 0);
 	}
+#ifdef CONFIG_X86_64
+	if (x86_pdpt && x86_pdpt[x86_pdpt_slot]) {
+		x86_pdpt[x86_pdpt_slot] = 0;
+		fki_window_set(&x86_pdpt[x86_pdpt_slot], 0);
+	}
+	if (x86_pdpage.va) fki_contig_free(&x86_pdpage);
+	if (img.region.va) fki_contig_free(&img.region);
+#else
 	if (mode == 3) {
 		if (img.region.va) fki_contig_free(&img.region);
 		if (l2page.va) fki_contig_free(&l2page);
 	} else if (img.region.va) fki_region_free(&img.region);
+#endif
 	if (blob) fki_blob_put(blob);
 	if (rd_blob) fki_blob_put(rd_blob);
 	if (tc_blob) fki_blob_put(tc_blob);

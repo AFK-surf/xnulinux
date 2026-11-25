@@ -19,8 +19,14 @@
 #include <linux/sched.h>
 #include <linux/cpumask.h>
 #include <linux/vmalloc.h>
+#include <linux/string.h>
+#ifdef CONFIG_ARM64
 #include <asm/arch_timer.h>
 #include <asm/sysreg.h>
+#else
+#include <asm/fpu/api.h>
+#include <linux/timekeeping.h>
+#endif
 
 int fki_version(void)
 {
@@ -92,8 +98,8 @@ void fki_blob_put(void *handle)
 }
 EXPORT_SYMBOL(fki_blob_put);
 
+#ifdef CONFIG_ARM64
 #define FKI_SCTLR_EN (SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | SCTLR_ELx_ENDA | SCTLR_ELx_ENDB)
-
 
 static void keys_read(struct fki_pac_keys *k)
 {
@@ -116,10 +122,26 @@ static void keys_write(const struct fki_pac_keys *k)
 	isb();
 }
 
+static inline void fki_fpsimd_forget(void) { }
+#else
+/* x86_64 has no pointer authentication keys: keep the ABI-sized blob opaque and inert. */
+static void keys_read(struct fki_pac_keys *k)
+{
+	memset(k, 0, sizeof(*k));
+}
+static void keys_write(const struct fki_pac_keys *k) { }
+static inline void fki_fpsimd_forget(void)
+{
+	kernel_fpu_begin();
+	kernel_fpu_end();
+}
+#endif
+
 unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved)
 {
 	unsigned long flags;
 
+	fki_fpsimd_forget();
 	preempt_disable();
 	local_irq_save(flags);
 	keys_read(saved);
@@ -145,13 +167,21 @@ EXPORT_SYMBOL(fki_pac_swap);
 
 fki_u64 fki_counter_frequency(void)
 {
+#ifdef CONFIG_ARM64
 	return arch_timer_get_cntfrq();
+#else
+	return NSEC_PER_SEC;
+#endif
 }
 EXPORT_SYMBOL(fki_counter_frequency);
 
 fki_u64 fki_counter(void)
 {
+#ifdef CONFIG_ARM64
 	return __arch_counter_get_cntvct();
+#else
+	return ktime_get_ns();
+#endif
 }
 EXPORT_SYMBOL(fki_counter);
 
