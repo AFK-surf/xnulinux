@@ -7924,7 +7924,7 @@ index 4f2045c..a72ac7c 100644
  	/*
  	 * Finally, give any remaining allocable space to the data region.
 diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
-index fd9e108..48a0544 100644
+index fd9e108..bed0589 100644
 --- a/osfmk/vm/vm_map.c
 +++ b/osfmk/vm/vm_map.c
 @@ -74,6 +74,7 @@
@@ -8284,10 +8284,10 @@ index fd9e108..48a0544 100644
 +		return true;
 +	}
 +	vm_object_lock_shared(object);
-+	bool is_device_pager = (object->private && object->pager_created);
++	bool is_device_pager = (object->pager != MEMORY_OBJECT_NULL &&
++	    is_device_pager_ops(object->pager->mo_pager_ops));
 +	bool wimg_ok = allow_obj_wimg_override || pmap_el0_wimg_supported(object->wimg_bits) ||
-+	    (allow_device_pager_wimg && is_device_pager &&
-+	    (object->wimg_bits == VM_WIMG_IO || object->wimg_bits == VM_WIMG_WCOMB));
++	    (allow_device_pager_wimg && is_device_pager);
 +	if (!wimg_ok) {
 +		vm_object_unlock(object);
 +		return false;
@@ -9815,7 +9815,7 @@ index fd9e108..48a0544 100644
  		/* null the linkages */
  		new_copy->chain.tqe_next = NULL;
  		new_copy->chain.tqe_prev = NULL;
-@@ -6970,16 +8172,75 @@ vm_map_wire_sanitize(
+@@ -6970,16 +8172,76 @@ vm_map_wire_sanitize(
   * return KERN_SUCCESS if the preflight was successful
   * otherwise, the preflight of space failed and we cannot wire the entry.
   */
@@ -9847,9 +9847,10 @@ index fd9e108..48a0544 100644
 +}
 +
 +static inline bool
-+el0_entry_skip_autowire(vm_map_entry_t entry, vm_prot_t effective_prot)
++el0_entry_skip_autowire(vm_map_t map, vm_map_entry_t entry, vm_prot_t effective_prot)
 +{
-+	if (entry->is_sub_map ||
++	if (map->never_faults ||
++	    entry->is_sub_map ||
 +	    !(effective_prot & (VM_PROT_READ | VM_PROT_WRITE)) ||
 +	    el0_entry_unpopulated_device_pager(entry)) {
 +		return true;
@@ -9861,7 +9862,7 @@ index fd9e108..48a0544 100644
 +static bool
 +el0_entry_missing_pte(vm_map_t map, vm_map_entry_t entry, vm_prot_t req_prot)
 +{
-+	if (el0_entry_skip_autowire(entry, req_prot)) {
++	if (el0_entry_skip_autowire(map, entry, req_prot)) {
 +		return false;
 +	}
 +	vm_prot_t check_prot = req_prot & (VM_PROT_READ | VM_PROT_WRITE);
@@ -9891,13 +9892,13 @@ index fd9e108..48a0544 100644
  
  	/*
  	 * If we don't need to wire the pages,
-@@ -6988,7 +8249,28 @@ vm_map_wire_copy_entry_and_preflight_space(
+@@ -6988,7 +8250,28 @@ vm_map_wire_copy_entry_and_preflight_space(
  	 * Also increment the wire count.
  	 */
  	bool entry_already_wired = entry->wired_count != 0;
 -	if (entry_already_wired) {
 +	if (el0_autowire) {
-+		if (el0_entry_skip_autowire(entry, el0_effective_prot)) {
++		if (el0_entry_skip_autowire(map, entry, el0_effective_prot)) {
 +			wire_copy->wire_state = ALREADY_AUTOWIRED;
 +		} else if (entry->vme_el0_autowire) {
 +			wire_copy->wire_state = el0_entry_missing_pte(map, entry, el0_effective_prot) ?
@@ -9921,7 +9922,7 @@ index fd9e108..48a0544 100644
  		kr = vm_map_wire_count_add(map, entry, user_wire);
  		if (kr != KERN_SUCCESS) {
  			kfree_type(struct wire_copy_node, wire_copy);
-@@ -7008,12 +8290,13 @@ vm_map_wire_copy_entry_and_preflight_space(
+@@ -7008,16 +8291,19 @@ vm_map_wire_copy_entry_and_preflight_space(
  	wire_copy->end = entry->vme_end;
  	wire_copy->offset = VME_OFFSET(entry);
  	wire_copy->is_sub_map = entry->is_sub_map;
@@ -9936,7 +9937,14 @@ index fd9e108..48a0544 100644
  		wire_copy->object = VM_OBJECT_NULL;
  	} else {
  		wire_copy->object = VME_OBJECT(entry);
-@@ -7055,8 +8338,8 @@ int wire_restarts_due_to_kernel_wiring;
+-		vm_object_reference(VME_OBJECT(entry));
++		if (wire_copy->object != VM_OBJECT_NULL) {
++			vm_object_reference(wire_copy->object);
++		}
+ 	}
+ 
+ 	TAILQ_INSERT_TAIL(copy_list, wire_copy, chain);
+@@ -7055,8 +8341,8 @@ int wire_restarts_due_to_kernel_wiring;
   * @param prot_u - the protections the entry must have. A mapping with all
   * the protections of the corresponding entry will still be entered into the pmap.
   */
@@ -9947,7 +9955,7 @@ index fd9e108..48a0544 100644
  	vm_map_t                original_map,
  	vm_map_offset_ut        start_u,
  	vm_map_offset_ut        end_u,
-@@ -7064,7 +8347,11 @@ vm_map_wire_impl(
+@@ -7064,7 +8350,11 @@ vm_map_wire_impl(
  	vm_tag_t                tag,
  	boolean_t               user_wire,
  	ppnum_t                *physpage_p,
@@ -9960,7 +9968,7 @@ index fd9e108..48a0544 100644
  {
  	/*
  	 * original_map is the map passed in by the caller.
-@@ -7083,9 +8370,14 @@ vm_map_wire_impl(
+@@ -7083,9 +8373,14 @@ vm_map_wire_impl(
  	wire_copy_list_t        cur_copy;
  	bool                    need_restart = false;
  	uint32_t                wire_restarts = 0;
@@ -9975,7 +9983,7 @@ index fd9e108..48a0544 100644
  
  	vmlp_api_start(VM_MAP_WIRE_IMPL);
  	/*
-@@ -7110,6 +8402,7 @@ vm_map_wire_impl(
+@@ -7110,6 +8405,7 @@ vm_map_wire_impl(
  	}
  
  restart:
@@ -9983,7 +9991,7 @@ index fd9e108..48a0544 100644
  	/* Include ALLEXEC so that we don't silently drop the UEXEC bit if we're on Intel */
  	access_type = (caller_prot & (VM_PROT_ALL | VM_PROT_ALLEXEC));
  
-@@ -7128,17 +8421,21 @@ restart:
+@@ -7128,17 +8424,21 @@ restart:
  		*physpage_p = 0;
  	}
  
@@ -10008,7 +10016,7 @@ index fd9e108..48a0544 100644
  	assert(VM_MAP_PAGE_ALIGNED(start, VM_MAP_PAGE_MASK(original_map)));
  	assert(VM_MAP_PAGE_ALIGNED(end, VM_MAP_PAGE_MASK(original_map)));
  	if (start == end) {
-@@ -7149,6 +8446,9 @@ restart:
+@@ -7149,6 +8449,9 @@ restart:
  
  	/* We want an atomic lock that resolves CoW and unnests submaps */
  	flags = VMRL_EX_ATOMIC | VMRL_EX_RESOLVE_COW_AND_OBJ;
@@ -10018,7 +10026,7 @@ index fd9e108..48a0544 100644
  	if (user_wire) {
  		/* And user wires should be interruptible */
  		flags |= VMRL_EX_INTERRUPTIBLE;
-@@ -7173,6 +8473,31 @@ restart:
+@@ -7173,9 +8476,51 @@ restart:
  	 */
  	cur_map = vm_map_lock_ctx_get_map(ctx);
  
@@ -10032,15 +10040,31 @@ index fd9e108..48a0544 100644
 +					vmlp_api_end(VM_MAP_WIRE_IMPL, KERN_NOT_SUPPORTED);
 +					return KERN_NOT_SUPPORTED;
 +				}
-+				if (entry->protection & VM_PROT_WRITE) {
-+					vm_object_lock_shared(vobj);
-+					bool is_sym = (vobj->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC);
-+					vm_object_unlock(vobj);
-+					if (is_sym) {
-+						vm_map_range_ex_unlock(ctx, &original_map);
-+						vmlp_api_end(VM_MAP_WIRE_IMPL, KERN_NOT_SUPPORTED);
-+						return KERN_NOT_SUPPORTED;
++				if (!el0_entry_skip_autowire(cur_map, entry, el0_new_prot) &&
++				    (entry->protection & VM_PROT_WRITE)) {
++					vm_object_lock(vobj);
++					if (vobj->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
++						vm_map_size_t entry_size = entry->vme_end - entry->vme_start;
++						bool can_stabilize_in_place =
++						    !vm_map_always_shadow(cur_map) &&
++						    !entry->needs_copy &&
++						    VME_OFFSET(entry) == 0 &&
++						    vobj->vo_size == entry_size &&
++						    os_ref_get_count_raw(&vobj->ref_count) == 1 &&
++						    vobj->vo_copy == VM_OBJECT_NULL &&
++						    (vobj->shadow == VM_OBJECT_NULL ||
++						    vobj->shadow->vo_copy == VM_OBJECT_NULL);
++						if (!can_stabilize_in_place) {
++							vm_object_unlock(vobj);
++							vm_map_range_ex_unlock(ctx, &original_map);
++							vmlp_api_end(VM_MAP_WIRE_IMPL, KERN_NOT_SUPPORTED);
++							return KERN_NOT_SUPPORTED;
++						}
++						VM_OBJECT_SET_SHADOWED(vobj, FALSE);
++						vobj->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
++						VM_OBJECT_SET_TRUE_SHARE(vobj, TRUE);
 +					}
++					vm_object_unlock(vobj);
 +				}
 +			}
 +		}
@@ -10049,8 +10073,13 @@ index fd9e108..48a0544 100644
 +
  	size_that_would_be_wired = 0;
  	while ((entry = vm_map_range_atomic_next(ctx))) {
- 		if (!entry->is_sub_map) {
-@@ -7190,7 +8515,9 @@ restart:
+-		if (!entry->is_sub_map) {
++		if (!entry->is_sub_map &&
++		    !(el0_protect_apply && el0_entry_skip_autowire(cur_map, entry, el0_new_prot))) {
+ 			/*
+ 			 * First, stabilize the entry's object so it will
+ 			 * not change without a deletion
+@@ -7190,7 +8535,9 @@ restart:
  		 * NOT_WIRED if the entry wasn't previously wired.
  		 */
  		kr = vm_map_wire_copy_entry_and_preflight_space(cur_map,
@@ -10061,7 +10090,7 @@ index fd9e108..48a0544 100644
  		if (kr != KERN_SUCCESS) {
  			vm_map_range_ex_unlock(ctx, &original_map);
  
-@@ -7206,8 +8533,11 @@ restart:
+@@ -7206,8 +8553,11 @@ restart:
  	 * To do this, wire all the pages in our copies.
  	 */
  	TAILQ_FOREACH(cur_copy, &copy_list, chain) {
@@ -10075,7 +10104,7 @@ index fd9e108..48a0544 100644
  			continue;
  		}
  
-@@ -7218,6 +8548,11 @@ restart:
+@@ -7218,6 +8568,11 @@ restart:
  			interrupt_level = THREAD_UNINT;
  		}
  		assert(!cur_copy->is_sub_map);
@@ -10087,7 +10116,7 @@ index fd9e108..48a0544 100644
  		kr = vm_fault_wire_object_pages(cur_map, cur_copy->object, cur_copy->offset,
  		    cur_copy->end - cur_copy->start, tag, interrupt_level);
  		if (kr != KERN_SUCCESS) {
-@@ -7231,6 +8566,7 @@ restart:
+@@ -7231,6 +8586,7 @@ restart:
  	 * Transition our copies from OBJ_WIRED -> ENTRY_WIRED
  	 * Update the wire count and fault the wired pages
  	 */
@@ -10095,7 +10124,7 @@ index fd9e108..48a0544 100644
  	kr = vm_map_range_ex_lock(ctx, &original_map, start, end, flags | VMRL_EX_SIMPLIFY);
  	if (kr != KERN_SUCCESS) {
  		goto wire_error_unlocked;
-@@ -7241,6 +8577,180 @@ restart:
+@@ -7241,6 +8597,180 @@ restart:
  		panic("transparent submap configuration unexpectedly changed during vm_map_wire");
  	}
  
@@ -10126,7 +10155,7 @@ index fd9e108..48a0544 100644
 +				kr = KERN_NOT_SUPPORTED;
 +				goto el0_stage3_abort_locked;
 +			}
-+			bool skip = el0_entry_skip_autowire(entry, el0_new_prot);
++			bool skip = el0_entry_skip_autowire(cur_map, entry, el0_new_prot);
 +			if (cur_copy->wire_state == ALREADY_AUTOWIRED) {
 +				if (!skip && (!entry->vme_el0_autowire ||
 +				    el0_entry_missing_pte(cur_map, entry, el0_new_prot))) {
@@ -10166,7 +10195,7 @@ index fd9e108..48a0544 100644
 +			el0_protect_apply_entry_locked(cur_map, entry, el0_new_prot,
 +			    el0_protect_pmap_options);
 +
-+			bool skip = el0_entry_skip_autowire(entry, entry->protection);
++			bool skip = el0_entry_skip_autowire(cur_map, entry, entry->protection);
 +			vm_prot_t res_prot = entry->protection & (VM_PROT_READ | VM_PROT_WRITE);
 +			if (skip) {
 +				if (cur_copy->wire_state == OBJ_WIRED) {
@@ -10276,7 +10305,7 @@ index fd9e108..48a0544 100644
  	cur_copy = TAILQ_FIRST(&copy_list);
  	while ((entry = vm_map_range_atomic_next(ctx))) {
  		bool faulted_pages = false;
-@@ -7261,223 +8771,903 @@ restart:
+@@ -7261,223 +8791,903 @@ restart:
  
  		assert(cur_copy->wire_state != NOT_WIRED);
  
@@ -10293,7 +10322,7 @@ index fd9e108..48a0544 100644
 +				if (!entry->vme_el0_autowire) {
 +					need_restart = true;
 +					goto el0_stage3_abort_locked;
-+				} else if (el0_entry_skip_autowire(entry, entry->protection)) {
++				} else if (el0_entry_skip_autowire(cur_map, entry, entry->protection)) {
 +					cur_copy->wire_state = ALREADY_AUTOWIRED;
 +				} else {
 +					vm_prot_t res_prot = entry->protection & (VM_PROT_READ | VM_PROT_WRITE);
@@ -10316,7 +10345,7 @@ index fd9e108..48a0544 100644
 +		} else if (cur_copy->wire_state == EXT_WIRED) {
 +			assert(el0_autowire);
 +			if (vm_entry_obj_and_offs_match(entry, cur_copy)) {
-+				if (el0_entry_skip_autowire(entry, entry->protection)) {
++				if (el0_entry_skip_autowire(cur_map, entry, entry->protection)) {
 +					cur_copy->wire_state = ALREADY_AUTOWIRED;
 +				} else if (entry->vme_el0_autowire) {
 +					if (el0_entry_missing_pte(cur_map, entry, entry->protection)) {
@@ -10358,7 +10387,7 @@ index fd9e108..48a0544 100644
 +		} else if (cur_copy->wire_state == OBJ_WIRED) {
 +			if (vm_entry_obj_and_offs_match(entry, cur_copy)) {
 +				if (el0_autowire &&
-+				    el0_entry_skip_autowire(entry, entry->protection)) {
++				    el0_entry_skip_autowire(cur_map, entry, entry->protection)) {
 +					vm_fault_unwire_object_pages(cur_map, cur_copy->object,
 +					    cur_copy->offset, cur_copy->end - cur_copy->start);
 +					cur_copy->wire_state = ALREADY_AUTOWIRED;
@@ -11023,7 +11052,14 @@ index fd9e108..48a0544 100644
 +				named_entry_unlock(named_entry);
 +				if (target_copy_map != copy_map) {
 +					vm_map_copy_discard(target_copy_map);
-+				}
+ 				}
+-
+-				kr = vm_map_wire_count_add(cur_map, entry, user_wire);
+-				if (kr != KERN_SUCCESS) {
+-					vm_map_range_ex_unlock(ctx, &original_map);
+-					cur_copy->wire_state = NOT_WIRED;
+-
+-					goto wire_error_unlocked;
 +				kr = KERN_INVALID_ARGUMENT;
 +				break;
 +			}
@@ -11041,12 +11077,20 @@ index fd9e108..48a0544 100644
 +					break;
  				}
 -
--				kr = vm_map_wire_count_add(cur_map, entry, user_wire);
--				if (kr != KERN_SUCCESS) {
--					vm_map_range_ex_unlock(ctx, &original_map);
--					cur_copy->wire_state = NOT_WIRED;
+-				if (!entry_already_wired) {
+-					kr = vm_fault_wire_resident_pages(cur_map,
+-					    entry, caller_prot, tag, physpage_p, ctx);
+-					if (kr != KERN_SUCCESS) {
+-						/*
+-						 * on error, vm_fault_wire_resident_pages
+-						 * unwires everything in the range
+-						 */
+-						vm_map_wire_count_sub(cur_map, entry, user_wire);
+-						cur_copy->wire_state = NOT_WIRED;
 -
--					goto wire_error_unlocked;
+-						vm_map_range_ex_unlock(ctx, &original_map);
+-
+-						goto wire_error_unlocked;
 +				if (ce->is_sub_map) {
 +					vm_map_t submap = VME_SUBMAP(ce);
 +					vm_map_reference(submap);
@@ -11088,34 +11132,8 @@ index fd9e108..48a0544 100644
 +						vm_object_mark_shared(co, VM_SHARE_TYPE_PERMANENT);
 +						vm_object_unlock(co);
 +						vm_object_reference(co);
-+					}
- 				}
--
--				if (!entry_already_wired) {
--					kr = vm_fault_wire_resident_pages(cur_map,
--					    entry, caller_prot, tag, physpage_p, ctx);
--					if (kr != KERN_SUCCESS) {
--						/*
--						 * on error, vm_fault_wire_resident_pages
--						 * unwires everything in the range
--						 */
--						vm_map_wire_count_sub(cur_map, entry, user_wire);
--						cur_copy->wire_state = NOT_WIRED;
--
--						vm_map_range_ex_unlock(ctx, &original_map);
--
--						goto wire_error_unlocked;
-+				if (!el0_atomic_segs_grow(&segs, &seg_cap, n_segs + 1)) {
-+					if (co != VM_OBJECT_NULL) {
-+						if (ce->is_sub_map) {
-+							vm_map_deallocate((vm_map_t)(uintptr_t)co);
-+						} else {
-+							vm_object_deallocate(co);
-+						}
  					}
 -					faulted_pages = true;
-+					kr = KERN_RESOURCE_SHORTAGE;
-+					break;
  				}
 -				cur_copy->wire_state = ENTRY_WIRED;
 -			} else {
@@ -11151,6 +11169,17 @@ index fd9e108..48a0544 100644
 -					vm_map_range_ex_unlock(ctx, &original_map);
 -
 -					goto wire_error_unlocked;
++				if (!el0_atomic_segs_grow(&segs, &seg_cap, n_segs + 1)) {
++					if (co != VM_OBJECT_NULL) {
++						if (ce->is_sub_map) {
++							vm_map_deallocate((vm_map_t)(uintptr_t)co);
++						} else {
++							vm_object_deallocate(co);
++						}
++					}
++					kr = KERN_RESOURCE_SHORTAGE;
++					break;
++				}
 +				vm_map_kernel_flags_t seg_flags = base_flags;
 +				seg_flags.vmkf_submap = ce->is_sub_map;
 +				seg_flags.vm_tag = chunk_tag ?: VME_ALIAS(ce);
@@ -11374,7 +11403,7 @@ index fd9e108..48a0544 100644
  static __attribute__((always_inline, warn_unused_result))
  kern_return_t
  vm_map_unwire_sanitize(
-@@ -8344,10 +10534,14 @@ vm_map_delete_preflight(
+@@ -8344,10 +10554,14 @@ vm_map_delete_preflight(
  
  		if (vmrl_is_kernel_pmap(ctx)) {
  			assert(entry->user_wired_count == 0);
@@ -11390,7 +11419,7 @@ index fd9e108..48a0544 100644
  				wired_count -= 1;
  			}
  		} else {
-@@ -8369,8 +10563,29 @@ vm_map_delete_preflight(
+@@ -8369,8 +10583,29 @@ vm_map_delete_preflight(
  }
  
  static void
@@ -11422,7 +11451,7 @@ index fd9e108..48a0544 100644
  	if (entry->user_wired_count) {
  		/*
  		 * Collapse the wire count to 1, which will cause
-@@ -8379,7 +10594,12 @@ vm_map_delete_handle_wired(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags
+@@ -8379,7 +10614,12 @@ vm_map_delete_handle_wired(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags
  		entry->user_wired_count = 1;
  	}
  
@@ -11436,7 +11465,7 @@ index fd9e108..48a0544 100644
  		vm_map_wire_count_sub(map, entry, entry->user_wired_count != 0);
  	}
  
-@@ -8518,7 +10738,8 @@ vm_map_delete_handle_entry(
+@@ -8518,7 +10758,8 @@ vm_map_delete_handle_entry(
  	vm_map_t                map,
  	vm_map_entry_t          entry,
  	vm_map_entry_t          sentinel,
@@ -11446,7 +11475,7 @@ index fd9e108..48a0544 100644
  {
  	vm_map_offset_t e_start = entry->vme_start;
  	vm_map_offset_t e_end   = entry->vme_end;
-@@ -8529,7 +10750,7 @@ vm_map_delete_handle_entry(
+@@ -8529,7 +10770,7 @@ vm_map_delete_handle_entry(
  	 */
  
  	if (entry->wired_count) {
@@ -11455,7 +11484,7 @@ index fd9e108..48a0544 100644
  	}
  
  	/*
-@@ -8799,12 +11020,61 @@ vm_map_delete_and_iunlock_internal(
+@@ -8799,12 +11040,61 @@ vm_map_delete_and_iunlock_internal(
  		kr = KERN_SUCCESS;
  	}
  	if (kr == KERN_SUCCESS) {
@@ -11517,7 +11546,7 @@ index fd9e108..48a0544 100644
  		while ((entry = vm_map_range_ex_pop_with_error(ctx, &kr))) {
  			if (vm_map_lock_ctx_is_descended(ctx)) {
  				/*
-@@ -8814,7 +11084,12 @@ vm_map_delete_and_iunlock_internal(
+@@ -8814,7 +11104,12 @@ vm_map_delete_and_iunlock_internal(
  				 */
  				panic("Attempt to delete through transparent submap.");
  			}
@@ -11531,7 +11560,7 @@ index fd9e108..48a0544 100644
  				if (ctx->vmlc_map != orig_map) {
  					/*
  					 * wait_for_space wakeup below does not
-@@ -9002,7 +11277,7 @@ vm_map_remove_entry(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags)
+@@ -9002,7 +11297,7 @@ vm_map_remove_entry(vm_map_t map, vm_map_entry_t entry, vmr_flags_t flags)
  	VM_ENTRY_ASSERT_EXCL_OWNER(entry);
  	assert(!entry->vme_permanent);
  
@@ -11540,7 +11569,7 @@ index fd9e108..48a0544 100644
  }
  
  kern_return_t
-@@ -10547,6 +12822,14 @@ vm_map_copyout_kernel_buffer(
+@@ -10547,6 +12842,14 @@ vm_map_copyout_kernel_buffer(
  		if (kr != KERN_SUCCESS) {
  			return kr;
  		}
@@ -11555,7 +11584,7 @@ index fd9e108..48a0544 100644
  #if KASAN
  		if (map->pmap == kernel_pmap) {
  			kasan_notify_address(*addr, copy->size);
-@@ -10904,7 +13187,8 @@ vm_map_copyout_internal(
+@@ -10904,7 +13207,8 @@ vm_map_copyout_internal(
  	}
  
  	adjustment = vmsr_start(rsv) - vm_copy_start;
@@ -11565,7 +11594,7 @@ index fd9e108..48a0544 100644
  		/*
  		 * We're not allowed to consume "copy", so we'll have to
  		 * copy its map entries into the destination map below.
-@@ -11071,7 +13355,7 @@ after_adjustments:
+@@ -11071,7 +13375,7 @@ after_adjustments:
  	 *	Link in the copy
  	 */
  
@@ -11574,7 +11603,7 @@ index fd9e108..48a0544 100644
  		vm_map_copy_insert(dst_map, copy, rsv, vmk_flags);
  		if (copy != original_copy) {
  			/* the copy discarded in vm_map_copy_insert() might have been one which
-@@ -11081,8 +13365,11 @@ after_adjustments:
+@@ -11081,8 +13385,11 @@ after_adjustments:
  		}
  	} else {
  		vm_map_copy_remap(dst_map, copy, rsv, vmk_flags,
@@ -11588,7 +11617,7 @@ index fd9e108..48a0544 100644
  			/* if vm_map_copy_adjust_to_target() created a local copy, free it now */
  			vm_map_copy_discard(copy);
  			copy = original_copy;
-@@ -11091,6 +13378,26 @@ after_adjustments:
+@@ -11091,6 +13398,26 @@ after_adjustments:
  
  
  	vm_map_ilk_unlock(dst_map);
@@ -11615,7 +11644,7 @@ index fd9e108..48a0544 100644
  	vmlp_api_end(VM_MAP_COPYOUT_INTERNAL, KERN_SUCCESS);
  
  	return KERN_SUCCESS;
-@@ -17283,6 +19590,11 @@ vm_map_remap(
+@@ -17283,6 +19610,11 @@ vm_map_remap(
  		max_protection = VM_PROT_READ;
  	}
  
