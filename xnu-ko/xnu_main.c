@@ -725,6 +725,17 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 			}
 			return 0;
 		}
+		if (call == LINUX64_CALL_UTCB_RESUME) {
+			/*
+			 * The registers of a resume are the ones the host's context holds, not q's (those are from the
+			 * thread's last full stop): when the context is no longer this thread's as it stopped, they are
+			 * gone, and running q's would take the thread back to that stop. XNU keeps the two together
+			 * (linux64_el0_utcb_entry, no preemption in between): say so instead.
+			 */
+			logs_alert("xnu: UTCB_RESUME for a thread whose registers the CPU's user context no longer holds");
+			q->result = -116;	/* -ESTALE */
+			return 0;
+		}
 		if (!utcb) {
 			utcb = fki_utcb_create(as);
 			if (!utcb) {
