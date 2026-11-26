@@ -1123,7 +1123,8 @@ static int monitor_fn(void *arg)
 			}
 		}
 		if (perf && cpus > 1) {	/* each XNU CPU's host calls so far and the last one's number */
-			char cb[200]; char *q = cb;
+			static char cb[16 + XNU_MAX_CPUS * 42];	/* room for every CPU: two 64-bit decimals and two separators each */
+			char *q = cb;
 			put_str(&q, "xnu: calls");
 			for (int c = 0; c < cpus; c++) {
 				unsigned s = LINUX64_CPU_SLOT(cpu_mpidr[c]);
