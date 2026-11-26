@@ -258,6 +258,10 @@ module_param(model, charp, 0444);
 /* Names for System Information: the chip (/product product-soc-name) and the GPU (the sgx node's "model"). */
 static char *soc_name;
 module_param(soc_name, charp, 0444);
+/* XNU's CPUs (bit c: XNU CPU c) of cluster-type 'E' in the device tree: the host's efficiency cores (e.g. the N1X's
+ * Cortex-A725s), so the AMP scheduler keeps foreground threads on the 'P' ones. 0: every CPU 'P'. */
+static unsigned long ecpus;
+module_param(ecpus, ulong, 0444);
 static char *gpu_model;
 module_param(gpu_model, charp, 0444);
 
@@ -1285,7 +1289,7 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 		adt_prop_str(&a, "state", c ? "waiting" : "running");
 		adt_prop_u32(&a, "reg", (unsigned)cpu_mpidr[c]);
 		adt_prop_u64(&a, "timebase-frequency", fki_counter_frequency());
-		adt_prop_u32(&a, "cluster-type", 'P');	/* the AMP scheduler wants E/M/P, not SMP */
+		adt_prop_u32(&a, "cluster-type", (ecpus >> c) & 1 ? 'E' : 'P');	/* the AMP scheduler wants E/M/P, not SMP */
 	}
 	adt_node(&a, 1, 0);				/* /defaults: XNU looks these up without checking */
 	adt_prop_str(&a, "name", "defaults");
