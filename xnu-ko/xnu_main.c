@@ -411,7 +411,7 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 	/*
 	 * An XNU fault nothing resolves (a bug, or a NULL dereference): report it and end the run instead of letting Linux
 	 * oops with XNU's keys and stack live (which takes the machine with it). The exception returns into
-	 * xnu_world_fault_abort, which puts Linux's keys back and leaves through xnu_world_abort.
+	 * xnu_world_fault_abort, which puts Linux's keys back and leaves through xnu_world_abort_mm.
 	 */
 	unsigned long pc = fki_regs_pc(regs);
 	if (pc < XNU_VA_LO || pc >= XNU_VA_HI)
