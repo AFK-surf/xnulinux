@@ -642,8 +642,8 @@ static void derive_user_pac_keys(u64_t rop_pid, u64_t jop_pid, int djop,
 	k.ga[0] ^= jop_pid; k.ga[1] ^= jmix;
 	k.ib[0] ^= rop_pid; k.ib[1] ^= rmix;
 	k.db[0] ^= rop_pid; k.db[1] ^= rmix;
-	if (djop)
-		k.sctlr_en &= ~((1ULL << 31) | (1ULL << 27));
+	if (djop)	/* arm64 (not arm64e): all four keys off (EnIA, EnIB, EnDA, EnDB), as linux64_el0_run does at EL1 */
+		k.sctlr_en &= ~((1ULL << 31) | (1ULL << 30) | (1ULL << 27) | (1ULL << 13));
 	*out = k;
 }
 
