@@ -26,6 +26,9 @@ extern struct xnu_world *xnu_worlds[];	/* each CPU's, by slot (LINUX64_CPU_SLOT)
 long xnu_world_call(unsigned long fn, unsigned long arg);
 /* The address XNU calls (linux64_hook); it calls xnu_hook(stage) in the Linux world. */
 void xnu_world_upcall(void);
+/* Pure EL0 host variants (FKI_CAP_EL0): no EL1 system instructions; slot from TPIDRRO_EL0. */
+long xnu_world_call_el0(unsigned long fn, unsigned long arg);
+void xnu_world_upcall_el0(void);
 /* Where an XNU fault that cannot be handled returns to (still with XNU's keys): back to Linux's, then xnu_world_abort. */
 void xnu_world_fault_abort(void);
 /* Linux-world handler: return 0 to resume XNU, nonzero to end the run. */
