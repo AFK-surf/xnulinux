@@ -1,3 +1,5 @@
+
+**Languages:** [English](README.md) | [Português](README.pt.md) 
 # xnulinux
 
 Run macOS userspace on Linux by loading the macOS kernel into it.
