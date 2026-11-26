@@ -1040,7 +1040,7 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		{	/* the frame-pointer chain from here through XNU's frames (the hook runs on XNU's stack); return addresses
 			 * with their pointer-authentication bits replaced by the kernel's all-ones top */
 			unsigned long *fp = el0_mode ? (unsigned long *)xnu_worlds[this_slot()]->xnu_regs[10] : __builtin_frame_address(0);
-			unsigned long fp_lo = el0_mode ? (unsigned long)(img.vmlow & ~0x1fffffULL) : 0xffffff8000000000UL;
+			unsigned long fp_lo = el0_mode ? (unsigned long)XNU_VA_LO : 0xffffff8000000000UL;	/* EL0: a stack can be in the aperture, below the image */
 			unsigned long fp_hi = 0xfffffffc00000000UL;
 			for (i = 0; i < 24 && fp && !((unsigned long)fp & 15) &&
 			     (unsigned long)fp >= fp_lo && (unsigned long)fp + 16 <= fp_hi; i++) {
@@ -2284,18 +2284,40 @@ static int run_m2b_el0(void)
 	u64_t overhead = image_off + image_size + 0x60000 + BOOT_EXTRA;
 	if (overhead < image_off || ram_bytes > (~0ULL) - overhead) { logs("xnu: ram_mb overflow"); return -22; }
 	u64_t want = overhead + ram_bytes;
-	int err = fki_kmem_alloc((unsigned long)want, (unsigned long)XNU_WINDOW_BASE, XNU_FAKE_PHYS, &img.region);
+	/*
+	 * All of DRAM goes below the kernel (LINUX64_EL0_APERTURE_VA: XNU's physical aperture, the host's permanent
+	 * linear mapping in 2 MiB frames), so that it takes none of the room after the kernel's link address, which
+	 * the kernel map's ranges need whole: at the kernel's base it left them too little above about 8 GiB. The
+	 * image and the boot data are mapped a second time at the kernel's base, where they are linked to run
+	 * (fki_kmem_alias: the same frames, 2 MiB ones where the aperture has them, and as permanent).
+	 */
+	if (XNU_WINDOW_BASE < LINUX64_EL0_APERTURE_END || want > LINUX64_EL0_APERTURE_END - LINUX64_EL0_APERTURE_VA - 0x200000) {
+		logs("xnu: ram_mb does not fit below the kernel (or an unexpected link address)"); return -22;
+	}
+	int err = fki_kmem_alloc((unsigned long)want, (unsigned long)LINUX64_EL0_APERTURE_VA, XNU_FAKE_PHYS, &img.region);
 	if (err) { logkv("xnu: EL0 kmem allocation failed, err", (u64_t)err); return err; }
-	logkv("xnu: EL0 high window base", (u64_t)img.region.va);
-	logkv("xnu: EL0 high window size", img.region.size);
+	logkv("xnu: EL0 aperture base", (u64_t)img.region.va);
+	logkv("xnu: EL0 aperture size", img.region.size);
 	logkv("xnu: EL0 synthetic phys base", img.region.pa);
 
 	unsigned char *base = (unsigned char *)XNU_WINDOW_BASE;
+	u64_t head = (overhead + 0x1fffff) & ~0x1fffffULL;	/* at least what build_boot fills; cut to topOfKernelData below */
+	err = fki_kmem_alias(&img.region, (unsigned long)XNU_WINDOW_BASE, (unsigned long)head);
+	if (err) { logkv("xnu: EL0 mapping at the kernel's base failed, err", (u64_t)err); return err; }
 	err = macho_copy(&img, base + image_off);
 	if (err) { logkv("xnu: macho_copy failed, err", (u64_t)err); return err; }
 	img.slide = 0;
 	struct boot_args_v2 *ba = build_boot(base, img.region.pa, img.region.size, image_off, image_size);
 	if (!ba) return -22;
+	/* the kernel's static range ends at topOfKernelData rounded up to 2 MiB (arm_vm_init); its heap starts there */
+	u64_t top = (ba->topOfKernelData - img.region.pa + 0x1fffff) & ~0x1fffffULL;
+	if (top > head) { logs("xnu: boot data beyond the mapping at the kernel's base"); return -22; }
+	if (top < head) {	/* what follows is the kernel map's */
+		err = fki_kmem_alias(&img.region, (unsigned long)XNU_WINDOW_BASE, (unsigned long)top);
+		if (err) { logkv("xnu: EL0 mapping at the kernel's base could not be cut, err", (u64_t)err); return err; }
+	}
+	logkv("xnu: EL0 kernel static range base", XNU_WINDOW_BASE);
+	logkv("xnu: EL0 kernel static range end", XNU_WINDOW_BASE + top);
 	return enter_arm_init(ba);
 }
 
