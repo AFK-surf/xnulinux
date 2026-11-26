@@ -14,8 +14,8 @@ every boot lost daemons to it (logd three times in a row is a panic), more the m
 dropped; with one CPU it cannot happen.
 
 linux64_el0_sync_user_pte now says which it was (installed, nothing to install, not its fault to resolve), and the
-instruction runs again in the first two cases. A fault that comes back five times in a row with nothing to change
-goes to vm_fault after all.
+instruction runs again in the first two cases. A fault that comes back on one page seventeen times in a row with
+nothing to change goes to vm_fault after all.
 ---
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
@@ -117,15 +117,17 @@ goes to vm_fault after all.
  extern bool linux64_el0_atomic_op(pmap_t pmap, vm_offset_t uaddr, bool write, size_t width, uint64_t *val);
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -4085,6 +4085,7 @@ linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
+@@ -4084,7 +4084,9 @@ linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
+ 	req.neon_ptr = (uint64_t)(uintptr_t)&ns->ns_64;
  	req.fpu_dirty = 0;
  
++	uint64_t unchanged_page = ~0ULL;	/* the page those faults were on */
  	unsigned long run_call = LINUX64_CALL_UTCB_RUN;
 +	unsigned int unchanged = 0;	/* faults in a row that found the host's mapping as XNU's entry has it */
  	for (;;) {
  		req.result = 0;
  		linux64_call(run_call, &req);
-@@ -4094,7 +4095,19 @@ linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
+@@ -4094,7 +4096,20 @@ linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
  			    (long long)req.result);
  		}
  		if (req.stop_kind == LINUX64_STOP_PAGEFAULT) {
@@ -135,14 +137,15 @@ goes to vm_fault after all.
 +			 * nothing to install (linux64_el0_sync_user_pte: another CPU was first, or the host dropped the
 +			 * address space's tables meanwhile): XNU's entry allows the access, so vm_fault has nothing to
 +			 * do for it, and for the commpage, which no map entry describes, vm_fault fails and the thread
-+			 * gets a SIGBUS for a fault that was the host's alone. A fault that keeps coming back with
-+			 * nothing to change is given to vm_fault after all.
++			 * gets a SIGBUS for a fault that was the host's alone. A fault that keeps coming back on one
++			 * page with nothing to change is given to vm_fault after all.
 +			 */
 +			int synced = linux64_el0_sync_user_pte(pmap, (vm_offset_t)req.fault_addr, req.esr);
-+			if (synced > 0) {
++			if (synced > 0 || unchanged_page != (req.fault_addr & ~0xfffULL)) {
 +				unchanged = 0;
++				unchanged_page = req.fault_addr & ~0xfffULL;
 +			}
-+			if (synced > 0 || (synced == 0 && ++unchanged <= 4)) {
++			if (synced > 0 || (synced == 0 && ++unchanged <= 16)) {
  				run_call = LINUX64_CALL_UTCB_RESUME;
  				continue;
  			}

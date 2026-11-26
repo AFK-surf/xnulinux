@@ -18,8 +18,8 @@ same way).
 ---
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -4086,6 +4086,16 @@ linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
- 
+@@ -4087,6 +4087,16 @@ linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
+ 	uint64_t unchanged_page = ~0ULL;	/* the page those faults were on */
  	unsigned long run_call = LINUX64_CALL_UTCB_RUN;
  	unsigned int unchanged = 0;	/* faults in a row that found the host's mapping as XNU's entry has it */
 +	/*
@@ -35,7 +35,7 @@ same way).
  	for (;;) {
  		req.result = 0;
  		linux64_call(run_call, &req);
-@@ -4127,5 +4137,6 @@ linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
+@@ -4129,5 +4139,6 @@ linux64_el0_utcb_entry(arm_saved_state_t *ss, unsigned long disable_jop)
  		pcpu->fpu_tid = thread->thread_id;
  		pcpu->fpu_live = 1;
  	}
