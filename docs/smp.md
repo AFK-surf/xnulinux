@@ -76,5 +76,8 @@ spinning lets the host take the spinning CPU's interrupts (`linux64_spin_relax`,
    - Paravirtual ticket locks (`xnu-patches/0005`): waiters sleep in the host and are kicked; a spinning CPU takes a
      pending IPI as its FIQ would.
    - Linux's device interrupts are kept off XNU's CPUs (`xnulinux-boot.sh`).
+   More than 8 (`xnu-patches/0010`): the virtual board's `MAX_CPUS` was 8 and a ninth CPU faulted in
+   `ml_processor_register`. The limit is now 32 (`LINUX64_MAX_CPUS`, the kernel's and `xnu.ko`'s). Run with 12, 14
+   and 16 CPUs on a 16-vCPU host (desktop, `hw.ncpu` right); more than 16 has not been run.
    Open: the default for `cpus=`; cross-CPU costs (pipe round trip 11.9 µs on 2 CPUs against 3.3 µs on one,
    fork 2.2 ms against 0.97 ms).
