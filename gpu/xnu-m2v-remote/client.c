@@ -276,7 +276,9 @@ static void xr_ref_buffer(struct xh *owner, struct xh *b, bool write) {
     if (cb->nref == cb->capref) { cb->capref = cb->capref ? cb->capref * 2 : 16; cb->ref = realloc(cb->ref, cb->capref * sizeof *cb->ref); cb->refw = realloc(cb->refw, cb->capref); }
     b->last_cb = cb; b->last_idx = cb->nref; cb->ref[cb->nref] = b; cb->refw[cb->nref++] = write;
 }
-static void xr_ref_texture(struct xh *owner, struct xh *t) { if (t && t->buf) xr_ref_buffer(owner, t->buf, true); }
+// A texture over a buffer: the buffer is what goes and comes. Written only where the GPU may write the texture: a buffer
+// that is only sampled is not looked through for changes after every frame.
+static void xr_ref_texture(struct xh *owner, struct xh *t, bool write) { if (t && t->buf) xr_ref_buffer(owner, t->buf, write); }
 // Takes changed ranges of buffers from an answer: (id, offset, length, bytes) until the end.
 static void xr_take_ranges(const uint8_t *d, const uint8_t *end, struct xh *only) {
     while (d + 24 <= end) {
@@ -694,9 +696,9 @@ Xm2vRenderEncoder *xm2v_render_encoder_new(Xm2vCommandBuffer *cb, const Xm2vRend
     struct xh *nh = xr_new(K_Xm2vRenderEncoder, (struct xh *)cb);
     uint8_t *m = xr_begin(OP_xm2v_render_encoder_new, 0);
     m = xr_u64(m, nh->id); m = xr_u64(m, XID(cb)); m = xr_bytes(m, d, sizeof *d);
-    for (int i = 0; i < 8; i++) { Xm2vTexture *t = (uint32_t)i < d->color_attachment_count ? d->color_attachments[i].texture : 0; m = xr_u64(m, XID(t)); xr_ref_texture((struct xh *)cb, (struct xh *)t); }
+    for (int i = 0; i < 8; i++) { Xm2vTexture *t = (uint32_t)i < d->color_attachment_count ? d->color_attachments[i].texture : 0; m = xr_u64(m, XID(t)); xr_ref_texture((struct xh *)cb, (struct xh *)t, true); }
     m = xr_u64(m, XID(d->depth_texture)); m = xr_u64(m, XID(d->stencil_texture));
-    xr_ref_texture((struct xh *)cb, (struct xh *)d->depth_texture); xr_ref_texture((struct xh *)cb, (struct xh *)d->stencil_texture);
+    xr_ref_texture((struct xh *)cb, (struct xh *)d->depth_texture, true); xr_ref_texture((struct xh *)cb, (struct xh *)d->stencil_texture, true);
     xr_end(m);
     xr_unlock();
     return (Xm2vRenderEncoder *)nh;

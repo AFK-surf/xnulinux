@@ -32,6 +32,10 @@ SYNC_BOOL = set('''xm2v_device_supports_family'''.split())
 WRITES = {('xm2v_blit_encoder_copy_buffer_to_buffer', 'dst'), ('xm2v_blit_encoder_copy_texture_to_buffer', 'dst'),
           ('xm2v_blit_encoder_fill_buffer', 'buf'), ('xm2v_blit_encoder_synchronize_buffer', 'buf'),
           ('xm2v_compute_encoder_set_buffer', 'buf'), ('xm2v_compute_encoder_use_buffer', 'buf'), ('xm2v_render_encoder_use_buffer', 'buf')}
+# textures the GPU may write (a texture over a buffer: its bytes are the buffer's); the rest are only read
+TEX_WRITES = {('xm2v_blit_encoder_copy_buffer_to_texture', 'dst'), ('xm2v_blit_encoder_copy_texture_to_texture', 'dst'),
+              ('xm2v_blit_encoder_generate_mipmaps', 'tex'), ('xm2v_blit_encoder_synchronize_texture', 'tex'),
+              ('xm2v_compute_encoder_set_texture', 'tex')}
 ENDS = lambda n: n.endswith('_encoder_end')
 protos = re.findall(r'^\s*((?:const\s+)?[A-Za-z_][\w ]*?[\s\*]+)(xm2v_\w+)\s*\(([^;{]*?)\)\s*;', src, flags=re.M | re.S)
 ops, cl, sv, manual, names = [], [], [], [], []
@@ -76,7 +80,9 @@ for ret, name, params in protos:
                 if name == 'xm2v_render_encoder_use_buffer': w = '(usage & 2) != 0'
                 c.append(f'    xr_ref_buffer((struct xh *){first[2]}, (struct xh *){n}, {w});')
             if base == 'Xm2vTexture' and first and first[1] in ('Xm2vComputeEncoder', 'Xm2vRenderEncoder', 'Xm2vBlitEncoder', 'Xm2vCommandBuffer'):
-                c.append(f'    xr_ref_texture((struct xh *){first[2]}, (struct xh *){n});')
+                w = '1' if (name, n) in TEX_WRITES else '0'
+                if name in ('xm2v_render_encoder_use_texture', 'xm2v_compute_encoder_use_texture'): w = '(usage & 2) != 0'
+                c.append(f'    xr_ref_texture((struct xh *){first[2]}, (struct xh *){n}, {w});')
         elif k == 'b': c.append(f'    m = xr_bytes(m, {n}, sizeof *{n});')
         elif k == 'z': c.append(f'    m = xr_str(m, {n});')
         elif base in ('float', 'double'): c.append(f'    m = xr_f64(m, {n});')
