@@ -6,7 +6,8 @@ VIRGL ?= $(shell pkg-config --exists virglrenderer && echo 1)
 SRC = xnudrmd.c
 ifeq ($(VIRGL),1)
 SRC += xnudrmd_virgl.c
-CFLAGS += -DXNUDRM_VIRGL $(shell pkg-config --cflags virglrenderer)
+# (override: these are needed to compile xnudrmd_virgl.c at all, also when CFLAGS comes from the command line)
+override CFLAGS += -DXNUDRM_VIRGL $(shell pkg-config --cflags virglrenderer)
 LDLIBS += $(shell pkg-config --libs virglrenderer)
 endif
 xnudrmd: $(SRC) xnudrm_proto.h xnudrmd.h
