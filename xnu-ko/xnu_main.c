@@ -200,8 +200,8 @@ static void logs(const char *s) { fki_log(s, x_strlen(s)); }
 static void logs_alert(const char *s) { fki_log_alert(s, x_strlen(s)); }
 static void logkv(const char *k, u64_t v)
 {
-	char buf[96]; char *p = buf;
-	while (*k) *p++ = *k++;
+	char buf[128]; char *p = buf;
+	while (*k && p < buf + sizeof(buf) - 20) *p++ = *k++;	/* the value's " 0x", 16 digits and NUL always fit: a longer key is cut */
 	*p++ = ' '; *p++ = '0'; *p++ = 'x';
 	for (int i = 60; i >= 0; i -= 4) *p++ = "0123456789abcdef"[(v >> i) & 15];
 	*p = 0;
