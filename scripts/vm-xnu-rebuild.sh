@@ -36,13 +36,17 @@ mirror "$P"/corecrypto/include/corecrypto $T/EXTERNAL_HEADERS/corecrypto
 mirror "$P"/corecrypto/kernel $T/osfmk/xnulinux_crypto
 t=$SECONDS; JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -15; echo "kernel: $((SECONDS - t)) s"
 sudo mkdir -p /lib/firmware/xnu	# where xnu.ko takes the kernel and the collection from: a new host has none
+cp k27/segaddrs.sh /tmp/segaddrs.before
 if [ -e out/kc/kc27.bin ]; then
-  cp k27/segaddrs.sh /tmp/segaddrs.before
   python3 k27/kc27-layout.py out/kc/kc27.bin out/k27/kernel-k27.macho --write k27/segaddrs.sh | tail -2
-  if ! cmp -s /tmp/segaddrs.before k27/segaddrs.sh; then
-    echo "kernel slots moved: linking the kernel again"
-    JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -3
-  fi
+elif [ -e "$POC"/scripts/free-kc/kernel-slots.py ]; then
+  # no kernelcache to lay the kernel's slots out by: the same slots from layout numbers (scripts/free-kc/layout.json).
+  # Without this the kernel kept macOS-DroidVM's committed slots, too small for it: __TEXT_EXEC was linked over __KLD
+  python3 "$POC"/scripts/free-kc/kernel-slots.py "$POC"/scripts/free-kc/layout.json out/k27/kernel-k27.macho --write k27/segaddrs.sh | tail -1
+fi
+if ! cmp -s /tmp/segaddrs.before k27/segaddrs.sh; then
+  echo "kernel slots moved: linking the kernel again"
+  JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -3
 fi
 # xnulinux's own kexts (kexts/*/NAME.json + NAME.cpp), built against the k27 kernel's objects. With or without Apple's
 # kernelcache: the collection without Apple's kexts (scripts/free-kc/build.sh) links XnuCPU, XnuDisk and XnuDrm too,

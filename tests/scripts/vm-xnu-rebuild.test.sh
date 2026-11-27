@@ -15,6 +15,13 @@ open(sys.argv[3], 'w').write('collection: ' + ' '.join(sys.argv[sys.argv.index('
 print('wrote', sys.argv[3])
 EOF
 echo 'pass' > "$P/scripts/kc-amfi-platform.py"
+# the kernel's slots from layout numbers (scripts/free-kc/kernel-slots.py, which the tree may or may not have yet): a stand-in
+SLOTS=$P/scripts/free-kc/kernel-slots.py; mkdir -p "$P/scripts/free-kc"
+cat > "$SLOTS" <<'EOF'
+import sys
+assert sys.argv[1].endswith('scripts/free-kc/layout.json') and sys.argv[2] == 'out/k27/kernel-k27.macho', sys.argv
+open(sys.argv[sys.argv.index('--write') + 1], 'w').write('slots from the layout numbers\n'); print('kernel slots: written')
+EOF
 mkdir -p "$P/xnu-patches/include" "$P/xnu-patches/corecrypto/include/corecrypto" "$P/xnu-patches/corecrypto/kernel" \
   "$P/build/IONetworkingFamily-188" "$X/bsd" "$D/k27" "$D/scripts" "$D/out/kc" "$VM/lib/firmware"
 : > "$P/build/IONetworkingFamily-188/IOEthernetController.h"	# as fetched already: the test clones nothing
@@ -29,7 +36,7 @@ cat > "$P/xnu-patches/0001-a.patch" <<'EOF'
 -int a;
 +int a = 1;
 EOF
-echo 'mkdir -p out/k27; echo kernel > out/k27/kernel-k27.macho; echo "kernel built"' > "$D/k27/build-kernel27.sh"
+echo 'mkdir -p out/k27; echo kernel > out/k27/kernel-k27.macho; echo built >> k27/builds; echo "kernel built"' > "$D/k27/build-kernel27.sh"
 : > "$D/k27/segaddrs.sh"; echo 'pass' > "$D/k27/kc27-layout.py"
 cat > "$D/scripts/build-native-kext.py" <<'EOF'
 import os, sys
@@ -50,6 +57,16 @@ check '... with the kernel installed as /lib/firmware/xnu/kernel.macho' cmp -s "
 check "without Apple's kernelcache: xnulinux's kexts are built all the same ($kexts)" [ "$(built)" = "$kexts" ]
 check '... against build/netinc, which is set up' [ -L "$P/build/netinc/IOKit/network" ]
 check '... and no collection of Apple kexts is linked or installed' not test -e "$F/kc.bin" -o -e "$D/out/k27/natives.txt"
+check '... the kernel gets its slots from the layout numbers, there being no kernelcache to take them from' \
+  grep -qx 'slots from the layout numbers' "$D/k27/segaddrs.sh"
+check '... and is linked again for them, once' [ "$(grep -c built "$D/k27/builds")" = 2 ]
+[ $FAILED = 0 ] || sed 's/^/    | /' "$T/out"
+
+# a tree that has no kernel-slots.py: the slots are left as they are and the script ends as well
+rm -rf "$D/out/x12377" "$VM/lib/firmware/xnu" "$SLOTS" "$D/k27/builds"; : > "$D/k27/segaddrs.sh"
+/bin/bash "$P/scripts/vm-xnu-rebuild.sh" > "$T/out" 2>&1; s=$?
+check 'without kernel-slots.py in the tree: the script ends well, the slots untouched, the kernel linked once' \
+  [ $s = 0 -a ! -s "$D/k27/segaddrs.sh" -a "$(grep -c built "$D/k27/builds")" = 1 ]
 [ $FAILED = 0 ] || sed 's/^/    | /' "$T/out"
 
 rm -rf "$D/out/x12377" "$VM/lib/firmware/xnu"; echo kernelcache > "$D/out/kc/kc27.bin"
