@@ -17,9 +17,14 @@ xnudrmd: $(SRC) xnudrm_proto.h xnudrmd.h .virgl
 .virgl: FORCE
 	@echo '$(VIRGL)' | cmp -s - $@ || echo '$(VIRGL)' > $@
 FORCE:
-# the backend alone, on the host's Vulkan driver (no fki, no hosted system)
-test-virgl: test/virgl_smoke.c xnudrmd_virgl.c xnudrm_proto.h xnudrmd.h
-	$(CC) $(CFLAGS) -I. -o test/virgl_smoke test/virgl_smoke.c xnudrmd_virgl.c $(LDLIBS)
-	test/virgl_smoke
+# xnudrmd with the backend, as a Venus client meets it, on the host's Vulkan drivers (no fki, no hosted system)
+ifeq ($(VIRGL),1)
+test-virgl: test/virgl.c $(SRC) xnudrm_proto.h xnudrmd.h
+	$(CC) $(CFLAGS) -I. -o test/virgl test/virgl.c xnudrmd_virgl.c $(LDLIBS)
+	test/virgl
+else
+test-virgl:
+	@echo "xnudrmd's virglrenderer backend: NOT TESTED: no virglrenderer to build it with (pkg-config virglrenderer)"
+endif
 clean:
-	rm -f xnudrmd test/virgl_smoke .virgl
+	rm -f xnudrmd test/virgl .virgl
