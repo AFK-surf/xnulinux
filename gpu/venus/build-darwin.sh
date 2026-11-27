@@ -18,7 +18,8 @@ if ! { [ -x venv/bin/meson ] && venv/bin/python3 -c 'import sys; sys.exit(sys.ve
   if [ -n "$UV" ]; then "$UV" venv -q -p 3.13 venv && VIRTUAL_ENV=$W/venv "$UV" pip install -q meson ninja mako pyyaml packaging
   else /opt/homebrew/bin/python3 -m venv venv && venv/bin/pip -q install meson ninja mako pyyaml packaging; fi
 fi
-[ -f mesa-$MESA.tar.xz ] || curl -sSLo mesa-$MESA.tar.xz https://archive.mesa3d.org/mesa-$MESA.tar.xz
+# (under another name until it is whole: an error page or a transfer cut short is not the tarball of the next run)
+[ -f mesa-$MESA.tar.xz ] || { curl -fsSLo mesa-$MESA.tar.xz.part https://archive.mesa3d.org/mesa-$MESA.tar.xz; mv mesa-$MESA.tar.xz.part mesa-$MESA.tar.xz; }
 rm -rf mesa && mkdir mesa && tar -C mesa --strip-components=1 -xf mesa-$MESA.tar.xz
 for p in "$HERE"/patches/*.patch; do patch -d mesa -p1 --no-backup-if-mismatch -s < "$p"; done
 mkdir -p mesa/src/virtio/vulkan/xnudrm
