@@ -2479,6 +2479,11 @@ static id xcmDev_newCommandQueue(id self, SEL) {
 static id xcmDev_newCommandQueueMax(id self, SEL, NSUInteger) {
     return xcmDev_newCommandQueue(self, nullptr);
 }
+// The descriptor's command buffer limit and log state have no counterpart in the bridge, as the count above has none.
+static id xcmDev_newCommandQueueDesc(id self, SEL, id) NS_RETURNS_RETAINED;
+static id xcmDev_newCommandQueueDesc(id self, SEL, id) {
+    return xcmDev_newCommandQueue(self, nullptr);
+}
 static id xcmDev_newBufferLen(id self, SEL, NSUInteger length, MTLResourceOptions opts) {
     if (!gXm2vDevice || length == 0) return nil;
     Xm2vBuffer *b = xm2v_buffer_new(gXm2vDevice, length, opts, nullptr);
@@ -3518,6 +3523,7 @@ static Class createBackendDeviceClass(void) {
             {"resourcePatchingTypeForResourceType:", (IMP)xcmDev_zeroU1, "Q24@0:8Q16"},
             {"newCommandQueue", (IMP)xcmDev_newCommandQueue, "@16@0:8"},
             {"newCommandQueueWithMaxCommandBufferCount:", (IMP)xcmDev_newCommandQueueMax, "@24@0:8Q16"},
+            {"newCommandQueueWithDescriptor:", (IMP)xcmDev_newCommandQueueDesc, "@24@0:8@16"},
             {"newBufferWithLength:options:", (IMP)xcmDev_newBufferLen, "@32@0:8Q16Q24"},
             {"newBufferWithBytes:length:options:", (IMP)xcmDev_newBufferBytes, "@40@0:8^v16Q24Q32"},
             {"newBufferWithBytesNoCopy:length:options:deallocator:", (IMP)xcmDev_newBufferNoCopy, "@48@0:8^v16Q24Q32@?40"},
