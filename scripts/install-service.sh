@@ -4,8 +4,18 @@
 # macOS as a system service. It starts at boot, is stopped cleanly (its disk synced) when the VM shuts down, and is
 # started again after a panic or a run that ended by itself; each run's kernel log is in /var/log/xnulinux/.
 #   sudo systemctl status xnulinux     journalctl -u xnulinux     settings: /etc/xnulinux.conf (then: systemctl restart xnulinux)
+#   scripts/install-service.sh remove    stop the hosted system (its disk synced first) and take the service away again
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
+if [ "${1:-}" = remove ]; then
+  # stopped through the unit while there is one (its ExecStop is xnulinux-boot.sh stop); a system started by hand the same way
+  if [ -f /etc/systemd/system/xnulinux.service ]; then sudo systemctl disable --now xnulinux.service; fi
+  [ ! -d /sys/module/xnu ] || (cd "$P" && scripts/xnulinux-boot.sh stop)
+  sudo rm -f /etc/systemd/system/xnulinux.service
+  sudo systemctl daemon-reload
+  echo "removed: xnulinux.service (kept: /etc/xnulinux.conf, the logs in /var/log/xnulinux, the disk; fki.ko and the memory set aside for it: scripts/vm-install-fki-service.sh remove)"
+  exit 0
+fi
 U=$(id -un)
 # the disk's UUIDs, where the service's xnulinux-boot.sh will look for them: MAC_CONF of /etc/xnulinux.conf (a PureDarwin
 # disk's pd.conf, say), /var/tmp/mac.conf without one
