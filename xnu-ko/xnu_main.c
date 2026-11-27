@@ -2153,8 +2153,21 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		}
 		xnu_kfault_recover = (void *)a_kfr;
 	}
-	if (!el0_mode && xnu_kfault && fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault) == 0)
+	if (!el0_mode && xnu_kfault) {
+		/*
+		 * XNU's kernel takes page faults all the time (vm_fault on its kernel map). Where the host cannot hand them
+		 * over (fki's probe on Linux's fault path did not register on this kernel) the first one is a Linux oops with
+		 * XNU's keys and stack live: XNU is not started there.
+		 */
+		int ferr = fki_fault_register(0xffffffe000000000ULL, 0xfffffffc00000000ULL, xnu_fault);
+		if (ferr) {
+			logkv("xnu: the host cannot forward XNU's kernel faults: not starting, err", (u64_t)ferr);
+			fki_thread_stop(monitor); monitor = 0;
+			fki_thread_stop(fb_thread); fb_thread = 0;
+			return ferr;
+		}
 		logs("xnu: kernel faults on XNU addresses go to XNU's vm_fault");
+	}
 	if (!el0_mode) {
 		/*
 		 * XNU's user half starts as Linux's TTBR0. Its TCR stays Linux's (T0SZ 16, 4-level): a 4K XNU user pmap's
