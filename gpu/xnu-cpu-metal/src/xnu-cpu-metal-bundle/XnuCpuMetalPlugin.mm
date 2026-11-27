@@ -2063,12 +2063,16 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 }
 - (NSError *)error {
     if (self.status == MTLCommandBufferStatusError) {
+        // This command buffer's own text. Not xcmError: it prefers the thread's last bridge error, which is whatever
+        // call failed last on this thread (a function a library does not have, long ago), not this failure.
         char buf[512] = {};
+        NSString *text = nil;
         if (_handle && xm2v_command_buffer_error(_handle, buf, sizeof(buf)) > 0) {
             os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: command buffer error (cb=%p): %{public}s", (__bridge void *)self, buf);
-            return xcmError(MTLCommandBufferErrorDomain, MTLCommandBufferErrorInternal, buf);
+            text = [NSString stringWithUTF8String:buf];
         }
-        return xcmError(MTLCommandBufferErrorDomain, MTLCommandBufferErrorInternal, "Command buffer failed");
+        return [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
+                               userInfo:@{NSLocalizedDescriptionKey: text ?: @"Command buffer failed"}];
     }
     return nil;
 }
