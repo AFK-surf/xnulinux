@@ -703,6 +703,38 @@ static void t_fence(void)
 	EQ(xclose(c), 0);
 }
 
+/* A fence that stays pending (the renderer's processes are stopped): how long each wait holds the caller, a hosted CPU. */
+static void t_fence_wait(void)
+{
+	static const uint64_t ns[] = { 0, 1000, 1000000, 10000000, 49000000, 50000000, 1000000000, 1ull << 40, 1ull << 63, ~0ull };
+	pid_t pids[8];
+	start();
+	uint32_t c = xopen();
+	EQ(context_init(c, 4), 0);
+	uint32_t f = fence_on(c, 0);
+	EQ(fence_poll(c, f, 2000), 0);
+	EQ(fence_close(c, f), 0);
+	int n = below(getpid(), NULL, NULL, pids, 8);
+	MUST(n == 2);
+	for (int i = 0; i < n; i++) kill(pids[i], SIGSTOP);
+	f = fence_on(c, 0);
+	double over = 1e9;
+	for (unsigned i = 0; i < sizeof(ns) / sizeof(ns[0]); i++) {
+		double t0 = now_ms(), want = ns[i] / 1e6 > 50 ? 50 : ns[i] / 1e6;	/* no host call is to take more than 50 ms */
+		int r = fence_wait(c, f, ns[i]);
+		double took = now_ms() - t0;
+		EQ(r, -XNUDRM_ETIME);
+		if (took < want || took > want + 2000) fail(__LINE__, "a wait of %llu ns for a pending fence took %.1f ms, not %.0f", (unsigned long long)ns[i], took, want);
+		if (want >= 49 && took - want < over) over = took - want;
+	}
+	/* (the best of them: a busy machine may hold any one up) */
+	if (over > 12) fail(__LINE__, "the waits of 49 ms and more for a pending fence each took at least %.1f ms longer than that", over);
+	for (int i = 0; i < n; i++) kill(pids[i], SIGCONT);
+	EQ(fence_poll(c, f, 2000), 0);
+	EQ(fence_close(c, f), 0);
+	EQ(xclose(c), 0);
+}
+
 /* ---- a Vulkan device behind the context ---- */
 
 struct dev { uint64_t pd, id; char name[256]; uint32_t ring_idx, ntypes; struct { uint32_t flags, heap; } type[32]; uint64_t heap[16]; };
@@ -1029,7 +1061,7 @@ int main(int argc, char **argv)
 	static const struct { const char *name; void (*f)(void); int secs; } tests[] = {
 		{ "open and close", t_open, 60 }, { "GETPARAM", t_getparam, 60 }, { "GET_CAPS", t_caps, 60 }, { "CONTEXT_INIT", t_context, 60 },
 		{ "blobs of shared memory", t_blob, 60 }, { "MAP", t_map, 60 }, { "a ring", t_ring, 120 }, { "fences", t_fence, 120 },
-		{ "device memory", t_device_memory, 900 },
+		{ "FENCE_WAIT's timeout", t_fence_wait, 120 }, { "device memory", t_device_memory, 900 },
 		{ "rounds", t_rounds, 600 }, { "a client that died", t_crashed, 900 }, { "255 clients", t_clients, 600 },
 		{ "the tables", t_tables, 600 }, { "more blobs than 1024 descriptors", t_descriptors, 300 },
 	};

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <time.h>
 #include <unistd.h>
 #include <drm/drm.h>
 #include <drm/virtgpu_drm.h>
@@ -252,17 +253,24 @@ static int do_map(uint32_t c, struct xnudrm_hdr *h, uint8_t *out, uint32_t *outl
 	return 0;
 }
 
+static uint64_t now_ns(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec * 1000000000ull + t.tv_nsec;
+}
+
 /* No fence descriptor without the renderer's fence thread: poll. */
 static int fence_wait(uint32_t c, struct fence *f, uint64_t ns)
 {
-	int us = ns / 1000 > 50000 ? 50000 : (int)(ns / 1000);	/* at most 50 ms per host call */
+	/* at most 50 ms per host call, by the clock: a usleep(100) takes half as long again */
+	uint64_t end = now_ns() + (ns > 50000000 ? 50000000 : ns);
 
 	for (;;) {
 		virgl_renderer_context_poll(c);
 		if (f->state == 2) return 0;
-		if (us <= 0) return -XNUDRM_ETIME;
+		if (now_ns() >= end) return -XNUDRM_ETIME;
 		usleep(100);
-		us -= 100;
 	}
 }
 
