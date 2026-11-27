@@ -48,7 +48,7 @@ check '... and it says what it kept and names the other remove' grep -q 'kept: .
 
 run vm-install-fki-service.sh; s=$?
 check 'vm-install-fki-service.sh remove: status 0, the unit and the mem= command line gone' [ $s = 0 -a ! -e "$U/xnulinux-fki.service" -a ! -e "$G" ]
-check '... the boot loader told (update-grub), after the file went' [ "$(grep -n '^update-grub' "$T/calls" | cut -d: -f1)" -gt 0 ]
+check '... the boot loader told (update-grub)' called '^update-grub'
 check '... fki.ko unloaded' [ ! -d "$R/sys/module/fki" ]
 check '... and it says a reboot gives the memory back' grep -q 'after a reboot' "$T/out"
 
