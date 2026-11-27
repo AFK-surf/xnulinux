@@ -608,6 +608,9 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice
             withBytes:(const void *)pixelBytes bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage {
     if (_handle) {
+        // The write-back below is the whole texture: what the surface holds now goes in first, or the rest of what was
+        // drawn into the surface since the last sync is lost to a write of one region.
+        if (_iosurface && level == 0 && slice == 0) [self syncFromIOSurfaceIfNeeded];
         xm2v_texture_replace_region(_handle,
             region.origin.x, region.origin.y, region.origin.z,
             region.size.width, region.size.height, region.size.depth,
@@ -1953,8 +1956,10 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
       destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin {
     if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmBuffer class]] || ![(id)dst isKindOfClass:[XcmTexture class]]) return;
     [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
-    if (((XcmTexture *)dst)->_iosurface)
+    if (((XcmTexture *)dst)->_iosurface) {
+        [(XcmTexture *)dst syncFromIOSurfaceIfNeeded];   // the copy may cover a part; the write-back covers all
         [_cmdBuf markDirtyIOSurfaceTexture:(XcmTexture *)dst];
+    }
     xm2v_blit_encoder_copy_buffer_to_texture(_handle, ((XcmBuffer *)src)->_handle, srcOff, bpr, bpi,
         sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, slice, level, origin.x, origin.y, origin.z);
 }
@@ -1973,8 +1978,10 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmTexture class]] || ![(id)dst isKindOfClass:[XcmTexture class]]) return;
     [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
     [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
-    if (((XcmTexture *)dst)->_iosurface)
+    if (((XcmTexture *)dst)->_iosurface) {
+        [(XcmTexture *)dst syncFromIOSurfaceIfNeeded];   // the copy may cover a part; the write-back covers all
         [_cmdBuf markDirtyIOSurfaceTexture:(XcmTexture *)dst];
+    }
     xm2v_blit_encoder_copy_texture_to_texture(_handle, ((XcmTexture *)src)->_handle, ss, sl,
         so.x, so.y, so.z, sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, ds, dl, do_.x, do_.y, do_.z);
 }
