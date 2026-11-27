@@ -3035,9 +3035,11 @@ static id xcmDev_newComputePSODesc(id self, SEL, MTLComputePipelineDescriptor *d
     return [[XcmComputePipeline alloc] initWithHandle:pso device:self];
 }
 static void xcmDev_newComputePSOAsync(id self, SEL, id<MTLFunction> fn, void (^handler)(id<MTLComputePipelineState>, NSError *)) {
-    NSError *err = nil;
-    id pso = xcmDev_newComputePSO(self, nullptr, fn, &err);
-    if (handler) handler(pso, err);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{   // not inside the call: see xcmDev_newRenderPSOAsync
+        NSError *err = nil;
+        id pso = xcmDev_newComputePSO(self, nullptr, fn, &err);
+        if (handler) handler(pso, err);
+    });
 }
 static id xcmDev_newRenderPSO(id self, SEL, MTLRenderPipelineDescriptor *desc, NSError **error) {
     if (!gXm2vDevice || !desc || ![desc.vertexFunction isKindOfClass:[XcmFunction class]] || !((XcmFunction *)desc.vertexFunction)->_handle) {
@@ -3247,6 +3249,38 @@ static id xcmDev_newRenderPSO(id self, SEL, MTLRenderPipelineDescriptor *desc, N
 static id xcmDev_newRenderPSOOpts(id self, SEL, MTLRenderPipelineDescriptor *desc, MTLPipelineOption, MTLRenderPipelineReflection **refl, NSError **error) {
     if (refl) *refl = nil;
     return xcmDev_newRenderPSO(self, nullptr, desc, error);
+}
+// The forms that answer through a handler. _MTLDevice's own (what the device class gets for a selector it does not
+// list) return without ever calling it: the caller waits for its pipeline for ever. Off the caller's thread, as
+// Metal's are: the caller may hold a lock its handler takes. The descriptor is the caller's to change after the call.
+static void xcmDev_newRenderPSOAsync(id self, SEL, MTLRenderPipelineDescriptor *desc, void (^handler)(id<MTLRenderPipelineState>, NSError *)) {
+    desc = [desc copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        id pso = xcmDev_newRenderPSO(self, nullptr, desc, &err);
+        if (handler) handler(pso, err);
+    });
+}
+static void xcmDev_newRenderPSOOptsAsync(id self, SEL, MTLRenderPipelineDescriptor *desc, MTLPipelineOption,
+                                         void (^handler)(id<MTLRenderPipelineState>, MTLRenderPipelineReflection *, NSError *)) {
+    xcmDev_newRenderPSOAsync(self, nullptr, desc, ^(id<MTLRenderPipelineState> pso, NSError *err) { if (handler) handler(pso, nil, err); });
+}
+static void xcmDev_newComputePSOOptsAsync(id self, SEL, id<MTLFunction> fn, MTLPipelineOption,
+                                          void (^handler)(id<MTLComputePipelineState>, MTLComputePipelineReflection *, NSError *)) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        id pso = xcmDev_newComputePSO(self, nullptr, fn, &err);
+        if (handler) handler(pso, nil, err);
+    });
+}
+static void xcmDev_newComputePSODescAsync(id self, SEL, MTLComputePipelineDescriptor *desc, MTLPipelineOption opts,
+                                          void (^handler)(id<MTLComputePipelineState>, MTLComputePipelineReflection *, NSError *)) {
+    desc = [desc copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        id pso = xcmDev_newComputePSODesc(self, nullptr, desc, opts, nullptr, &err);
+        if (handler) handler(pso, nil, err);
+    });
 }
 static id xcmDev_newSampler(id self, SEL, MTLSamplerDescriptor *desc) {
     if (!gXm2vDevice || !desc) return nil;
@@ -3507,6 +3541,10 @@ static Class createBackendDeviceClass(void) {
             {"newComputePipelineStateWithFunction:completionHandler:", (IMP)xcmDev_newComputePSOAsync, "v32@0:8@16@?24"},
             {"newRenderPipelineStateWithDescriptor:error:", (IMP)xcmDev_newRenderPSO, "@32@0:8@16^@24"},
             {"newRenderPipelineStateWithDescriptor:options:reflection:error:", (IMP)xcmDev_newRenderPSOOpts, "@48@0:8@16Q24^@32^@40"},
+            {"newRenderPipelineStateWithDescriptor:completionHandler:", (IMP)xcmDev_newRenderPSOAsync, "v32@0:8@16@?24"},
+            {"newRenderPipelineStateWithDescriptor:options:completionHandler:", (IMP)xcmDev_newRenderPSOOptsAsync, "v40@0:8@16Q24@?32"},
+            {"newComputePipelineStateWithFunction:options:completionHandler:", (IMP)xcmDev_newComputePSOOptsAsync, "v40@0:8@16Q24@?32"},
+            {"newComputePipelineStateWithDescriptor:options:completionHandler:", (IMP)xcmDev_newComputePSODescAsync, "v40@0:8@16Q24@?32"},
             {"newSamplerStateWithDescriptor:", (IMP)xcmDev_newSampler, "@24@0:8@16"},
             {"newDepthStencilStateWithDescriptor:", (IMP)xcmDev_newDepthStencil, "@24@0:8@16"},
             {"newEvent", (IMP)xcmDev_newEvent, "@16@0:8"},
