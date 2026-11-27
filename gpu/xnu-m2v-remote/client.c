@@ -53,7 +53,7 @@ struct xh {
     uint64_t cached[2]; bool have[2];	// gpu address / resource id
     // a command buffer
     struct xh **ref; uint8_t *refw; uint32_t nref, capref;
-    bool committed, final; uint32_t status; char *err;
+    bool committed, final, asked; uint32_t status; char *err;
 };
 
 static pthread_mutex_t xr_mu = PTHREAD_MUTEX_INITIALIZER;	// the stream out, the handles
@@ -67,7 +67,7 @@ static uint64_t xr_next_req = 1, xr_cur_req;
 static pthread_cond_t xr_pending = PTHREAD_COND_INITIALIZER;
 unsigned long xm2v_remote_answers, xm2v_remote_bytes_out, xm2v_remote_bytes_in, xm2v_remote_buffer_bytes, xm2v_remote_hashed;
 
-struct waiter { uint64_t req; uint8_t *data; uint64_t len; bool done; pthread_cond_t cv; struct waiter *next; };
+struct waiter { uint64_t req; uint8_t *data; uint64_t len; bool done; pthread_cond_t cv; struct waiter *next; uint64_t status_of; };	// status_of: nobody waits, the answer is a command buffer's status
 static pthread_mutex_t rp_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct waiter *rp_waiters;
 static int xr_nwait;	// answers being waited for
@@ -184,6 +184,7 @@ static uint64_t xr_wait_u64(uint64_t req) {
     free(d); return v;
 }
 
+static void xr_took_status_id(uint64_t id, uint8_t *d, uint64_t len);
 static void *xr_notify_thread(void *p) { struct notify *n = p; n->fn(n->ctx, n->value); free(n); return 0; }
 static bool xr_read(void *p, size_t n) {
 #ifdef __APPLE__
@@ -215,8 +216,14 @@ static void *xr_reader(void *unused) {
             while ((n = *pn) && n->token != token) pn = &n->next;
             if (n) { *pn = n->next; n->value = value; pthread_t t; pthread_create(&t, 0, xr_notify_thread, n); pthread_detach(t); }
         } else {
-            struct waiter *w = rp_waiters;
-            while (w && w->req != a.req) w = w->next;
+            struct waiter **pw = &rp_waiters, *w;
+            while ((w = *pw) && w->req != a.req) pw = &w->next;
+            if (w && w->status_of) {	// asked without waiting (xm2v_command_buffer_status)
+                uint64_t id = w->status_of; *pw = w->next; pthread_cond_destroy(&w->cv); free(w);
+                pthread_mutex_unlock(&rp_mu);
+                xr_took_status_id(id, d, a.len); free(d);
+                continue;
+            }
             if (w) { w->data = d; w->len = a.len; w->done = true; pthread_cond_signal(&w->cv); } else free(d);
         }
         pthread_mutex_unlock(&rp_mu);
@@ -589,11 +596,13 @@ bool xm2v_command_buffer_commit(Xm2vCommandBuffer *c) {
     return true;
 }
 // The answer to a wait or a status: status, the error's text, then the buffers the GPU changed.
-static void xr_took_status(struct xh *cb, uint8_t *d, uint64_t len) {
+static void xr_took_status_id(uint64_t id, uint8_t *d, uint64_t len) {
     if (!d || len < 16) return;
     uint64_t status, el; memcpy(&status, d, 8); memcpy(&el, d + 8, 8);
     xr_lock();
-    if (xr_tab[XID(cb)] == cb) {
+    struct xh *cb = id < xr_ntab ? xr_tab[id] : 0;
+    if (cb && cb->kind == K_Xm2vCommandBuffer) {
+        cb->asked = false;
         cb->status = (uint32_t)status;
         if (status >= 4) cb->final = true;
         if (el) { free(cb->err); cb->err = malloc(el + 1); memcpy(cb->err, d + 16, el); cb->err[el] = 0; }
@@ -601,6 +610,7 @@ static void xr_took_status(struct xh *cb, uint8_t *d, uint64_t len) {
     }
     xr_unlock();
 }
+static void xr_took_status(struct xh *cb, uint8_t *d, uint64_t len) { xr_took_status_id(XID(cb), d, len); }
 bool xm2v_command_buffer_wait_until_completed(Xm2vCommandBuffer *c, uint64_t timeout_ms) {
     struct xh *cb = (struct xh *)c;
     if (!cb) return false;
@@ -618,21 +628,37 @@ bool xm2v_command_buffer_wait_until_completed(Xm2vCommandBuffer *c, uint64_t tim
     free(d);
     return cb->status == 4;
 }
+// What is known of it now, without waiting: a committed one that is not done is asked about, and the answer is what a
+// later call gives (a caller that goes on to wait gets it from the wait; one that polls sees it a call later).
 uint32_t xm2v_command_buffer_status(const Xm2vCommandBuffer *c) {
     struct xh *cb = (struct xh *)c;
     if (!cb) return 5;
     xr_lock();
-    if (cb->final || !cb->committed) { uint32_t s = cb->status; xr_unlock(); return s; }
+    uint32_t st = cb->committed && cb->status < 2 ? 2 : cb->status;
+    if (!cb->final && cb->committed && !cb->asked) {
+        cb->asked = true;
+        uint8_t *m = xr_begin(OP_xm2v_command_buffer_status, xr_req());
+        pthread_mutex_lock(&rp_mu);
+        for (struct waiter *w = rp_waiters; w; w = w->next) if (w->req == xr_cur_req) { w->status_of = cb->id; xr_nwait--; }
+        pthread_mutex_unlock(&rp_mu);
+        m = xr_u64(m, cb->id); xr_end(m);
+    }
+    xr_unlock();
+    return st;
+}
+// The status for a caller that must have it (the error's text).
+static void xr_status_now(struct xh *cb) {
+    xr_lock();
+    if (cb->final || !cb->committed) { xr_unlock(); return; }
     uint8_t *m = xr_begin(OP_xm2v_command_buffer_status, xr_req()); uint64_t req = xr_cur_req; m = xr_u64(m, cb->id); xr_end(m);
     uint64_t len; uint8_t *d = xr_wait(req, &len);
     xr_took_status(cb, d, len);
     free(d);
-    return cb->status;
 }
 size_t xm2v_command_buffer_error(const Xm2vCommandBuffer *c, char *out, size_t size) {
     struct xh *cb = (struct xh *)c;
     if (!cb) return 0;
-    if (!cb->final) xm2v_command_buffer_status(c);
+    if (!cb->final) xr_status_now(cb);
     xr_lock();
     size_t n = cb->err ? strlen(cb->err) : 0;
     if (out && size) { size_t k = n < size - 1 ? n : size - 1; if (k) memcpy(out, cb->err, k); out[k] = 0; }
