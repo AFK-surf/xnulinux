@@ -449,9 +449,14 @@ static int xnu_fault(unsigned long far, unsigned long esr, void *regs)
 		unsigned long *fp = (unsigned long *)fki_regs_reg(regs, 29);
 		for (int i = 0; i < 12 && fp && !((unsigned long)fp & 15) && (unsigned long)fp >= XNU_VA_LO &&
 		    (unsigned long)fp < XNU_VA_HI; i++) {
-			logkv("xnu:   frame", fp[1] | 0xffffff8000000000ul);
-			if ((unsigned long *)fp[0] <= fp) break;
-			fp = (unsigned long *)fp[0];
+			fki_u64 w0, w1;
+			/* a frame that is not mapped ends the walk (XNU's stack may be what went wrong): read directly it
+			 * faulted here, in the exception handler with XNU's keys loaded, the oops this path is there to avoid */
+			if (fki_high_read_u64x2((unsigned long)fp, &w0, &w1) != 0)
+				break;
+			logkv("xnu:   frame", w1 | 0xffffff8000000000ul);
+			if ((unsigned long *)w0 <= fp) break;
+			fp = (unsigned long *)w0;
 		}
 	}
 	fki_regs_set_pc(regs, (unsigned long)xnu_world_fault_abort);
@@ -1056,13 +1061,10 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 			for (i = 0; i < 24 && fp && !((unsigned long)fp & 15) &&
 			     (unsigned long)fp >= fp_lo && (unsigned long)fp + 16 <= fp_hi; i++) {
 				fki_u64 w0, w1;
-				if (el0_mode) {
-					if (fki_high_read_u64x2((unsigned long)fp, &w0, &w1) != 0)
-						break;
-				} else {
-					w0 = fp[0];
-					w1 = fp[1];
-				}
+				/* on either host: a frame that is not mapped ends the walk (a panic's stack may be damaged; read
+				 * directly, Linux oopsed here with interrupts off in place of the panic's report) */
+				if (fki_high_read_u64x2((unsigned long)fp, &w0, &w1) != 0)
+					break;
 				unsigned long lr = (unsigned long)w1 | 0xffffff8000000000ul;
 				unsigned long *next = (unsigned long *)w0;
 				logkv("xnu:   frame", lr);
@@ -1517,13 +1519,9 @@ static int monitor_fn(void *arg)
 					logkv("xnu:   lr at that call", w->xnu_regs[11]);
 					for (int f = 0; f < 16 && fp >= XNU_VA_LO && fp < XNU_VA_HI && !(fp & 7); f++) {
 						fki_u64 w0, w1;
-						if (el0_mode) {
-							if (fki_high_read_u64x2(fp, &w0, &w1) != 0)
-								break;
-						} else {
-							w0 = ((unsigned long *)fp)[0];
-							w1 = ((unsigned long *)fp)[1];
-						}
+						/* the frame pointer is from the CPU's last host call: that stack may be gone since */
+						if (fki_high_read_u64x2(fp, &w0, &w1) != 0)
+							break;
 						unsigned long next = (unsigned long)w0;
 						logkv("xnu:   frame", w1);
 						if (next <= fp || next - fp > 0x100000UL) break;
