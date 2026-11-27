@@ -2260,6 +2260,15 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     (void)dispatchType;
     return [self computeCommandEncoder];
 }
+// A pass descriptor adds counter sampling, which this device does not offer, and the dispatch type: the plain encoder.
+- (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor:(MTLComputePassDescriptor *)desc {
+    (void)desc;
+    return [self computeCommandEncoder];
+}
+- (id<MTLBlitCommandEncoder>)blitCommandEncoderWithDescriptor:(MTLBlitPassDescriptor *)desc {
+    (void)desc;
+    return [self blitCommandEncoder];
+}
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)desc {
     if (!_handle || !desc) return nil;
     Xm2vRenderPassDesc rd = {};
