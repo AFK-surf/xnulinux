@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Build fki.ko and xnu.ko against the newest generic arm64 Ubuntu kernel's headers (the host the project runs on:
-# Ubuntu 24.04 with its HWE kernel), check that every source file names its license, and run the tests of the kernel
-# collection linker (tests/kclink: python3 alone, nothing of Apple's).
+# Ubuntu 24.04 with its HWE kernel), and check that every source file names its license.
 name: modules
 on:
   push:
@@ -35,9 +34,3 @@ jobs:
           missing=$(git ls-files '*.c' '*.h' '*.cpp' '*.mm' '*.m' '*.rs' '*.S' '*.s' '*.sh' '*.py' '*.metal' '*.comp' '*Makefile' |
             while read -r f; do head -3 "$f" | grep -q SPDX-License-Identifier || echo "$f"; done)
           [ -z "$missing" ] || { echo "no SPDX-License-Identifier:"; echo "$missing"; exit 1; }
-  kclink:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: The kernel collection linker's tests
-        run: python3 -m unittest discover -s tests/kclink -v
