@@ -176,6 +176,14 @@ static void *ks_file;
 /* The hosted system's block disk (kexts/XnuDisk: IOKit media, e.g. an APFS container), read-write (LINUX64_CALL_DISK_SIZE, _RW) */
 static char *disk;
 module_param(disk, charp, 0444);
+/*
+ * A flush the hosted system asks of that disk (LINUX64_CALL_DISK_SYNC: DKIOCSYNCHRONIZE, F_FULLFSYNC, a journal's or a
+ * checkpoint's barrier) is an fsync of the file: what the system was told is on the disk then survives the host. 0: the
+ * flush is answered at once, and the written data stays in Linux's page cache until Linux writes it (faster; a host
+ * that crashes or a VM that is killed can lose it and leave the file system torn).
+ */
+static int disk_sync = 1;
+module_param(disk_sync, int, 0444);
 static void *dk_file; static fki_u64 dk_size;
 /*
  * What iBoot tells an APFS boot in /chosen: the system volume's UUID (boot-uuid; boot-arg rd=uuid finds the root by it) and
@@ -911,6 +919,10 @@ static long xnu_hook_body(unsigned long call, unsigned long a1, unsigned long a2
 		struct linux64_rw_req *q = (struct linux64_rw_req *)a1;
 		if (q) q->result = dk_file ? fki_file_rw(dk_file, (int)q->write, q->buf, (unsigned long)q->len, q->off) : -6;
 		if (q && q->result > 0) acct_disk_slot[this_slot()] += (unsigned long)q->result;
+		return 0;
+	}
+	if (call == LINUX64_CALL_DISK_SYNC) {		/* the block disk's file to stable storage: *a1 = 0 or -errno */
+		if (a1) *(long long *)a1 = !dk_file ? -6 : disk_sync ? fki_file_sync(dk_file) : 0;
 		return 0;
 	}
 	if (call == LINUX64_CALL_KEYSTORE_RW) {		/* the keystore file: q->result = bytes moved or -errno */

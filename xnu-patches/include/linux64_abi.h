@@ -54,6 +54,8 @@ enum linux64_call {
 	LINUX64_CALL_DISK_RW        = 820,	/* a1 = struct linux64_rw_req on the system disk */
 	LINUX64_CALL_DISK_SIZE      = 821,	/* a1 = u64 *: the system disk's size in bytes, 0 when there is none */
 	LINUX64_CALL_RANDOM         = 822,	/* a1 = buffer, a2 = length: bytes from the host's cryptographic generator */
+	LINUX64_CALL_DISK_SYNC      = 823,	/* a1 = i64 *: what was written to the system disk goes to stable storage: 0 or a
+						 * negative errno into *a1 (a host from before the call leaves it as it is) */
 	LINUX64_CALL_HOSTCALL       = 830,	/* a1 = struct linux64_hostcall_req: a message to a Linux service and its reply */
 	LINUX64_CALL_CPU_START      = 840,	/* a1 = a CPU's MPIDR, a2 = its cpu_data_t: the host enters linux64_cpu_entry(a2) there */
 	LINUX64_CALL_IPI            = 841,	/* a1 = the target CPU's MPIDR: its linux64_ipi_pending slot is set; make it look */

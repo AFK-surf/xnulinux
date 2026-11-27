@@ -203,6 +203,8 @@ fki_u64 fki_phys_peek(fki_u64 pa);
  */
 void *fki_file_open(const char *path, int writable, fki_u64 *size);
 long fki_file_rw(void *file, int write, void *buf, unsigned long len, fki_u64 off);
+/* What was written to a host file goes to stable storage (fsync); from inside fki_enter(), as fki_file_rw. 0 or -errno. */
+long fki_file_sync(void *file);
 void fki_file_close(void *file);
 /* Write to a host file from ordinary Linux context (a host thread, not inside fki_enter()); bytes written or -errno. */
 long fki_file_pwrite(void *file, const void *buf, unsigned long len, fki_u64 off);

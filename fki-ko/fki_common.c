@@ -477,6 +477,28 @@ static long fki_file_rw_body(void *file, int write, void *buf, unsigned long len
 	return ret < 0 && !done ? ret : (long)done;
 }
 
+static void fki_file_sync_thunk(void *p)
+{
+	struct fki_file_args *a = p;
+
+	local_irq_enable();
+	preempt_enable();
+	a->ret = vfs_fsync(a->file, 0);
+	preempt_disable();
+	local_irq_disable();
+}
+
+long fki_file_sync(void *file)
+{
+	struct fki_file_args a = { .file = file, .ret = -EIO };
+
+	if (!file)
+		return -EBADF;
+	fki_linux_runs(fki_file_sync_thunk, &a);
+	return a.ret;
+}
+EXPORT_SYMBOL(fki_file_sync);
+
 long fki_file_pwrite(void *file, const void *buf, unsigned long len, fki_u64 off)
 {
 	loff_t pos = off;

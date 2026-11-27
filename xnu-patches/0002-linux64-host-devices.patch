@@ -225,10 +225,10 @@ index d24535d..386e6ad 100644
  	assert(*size < (UINT64_MAX - *base));
 diff --git a/bsd/kern/linux64_host.c b/bsd/kern/linux64_host.c
 new file mode 100644
-index 0000000..00cb495
+index 0000000..aeec366
 --- /dev/null
 +++ b/bsd/kern/linux64_host.c
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,143 @@
 +/*
 + * Copyright (c) 2026 xnulinux contributors. All rights reserved.
 + *
@@ -244,7 +244,8 @@ index 0000000..00cb495
 + *   XnuEthernet  linux64_net_send, linux64_net_recv    frames through the Linux netdev xnu0 (Linux routes and NATs)
 + *   XnuInput     linux64_input_read                    evdev records from the host
 + *   XnuEAN       linux64_store_rw                      the keystore file
-+ *   XnuDisk      linux64_disk_size, linux64_disk_rw    the system disk
++ *   XnuDisk      linux64_disk_size, linux64_disk_rw,   the system disk
++ *                linux64_disk_sync
 + *   XnuDrm       linux64_hostcall                      messages to a Linux service (the GPU bridge, xnudrmd)
 + */
 +#include <sys/param.h>
@@ -254,6 +255,7 @@ index 0000000..00cb495
 +
 +#define L64_FRAME_MAX   (ETHER_MAX_LEN + 64)
 +#define L64_ENXIO       6       /* Linux's ENXIO: the host has no such device */
++#define L64_ENOSYS      38      /* Linux's ENOSYS: the host does not know the call */
 +
 +/* One frame to the host: its length when sent, 0 when not. */
 +long linux64_net_send(const void *frame, unsigned long length);
@@ -335,6 +337,23 @@ index 0000000..00cb495
 +linux64_disk_rw(int write, void *buffer, unsigned long length, unsigned long offset)
 +{
 +	return linux64_rw(LINUX64_CALL_DISK_RW, write, buffer, length, offset);
++}
++
++/*
++ * What was written to the system disk goes to stable storage (the host fsyncs its file): 0, or a negative errno. Until
++ * then a write is in the host's page cache only. -ENOSYS: a host from before the call, which leaves the result alone.
++ */
++long linux64_disk_sync(void);
++long
++linux64_disk_sync(void)
++{
++	int64_t result = -L64_ENOSYS;
++
++	if (linux64_hook == 0) {
++		return -L64_ENXIO;
++	}
++	linux64_call(LINUX64_CALL_DISK_SYNC, &result);
++	return (long)result;
 +}
 +
 +/*
