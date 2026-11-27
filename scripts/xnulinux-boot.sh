@@ -68,7 +68,8 @@ CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || ech
 # Not loaded at all: its load at boot failed (after a kernel update fki.ko was still the old kernel's, until the build
 # above). Then with what xnulinux-fki.service loads it with, which is where a host's own carve-out is written down.
 if [ ! -d /sys/module/fki ]; then
-  UNIT_ARGS=$(sed -n 's|^ExecStart=.*/fki-ko/fki\.ko  *||p' /etc/systemd/system/xnulinux-fki.service 2>/dev/null | head -1)
+  # (no such unit on a host where fki.ko is loaded by hand: sed's failure must not end the script here, under set -e)
+  UNIT_ARGS=$(sed -n 's|^ExecStart=.*/fki-ko/fki\.ko  *||p' /etc/systemd/system/xnulinux-fki.service 2>/dev/null | head -1 || true)
   [ -z "$UNIT_ARGS" ] || CARVE=$UNIT_ARGS
 fi
 # (an fki.ko from before cpu_list has none: set -e must not stop here)
