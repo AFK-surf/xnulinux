@@ -131,10 +131,14 @@ int main(int argc, char **argv) {
             });
         }
         dispatch_group_wait(grp, DISPATCH_TIME_FOREVER);
-        // Drain any non-waited CBs
-        usleep(300000);
+        // Drain any non-waited CBs: their completed handlers come from the plugin's own thread, not from a wait here
+        for (int i = 0; i < 300 && handlerCount.load() < completedCount.load(); i++) usleep(100000);
         printf("Phase 1 done: submitted=%d handlers=%d failures=%d\n",
                completedCount.load(), handlerCount.load(), failures.load());
+        if (handlerCount.load() != completedCount.load()) {
+            fprintf(stderr, "FAIL: handlerCount (%d) != submitted (%d)\n", handlerCount.load(), completedCount.load());
+            failures.fetch_add(1);
+        }
 
         // Phase 2: Concurrent CARenderer across 4 threads (mimics iconservicesagent rendering icons concurrently)
         static std::atomic<int> caDone{0};
