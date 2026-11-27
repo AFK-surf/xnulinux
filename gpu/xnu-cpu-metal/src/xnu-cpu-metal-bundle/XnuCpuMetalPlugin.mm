@@ -453,11 +453,14 @@ static NSUInteger xcmPixelFormatBpp(MTLPixelFormat fmt) {
     switch (fmt) {
         case MTLPixelFormatA8Unorm: case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Snorm:
         case MTLPixelFormatR8Uint: case MTLPixelFormatR8Sint: case MTLPixelFormatStencil8:
+        case MTLPixelFormatR8Unorm_sRGB:
             return 1;
         case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: case MTLPixelFormatR16Uint:
         case MTLPixelFormatR16Sint: case MTLPixelFormatR16Float: case MTLPixelFormatRG8Unorm:
         case MTLPixelFormatRG8Snorm: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG8Sint:
-        case MTLPixelFormatDepth16Unorm:
+        case MTLPixelFormatDepth16Unorm: case MTLPixelFormatRG8Unorm_sRGB:
+        case MTLPixelFormatB5G6R5Unorm: case MTLPixelFormatA1BGR5Unorm: case MTLPixelFormatABGR4Unorm:
+        case MTLPixelFormatBGR5A1Unorm: case MTLPixelFormatGBGR422: case MTLPixelFormatBGRG422:
             return 2;
         case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRGBA16Snorm: case MTLPixelFormatRGBA16Uint:
         case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA16Float:
