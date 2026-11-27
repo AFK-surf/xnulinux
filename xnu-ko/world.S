@@ -183,11 +183,17 @@ xnu_world_upcall:			/* x0 = stage, called by XNU with blr */
  * Deferred XNU kernel fault (see xnu_fault in xnu_main.c): Linux's exception returns here with the faulting context's
  * registers, stack and PSTATE. Save them, let xnu_fault_deferred resolve the fault in XNU's context (it returns where
  * to go and may set x0 for a copyio recovery; frame[31] is the SPSR), then eret there with every register restored.
+ *
+ * Every register: the FP/SIMD ones too, as XNU's own exception entry keeps them (exception_asm.h, arm_neon_saved_state64).
+ * The fault is taken in the middle of XNU kernel code, which holds values in them across loads and stores that can fault
+ * (strlen and strnlen keep v2 across their loads; a structure the compiler copies or zeroes through q registers), and
+ * what resolves it uses them: vm_fault's own code, the threads that run when it blocks, Linux when the fault yields.
+ * The frame: x0-x30 and the SPSR in its first 256 bytes (xnu_fault_deferred's frame[]), then FPSR, FPCR and q0-q31.
  */
 	.globl	xnu_fault_tramp
 	.type	xnu_fault_tramp, %function
 xnu_fault_tramp:
-	sub	sp, sp, #256
+	sub	sp, sp, #784
 	stp	x0, x1, [sp, #0]
 	stp	x2, x3, [sp, #16]
 	stp	x4, x5, [sp, #32]
@@ -204,6 +210,25 @@ xnu_fault_tramp:
 	stp	x26, x27, [sp, #208]
 	stp	x28, x29, [sp, #224]
 	str	x30, [sp, #240]
+	stp	q0, q1, [sp, #272]
+	stp	q2, q3, [sp, #304]
+	stp	q4, q5, [sp, #336]
+	stp	q6, q7, [sp, #368]
+	stp	q8, q9, [sp, #400]
+	stp	q10, q11, [sp, #432]
+	stp	q12, q13, [sp, #464]
+	stp	q14, q15, [sp, #496]
+	stp	q16, q17, [sp, #528]
+	stp	q18, q19, [sp, #560]
+	stp	q20, q21, [sp, #592]
+	stp	q22, q23, [sp, #624]
+	stp	q24, q25, [sp, #656]
+	stp	q26, q27, [sp, #688]
+	stp	q28, q29, [sp, #720]
+	stp	q30, q31, [sp, #752]
+	mrs	x1, fpsr
+	mrs	x2, fpcr
+	stp	x1, x2, [sp, #256]
 	/*
 	 * PAN on, as a real exception entry would set it (copyio runs with PAN off; vm_fault may block, and XNU panics on
 	 * a context switch with PAN off). The eret below restores the faulting context's PSTATE, PAN included.
@@ -214,6 +239,25 @@ xnu_fault_tramp:
 	msr	elr_el1, x0
 	ldr	x1, [sp, #248]
 	msr	spsr_el1, x1
+	ldp	x1, x2, [sp, #256]
+	msr	fpsr, x1
+	msr	fpcr, x2
+	ldp	q0, q1, [sp, #272]
+	ldp	q2, q3, [sp, #304]
+	ldp	q4, q5, [sp, #336]
+	ldp	q6, q7, [sp, #368]
+	ldp	q8, q9, [sp, #400]
+	ldp	q10, q11, [sp, #432]
+	ldp	q12, q13, [sp, #464]
+	ldp	q14, q15, [sp, #496]
+	ldp	q16, q17, [sp, #528]
+	ldp	q18, q19, [sp, #560]
+	ldp	q20, q21, [sp, #592]
+	ldp	q22, q23, [sp, #624]
+	ldp	q24, q25, [sp, #656]
+	ldp	q26, q27, [sp, #688]
+	ldp	q28, q29, [sp, #720]
+	ldp	q30, q31, [sp, #752]
 	ldp	x0, x1, [sp, #0]
 	ldp	x2, x3, [sp, #16]
 	ldp	x4, x5, [sp, #32]
@@ -230,7 +274,7 @@ xnu_fault_tramp:
 	ldp	x26, x27, [sp, #208]
 	ldp	x28, x29, [sp, #224]
 	ldr	x30, [sp, #240]
-	add	sp, sp, #256
+	add	sp, sp, #784
 	eret
 	.size	xnu_fault_tramp, . - xnu_fault_tramp
 
