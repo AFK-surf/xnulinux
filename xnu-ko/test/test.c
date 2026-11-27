@@ -917,6 +917,22 @@ static int c_ram_bad(void)
 	return 0;
 }
 static int c_ram_55g(void) { small(); ram_mb = 55 << 10; host_head = 8 << 20; return insmod(0, handed); }
+static int said_ram(void)
+{
+	if (!strstr(last_log, "ram_mb")) { printf("test: the last log line does not name ram_mb: \"%s\"\n", last_log); return 1; }
+	return 0;
+}
+static int c_ram_56g(void)	/* arm_vm_init's limit: half of the kernel's address window */
+{
+	small(); ram_mb = 56 << 10; host_head = 8 << 20;
+	return insmod(-22, handed) || said_ram();
+}
+static int c_ram_56g_less(void)	/* 1 MB below it: over it with the image and the boot data */
+{
+	small(); ram_mb = (56 << 10) - 1; host_head = 8 << 20;
+	return insmod(-22, handed) || said_ram();
+}
+
 /*
  * Mode 3's boot data: build_boot as run_m2b and run_m2b_el0 call it, for an image at its link address in a window that
  * starts on the 2 MiB boundary below it, on memory with a physical address of its own. (Not through xnu_init: the window
@@ -955,6 +971,8 @@ static int mode3(int el0, int mb, int err, u64_t ask)
 #define M3_HEAD ((KV & 0x1fffff) + 4 * PG + 0x60000)	/* the collection in its window, the boot data's room */
 static int c_mode3_ask(void) { return mode3(0, 4096, -12, M3_HEAD + (4096ULL << 20)); }
 static int c_mode3_ask_el0(void) { return mode3(1, 4096, -12, M3_HEAD + (4096ULL << 20)); }
+static int c_mode3_56g(void) { return mode3(0, 56 << 10, -22, 0) || said_ram(); }
+static int c_mode3_56g_el0(void) { return mode3(1, 56 << 10, -22, 0) || said_ram(); }
 static int c_mode3_55g(void) { return mode3(0, 55 << 10, -12, M3_HEAD + (55ULL << 30)); }
 
 /* ---- a kernel collection: its entries, its symbols, where it is placed, and what an EL0 host patches in it ---- */
@@ -1203,10 +1221,14 @@ static const struct { const char *what; int (*run)(void); } cases[] = {
 	{ "an EL0 host without pointer authentication is refused", c_el0_nopac },
 	{ "ram_mb of 0, below 0 and above 65536 is refused", c_ram_bad },
 	{ "ram_mb of 55 GiB: memSize and dram-size say so", c_ram_55g },
+	{ "ram_mb of 56 GiB, where XNU's arm_vm_init panics, is refused, and said", c_ram_56g },
+	{ "ram_mb 1 MiB below that, over it with the image and the boot data, as well", c_ram_56g_less },
 	{ "mode 3's boot data: the image in its window, memory at its own physical address", c_mode3_data },
 	{ "mode 3 asks the host for the image, the boot data's room and ram_mb", c_mode3_ask },
 	{ "mode 3 on an EL0 host asks for the same", c_mode3_ask_el0 },
 	{ "mode 3, ram_mb of 55 GiB: asked of the host", c_mode3_55g },
+	{ "mode 3, ram_mb of 56 GiB: refused before the host is asked, and said", c_mode3_56g },
+	{ "mode 3 on an EL0 host, ram_mb of 56 GiB: the same", c_mode3_56g_el0 },
 	{ "a kernel collection: its kernel entry found, its segments placed, its symbols looked up", c_kc },
 	{ "EL0 host: the collection's traps and ID register reads patched and no other word; corecrypto's digest and integrity check", c_patch },
 };

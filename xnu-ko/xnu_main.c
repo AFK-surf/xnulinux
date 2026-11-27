@@ -316,6 +316,11 @@ static unsigned long kfault_moved;	/* kernel faults whose vm_fault came back on 
 #define XNU_VA_LO 0xffffffe000000000ULL
 #define XNU_VA_HI 0xfffffffc00000000ULL
 /*
+ * XNU takes less memory than half of that window, the image and the boot data included (56 GiB): from there its
+ * arm_vm_init panics ("Unsupported memory configuration").
+ */
+#define XNU_MEM_MAX ((XNU_VA_HI - XNU_VA_LO) / 2)
+/*
  * A kernel fault XNU's vm_fault should resolve is not resolved here, inside Linux's exception handler (a kprobe: no
  * sleeping, no rescheduling, and a nested fault in it is a missed kprobe and an oops), because vm_fault may page in
  * from disk (a file I/O upcall that lets Linux schedule) or block the thread. The exception instead returns into
@@ -1176,6 +1181,11 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	struct adt a;
 	static unsigned char seed[256];
 
+	/* (ram_mb alone is below it: xnu_init) */
+	if (size >= XNU_MEM_MAX) {
+		logkv("xnu: ram_mb with the image and the boot data is more than XNU takes, by (bytes)", size - XNU_MEM_MAX + 1);
+		return 0;
+	}
 	fki_random(seed, sizeof(seed));
 	/*
 	 * XNU identifies its CPUs by MPIDR: its CPU 0 runs here, bound to Linux CPU 0; CPUs 1 .. cpus-1 are Linux's of the
@@ -2390,8 +2400,11 @@ static int __init xnu_init(void)
 
 	if (fki_version() != FKI_VERSION)
 		return -22;
-	if (ram_mb <= 0 || ram_mb > 65536)
+	/* (up to 65536 was taken, and the hosted kernel panicked on the memory once the host had found it) */
+	if (ram_mb <= 0 || (u64_t)ram_mb << 20 >= XNU_MEM_MAX) {
+		logkv("xnu: ram_mb must be 1 or more, and less than (MiB)", XNU_MEM_MAX >> 20);
 		return -22;
+	}
 	el0_mode = !!(fki_caps() & FKI_CAP_EL0);
 	logkv("xnu: FKI caps", fki_caps());
 	if (el0_mode && !(fki_caps() & FKI_CAP_PAC)) {
