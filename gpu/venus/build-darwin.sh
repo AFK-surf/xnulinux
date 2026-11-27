@@ -9,7 +9,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MESA=26.3.1
 ARCHS=${ARCHS:-arm64 arm64e}
-W=${W:-$HOME/w/venus-darwin}; OUT=${OUT:-$W/out}; mkdir -p "$W"; cd "$W"
+W=${W:-$HOME/w/venus-darwin}; mkdir -p "$W"; cd "$W"; W=$PWD; OUT=${OUT:-$W/out}	# W absolute: PATH and meson's --prefix below
 UV=$(command -v uv || true)	# before PATH is narrowed: uv's own installer puts it in ~/.local/bin
 export PATH=$W/venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # Mesa wants Python >= 3.10 (macOS ships 3.9): uv's own when there is uv, else Homebrew's

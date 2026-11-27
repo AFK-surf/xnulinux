@@ -6,7 +6,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MESA=26.3.1
-W=${W:-$HOME/w/venus}; OUT=${OUT:-$W/out}; mkdir -p "$W"; cd "$W"
+W=${W:-$HOME/w/venus}; mkdir -p "$W"; cd "$W"; W=$PWD; OUT=${OUT:-$W/out}	# W absolute: PATH and meson's --prefix below
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ninja-build libdrm-dev glslang-tools bison flex pkg-config \
   libexpat1-dev zlib1g-dev libudev-dev libzstd-dev libvulkan-dev vulkan-tools python3-venv >/dev/null
 [ -x venv/bin/meson ] || { python3 -m venv venv && venv/bin/pip -q install meson mako pyyaml packaging; }
