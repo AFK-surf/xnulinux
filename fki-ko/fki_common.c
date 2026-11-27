@@ -427,8 +427,8 @@ long fki_file_rw(void *file, int write, void *buf, unsigned long len, fki_u64 of
 {
 	struct fki_file_args a = { file, write, buf, len, off, -EIO };
 
-	if (!file)
-		return -EBADF;
+	if (!file || (write && !(((struct file *)file)->f_mode & FMODE_WRITE)))
+		return -EBADF;		/* (a file opened to read: kernel_write() says so with a WARN) */
 	fki_linux_runs(fki_file_rw_thunk, &a);
 	return a.ret;
 }
@@ -482,7 +482,7 @@ long fki_file_pwrite(void *file, const void *buf, unsigned long len, fki_u64 off
 {
 	loff_t pos = off;
 
-	if (!file)
+	if (!file || !(((struct file *)file)->f_mode & FMODE_WRITE))
 		return -EBADF;
 	return kernel_write(file, buf, len, &pos);
 }
