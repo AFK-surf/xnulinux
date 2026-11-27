@@ -273,7 +273,7 @@ class Kext:
                         target, name = None, None
                     if typ in (UNSIGNED, AUTHENTICATED_POINTER):
                         if length != 3:
-                            raise LinkError(f'{o.path}: {length * 8}-bit pointer at {s.sectname}+{raddr:#x}')
+                            raise LinkError(f'{o.path}: {8 << length}-bit pointer at {s.sectname}+{raddr:#x}')
                         raw = struct.unpack_from('<Q', out.data, pos)[0]
                         if typ == AUTHENTICATED_POINTER:
                             add = raw & 0xffffffff

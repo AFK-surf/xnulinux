@@ -440,7 +440,7 @@ class Pointers(Case):
     def test_a_32_bit_pointer_is_refused(self):
         o, t, d, f, p = self.holder()
         o.reloc(d, 0, UNSIGNED, f, length=2)
-        self.assertIn('pointer at __data+0x0', self.refused(o))
+        self.assertIn('32-bit pointer at __data+0x0', self.refused(o))
 
     def test_a_symbol_nothing_defines(self):
         o, t, d, f, p = self.holder()
