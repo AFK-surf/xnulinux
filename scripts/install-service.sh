@@ -7,6 +7,13 @@
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 U=$(id -un)
+# The service runs xnulinux-boot.sh as this user with no terminal: every sudo in it has to work without a password
+# (-k: not on the strength of one typed a moment ago). Said here, not by a unit that fails at the next boot.
+[ "$(id -u)" = 0 ] || sudo -k -n true 2>/dev/null || {
+  echo "$U cannot use sudo without a password, and the service runs scripts/xnulinux-boot.sh as $U with no terminal to ask on:" >&2
+  echo "give $U a NOPASSWD rule (sudo visudo -f /etc/sudoers.d/xnulinux: '$U ALL=(ALL) NOPASSWD:ALL') or run this as root" >&2
+  exit 1
+}
 # the disk's UUIDs, where the service's xnulinux-boot.sh will look for them: MAC_CONF of /etc/xnulinux.conf (a PureDarwin
 # disk's pd.conf, say), /var/tmp/mac.conf without one
 M=$(unset MAC_CONF; [ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf >/dev/null; echo "${MAC_CONF:-/var/tmp/mac.conf}")
