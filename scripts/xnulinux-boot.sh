@@ -171,6 +171,8 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   # next start (systemd's restart after a panic) finds it and refuses
   if [ -d /sys/module/xnu ]; then sudo rmmod xnu || echo "xnu.ko did not unload" >&2; fi
   sudo systemctl stop xnudrmd 2>/dev/null || true
+  # XNU's CPUs are Linux's again, as after a stop: a run that ended by itself otherwise left them out of the deep idle states
+  for f in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do [ -e "$f" ] && echo 0 | sudo tee "$f" >/dev/null 2>&1 || true; done
   sudo mkdir -p "$LOGDIR"
   LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
   { cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:"; } |
