@@ -43,6 +43,6 @@ grep -E "^wrote" "$W/kclink.log" || true
 # AMFI of 27.2 expects platform version 27; the system disks the kit was made for carry 26 (scripts/kc-amfi-platform.py)
 python3 "$POC/scripts/kc-amfi-platform.py" "$OUT" "${AMFI_PLATFORM:-$(kit amfi_platform)}"
 if [ -n "$INSTALL" ]; then
-	sudo install -m 644 "$OUT" "$INSTALL" && OUT=$INSTALL
+	sudo install -m 644 "$OUT" "$INSTALL"; OUT=$INSTALL	# (not &&: a failed install must stop here, not go on to "boot it")
 fi
 echo "kernel collection with Apple's kexts: $OUT (boot it: IMAGE=xnu/$(basename "$OUT") scripts/xnulinux-boot.sh)"
