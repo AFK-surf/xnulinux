@@ -18,9 +18,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf	# for stop as well: the sync is typed into this system's CONSOLE_IN
+irqs_back() {	# Linux's device interrupts back on the CPUs they had before the start took them off XNU's (/run: gone at a reboot, as they are)
+  local f v; [ -s /run/xnu-irq-affinity ] || return 0
+  while read -r f v; do [ -n "$v" ] && [ -e "$f" ] && echo "$v" | sudo tee "$f" >/dev/null 2>&1 || true; done < /run/xnu-irq-affinity
+  sudo rm -f /run/xnu-irq-affinity
+}
 if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced first) and remove xnu.ko
   if [ ! -d /sys/module/xnu ]; then
     sudo systemctl stop xnudrmd 2>/dev/null || true
+    irqs_back
     echo "no hosted system is running"; exit 0
   fi
   printf 'sync\n' >> "${CONSOLE_IN:-/var/tmp/console-in}"; sleep 3
@@ -30,6 +36,7 @@ if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced fi
   if [ -d /sys/module/xnu ]; then sudo rmmod xnu; fi
   sudo systemctl stop xnudrmd 2>/dev/null || true
   for f in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do [ -e "$f" ] && echo 0 | sudo tee "$f" >/dev/null 2>&1 || true; done	# XNU's CPUs are Linux's again
+  irqs_back
   echo "hosted system stopped"
   exit
 fi
@@ -88,6 +95,8 @@ m = (1 << $NCPU) - 1
 for c in l: m &= ~(1 << c)
 h = format(m, 'x')	# Linux reads a CPU mask in comma-separated groups of 32 bits
 print(','.join(reversed([h[max(i - 8, 0):i] for i in range(len(h), 0, -8)])))")
+  # what they were, for the stop or the end of the run to give back (kept when a start finds it there: the values are the first start's)
+  [ -s /run/xnu-irq-affinity ] || for f in /proc/irq/default_smp_affinity /proc/irq/*/smp_affinity; do echo "$f $(cat "$f" 2>/dev/null)"; done | sudo tee /run/xnu-irq-affinity >/dev/null
   echo "$MASK" | sudo tee /proc/irq/default_smp_affinity >/dev/null 2>&1 || true
   for f in /proc/irq/*/smp_affinity; do echo "$MASK" | sudo tee "$f" >/dev/null 2>&1 || true; done
   HOSTCPUS=$(python3 -c "print(','.join(str(c) for c in range($NCPU) if 0x${MASK//,/} >> c & 1))")
@@ -181,6 +190,7 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   sudo systemctl stop xnudrmd 2>/dev/null || true
   # XNU's CPUs are Linux's again, as after a stop: a run that ended by itself otherwise left them out of the deep idle states
   for f in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do [ -e "$f" ] && echo 0 | sudo tee "$f" >/dev/null 2>&1 || true; done
+  irqs_back
   sudo mkdir -p "$LOGDIR"
   LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
   # (no line of fki's at all when xnu.ko did not load: set -e must not end the script here, before it says how the run ended)
