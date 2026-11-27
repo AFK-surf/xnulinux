@@ -87,6 +87,12 @@ int main(int argc, char **argv) {
         CK(xm2v_render_encoder_end(e)); CK(xm2v_command_buffer_commit(cb));
         CK(xm2v_command_buffer_wait_until_completed(cb, 0));
         CK(xm2v_texture_get_bytes(target, px, W * 4, 0, 0, 0, 0, W, H, 1, 0, 0));
+        if (round == 1) {	// again into what the first read left there, and into something else
+            static unsigned char px2[W * H * 4]; memset(px2, 0x5a, sizeof px2);
+            CK(xm2v_texture_get_bytes(target, px, W * 4, 0, 0, 0, 0, W, H, 1, 0, 0));
+            CK(xm2v_texture_get_bytes(target, px2, W * 4, 0, 0, 0, 0, W, H, 1, 0, 0));
+            EXPECT(memcmp(px, px2, sizeof px) == 0, "two reads of one texture differ");
+        }
         unsigned char *c = px + (H / 2 * W + W / 2) * 4; int wr = round ? 0 : 128, wg = round ? 255 : 0;
         EXPECT(abs(c[2] - wr) <= 2 && abs(c[1] - wg) <= 2 && abs(c[0] - 64) <= 2, "round %d: centre rgb %d %d %d, wanted %d %d 64", round, c[2], c[1], c[0], wr, wg);
         xm2v_command_buffer_release(cb);

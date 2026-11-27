@@ -70,7 +70,10 @@ of a private network between the two machines, never a public one.
 
 ## Open
 
-- Every display frame's pixels are still read back into the hosted system (4 MB a frame; 6 to 9 ms through the bridge).
+- Every display frame's pixels are still read back into the hosted system, and with a Screen Sharing viewer a second
+  copy of the frame for it: two command buffers a swap, each waited for and read back. A read-back sends only the 4 KB
+  pages that differ from what the destination holds (71% of a 4 MB frame while a window moves), which did not change
+  the frame rate: 33 to 36 a second with a viewer either way, 57 to 61 without one.
 - The library polls for answers (the bridge makes one host call at a time and none may wait): every 30 to 200 us while
   a call waits for one, and every 4 ms otherwise, for a shared event's notification. That is 250 host calls a second
   for each process with a Metal device that does nothing: about 5000 a second on a desktop of 20 such processes.

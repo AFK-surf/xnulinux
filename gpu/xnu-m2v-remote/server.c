@@ -36,7 +36,7 @@ static const char *loader, *icd, *cache = "/tmp/m2v-cache";
 static void **obj; static struct sbuf **sbufs; static struct sarg *sargs; static size_t nobj;
 static pthread_mutex_t wr_mu = PTHREAD_MUTEX_INITIALIZER;	// answers
 static pthread_mutex_t buf_mu = PTHREAD_MUTEX_INITIALIZER;	// buffers' contents and fingerprints
-static unsigned long st_msgs, st_bytes, st_answers, st_op[OP_COUNT], st_fail;
+static unsigned long st_msgs, st_bytes, st_answers, st_op[OP_COUNT], st_fail, st_changed, st_whole;
 static bool stats;
 
 static uint8_t rbuf[1 << 20]; static size_t rpos, rlen;
@@ -156,7 +156,8 @@ static void *stats_thread(void *unused) {
         sleep(10);
         fprintf(stderr, "[%d] %lu messages, %lu bytes in, %lu answers:", getpid(), st_msgs, st_bytes, st_answers);
         for (int k = 0; k < 12; k++) { int best = 0; for (int i = 1; i < OP_COUNT; i++) if (st_op[i] > st_op[best]) best = i; if (!st_op[best]) break; fprintf(stderr, " %s %lu", op_names[best], st_op[best]); st_op[best] = 0; }
-        fprintf(stderr, "\n"); st_msgs = st_bytes = st_answers = 0;
+        if (st_whole) fprintf(stderr, "; read back %lu of %lu KB", st_changed >> 10, st_whole >> 10);
+        fprintf(stderr, "\n"); st_msgs = st_bytes = st_answers = st_changed = st_whole = 0;
     }
     return 0;
 }
@@ -232,6 +233,26 @@ static void serve(void) {
             if (px) ok = xm2v_texture_get_bytes(t, px, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10]);
             if (!ok) sv_fail(h.op);
             answer2(h.req, &ok, 8, px, ok ? n : 0); free(px); break; }
+
+        case OP_GET_BYTES_CHANGED: {	// the texture's bytes where they are not what the client says it has
+            uint64_t *a = sv_blob(&m, 88); void *t = sv_bad ? 0 : sv_obj(a[0]);
+            uint64_t n = a[2] ? a[2] * (a[8] ? a[8] : 1) : a[1] * (a[7] ? a[7] : 1) * (a[8] ? a[8] : 1), ok = 0, np = (n + XR_PAGE - 1) / XR_PAGE;
+            static uint8_t *px, *out; static uint64_t cap;
+            if (!t || !n || n > (1ull << 31) || sv_left(m) < np * 8) { sv_null(h.op, 0); sv_answer(h.req, &ok, 8); break; }
+            if (n > cap) { free(px); free(out); cap = n; px = malloc(n + 8); out = malloc(n + np * 24 + 64); }
+            if (px && out) ok = xm2v_texture_get_bytes(t, px, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10]);
+            if (!ok) { sv_fail(h.op); sv_answer(h.req, &ok, 8); break; }
+            uint64_t on = 0, run = ~0ull; const uint64_t *have = (const uint64_t *)m;
+            for (uint64_t i = 0; i <= np; i++) {
+                uint64_t l = i < np ? (n - i * XR_PAGE < XR_PAGE ? n - i * XR_PAGE : XR_PAGE) : 0;
+                if (i < np && xr_hash(px + i * XR_PAGE, l) != have[i]) { if (run == ~0ull) run = i; continue; }
+                if (run == ~0ull) continue;
+                uint64_t rec[2] = { run * XR_PAGE, (i < np ? i * XR_PAGE : n) - run * XR_PAGE };
+                memcpy(out + on, rec, 16); memcpy(out + on + 16, px + rec[0], rec[1]); memset(out + on + 16 + rec[1], 0, -rec[1] & 7);
+                on += 16 + ((rec[1] + 7) & ~7ull); run = ~0ull;
+            }
+            st_changed += on; st_whole += n;
+            answer2(h.req, &ok, 8, out, on); break; }
 
         case OP_xm2v_library_new_with_data: {
             uint64_t nid = sv_u64(&m); void *d = sv_obj(sv_u64(&m));

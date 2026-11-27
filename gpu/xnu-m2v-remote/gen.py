@@ -117,8 +117,8 @@ for ret, name, params in protos:
     if release or end: s.append('    sv_set(i0, 0);')
     s.append('    break; }')
     sv.append('\n'.join(s))
-open('gen_ops.h', 'w').write('enum {\n    OP_NONE,\n' + ''.join(f'    OP_{n},\n' for n in ops) + '    OP_BUFFER_WRITE, OP_BUFFER_READ, OP_COUNT\n};\n' +
-    'static const char *const op_names[] = { "none", ' + ', '.join(f'"{n[5:]}"' for n in ops) + ', "buffer_write", "buffer_read" };\n' +
+open('gen_ops.h', 'w').write('enum {\n    OP_NONE,\n' + ''.join(f'    OP_{n},\n' for n in ops) + '    OP_BUFFER_WRITE, OP_BUFFER_READ, OP_GET_BYTES_CHANGED, OP_COUNT\n};\n' +
+    'static const char *const op_names[] = { "none", ' + ', '.join(f'"{n[5:]}"' for n in ops) + ', "buffer_write", "buffer_read", "get_bytes_changed" };\n' +
     'enum { K_NONE, ' + ', '.join('K_' + h for h in HANDLES) + ' };\n')
 open('gen_client.inc', 'w').write('\n'.join(cl) + '\n')
 open('gen_server.inc', 'w').write('\n'.join(sv) + '\n')

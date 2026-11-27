@@ -455,16 +455,37 @@ bool xm2v_texture_replace_region(const Xm2vTexture *tex, uint64_t x, uint64_t y,
     xr_unlock();
     return true;
 }
+// A read-back of a page or more says what the destination holds now (a fingerprint for each XR_PAGE of it), and only the
+// pages that differ come back: a frame read into the surface it was read into before is mostly what is already there.
 bool xm2v_texture_get_bytes(const Xm2vTexture *tex, void *out, uint64_t bpr, uint64_t bpi, uint64_t x, uint64_t y, uint64_t z,
                             uint64_t w, uint64_t h, uint64_t d, uint64_t mip, uint64_t slice) {
     if (!tex || !out) return false;
+    uint64_t n = xr_image_bytes(bpr, bpi, h, d), a[11] = { XID(tex), bpr, bpi, x, y, z, w, h, d, mip, slice };
+    // To compare: while the file /var/tmp/xm2v-read-whole exists, every read-back comes whole.
+    static unsigned calls; static bool whole;
+    if (!(calls++ & 63)) whole = access("/var/tmp/xm2v-read-whole", F_OK) == 0;
+    if (whole || n < 16 * XR_PAGE || n > (1ull << 31)) {
+        xr_lock();
+        uint8_t *m = xr_begin(OP_xm2v_texture_get_bytes, xr_req()); uint64_t req = xr_cur_req;
+        m = xr_bytes(m, a, sizeof a); xr_end(m);
+        uint64_t len; uint8_t *p = xr_wait(req, &len);
+        bool ok = p && len == 8 + n && p[0];
+        if (ok) memcpy(out, p + 8, n);
+        free(p); return ok;
+    }
+    uint64_t pages = (n + XR_PAGE - 1) / XR_PAGE, *have = malloc(pages * 8);
+    for (uint64_t i = 0; i < pages; i++) have[i] = xr_hash((uint8_t *)out + i * XR_PAGE, n - i * XR_PAGE < XR_PAGE ? n - i * XR_PAGE : XR_PAGE);
     xr_lock();
-    uint8_t *m = xr_begin(OP_xm2v_texture_get_bytes, xr_req()); uint64_t req = xr_cur_req;
-    uint64_t a[11] = { XID(tex), bpr, bpi, x, y, z, w, h, d, mip, slice };
-    m = xr_bytes(m, a, sizeof a); xr_end(m);
-    uint64_t len, n = xr_image_bytes(bpr, bpi, h, d); uint8_t *p = xr_wait(req, &len);
-    bool ok = p && len == 8 + n && p[0];
-    if (ok) memcpy(out, p + 8, n);
+    uint8_t *m = xr_begin(OP_GET_BYTES_CHANGED, xr_req()); uint64_t req = xr_cur_req;
+    m = xr_bytes(m, a, sizeof a); xr_end_raw(m, have, pages * 8);
+    free(have);
+    uint64_t len; uint8_t *p = xr_wait(req, &len);
+    bool ok = p && len >= 8 && p[0];
+    for (uint8_t *q = p + 8, *end = p + len; ok && q + 16 <= end; ) {	// (offset, length, bytes) until the end
+        uint64_t off, l; memcpy(&off, q, 8); memcpy(&l, q + 8, 8); q += 16;
+        if (off > n || l > n - off || l > (uint64_t)(end - q)) { ok = false; break; }
+        memcpy((uint8_t *)out + off, q, l); q += (l + 7) & ~7ull;
+    }
     free(p); return ok;
 }
 
