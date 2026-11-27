@@ -433,6 +433,7 @@ static void xcmRecordIOSurfaceWriter(IOSurfaceRef surf, id cmdBuf) {
     gIOSurfaceLastWriter[sid] = cmdBuf;
 }
 
+static bool xcmCommandBufferSubmitted(id cmdBuf);
 static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
     if (!surf) return;
     uint32_t sid = IOSurfaceGetID(surf);
@@ -443,8 +444,8 @@ static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
         auto it = gIOSurfaceLastWriter.find(sid);
         if (it != gIOSurfaceLastWriter.end()) writer = it->second;
     }
-    if (writer && [writer respondsToSelector:@selector(waitUntilCompleted)] &&
-        [(id<MTLCommandBuffer>)writer status] >= MTLCommandBufferStatusCommitted) {
+    // Not one that waits in its queue's line (enqueue): it runs after command buffers that are not committed yet.
+    if (writer && [writer respondsToSelector:@selector(waitUntilCompleted)] && xcmCommandBufferSubmitted(writer)) {
         [(id<MTLCommandBuffer>)writer waitUntilCompleted];
     }
 }
@@ -1465,11 +1466,23 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     BOOL _iosurfaceFlushed;
     BOOL _retainedReleased;
     NSUInteger _protectionOptions;
+    BOOL _inLine, _wantsCommit;    // its place in its queue's line (XcmQueue), under the queue's lock
+    dispatch_group_t _lineGroup;   // entered from its commit until the bridge has it
 }
 - (instancetype)initWithHandle:(Xm2vCommandBuffer *)h device:(id)dev queue:(id)q;
 - (void)markDirtyIOSurfaceTexture:(XcmTexture *)tex;
 - (void)retainResource:(id)obj;
+- (void)commitNow;
 @end
+@protocol XcmCommandLine   // XcmQueue
+- (void)xcmEnqueue:(XcmCommandBuffer *)cb;
+- (void)xcmCommit:(XcmCommandBuffer *)cb;
+@end
+static bool xcmCommandBufferSubmitted(id cmdBuf) {
+    if (![cmdBuf isKindOfClass:[XcmCommandBuffer class]]) return true;
+    Xm2vCommandBuffer *h = ((XcmCommandBuffer *)cmdBuf)->_handle;
+    return !h || xm2v_command_buffer_status(h) >= MTLCommandBufferStatusCommitted;
+}
 
 /* ======================== Encoders ======================== */
 
@@ -2063,6 +2076,7 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
         _dirtyIOSurfaceTextures = [NSMutableArray array];
         _retainedResources = [NSMutableArray array];
         _handlersGroup = dispatch_group_create();
+        _lineGroup = dispatch_group_create();
     }
     return self;
 }
@@ -2094,6 +2108,10 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 - (CFTimeInterval)kernelStartTime { return 0.0; }
 - (CFTimeInterval)kernelEndTime { return 0.0; }
 - (MTLCommandBufferStatus)status {
+    // In its queue's line the bridge does not have it yet: Metal's Enqueued there, and Committed from its commit.
+    @synchronized(_queue) {
+        if (_inLine) return _wantsCommit ? MTLCommandBufferStatusCommitted : MTLCommandBufferStatusEnqueued;
+    }
     return _handle ? (MTLCommandBufferStatus)xm2v_command_buffer_status(_handle) : MTLCommandBufferStatusError;
 }
 - (NSError *)error {
@@ -2111,7 +2129,7 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     }
     return nil;
 }
-- (void)enqueue {}
+- (void)enqueue { [(id<XcmCommandLine>)_queue xcmEnqueue:self]; }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {
     if (!block) return;
     @synchronized(self) {
@@ -2191,7 +2209,8 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     }
     (void)toRelease;
 }
-- (void)commit {
+- (void)commit { [(id<XcmCommandLine>)_queue xcmCommit:self]; }
+- (void)commitNow {
     BOOL needsWait = NO;
     NSUInteger nSched = 0, nComp = 0, nDirty = 0, nRet = 0;
     NSArray *retSnapshot = nil;
@@ -2248,6 +2267,8 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     [self waitUntilCompleted];
 }
 - (void)waitUntilCompleted {
+    // Committed behind one enqueued before it: the bridge gets it at that one's commit.
+    dispatch_group_wait(_lineGroup, DISPATCH_TIME_FOREVER);
     if (_handle) xm2v_command_buffer_wait_until_completed(_handle, 0);
     [self _flushIOSurfacesOnce];
     [self _fireHandlersOnce];
@@ -2381,17 +2402,44 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     NSUInteger _bgGpuPriority;
     dispatch_queue_t _submissionQueue;
     dispatch_queue_t _completionQueue;
+    NSMutableArray<XcmCommandBuffer *> *_line;
 }
 - (instancetype)initWithHandle:(Xm2vQueue *)h device:(id)dev;
 @end
 
 @implementation XcmQueue
 - (instancetype)initWithHandle:(Xm2vQueue *)h device:(id)dev {
-    if ((self = [super init])) { _handle = h; _device = dev; _gpuPriority = 1; _bgGpuPriority = 2; }
+    if ((self = [super init])) {
+        _handle = h; _device = dev; _gpuPriority = 1; _bgGpuPriority = 2;
+        _line = [NSMutableArray array];
+    }
     return self;
 }
 - (void)dealloc { if (_handle) { xm2v_queue_release(_handle); _handle = nullptr; } }
 - (id<MTLDevice>)device { return _device; }
+// Metal runs a queue's command buffers in the order they were enqueued (a commit enqueues one that was not), whatever
+// the order of their commits. The bridge has no enqueue and runs them in commit order, so each waits in line here until
+// every one before it is committed. One enqueued and never committed holds up all behind it, as on Metal.
+- (void)xcmEnqueue:(XcmCommandBuffer *)cb {
+    @synchronized(self) {
+        if (!cb->_inLine && !cb->_wantsCommit) { cb->_inLine = YES; [_line addObject:cb]; }
+    }
+}
+- (void)xcmCommit:(XcmCommandBuffer *)cb {
+    @synchronized(self) {
+        if (cb->_wantsCommit) return;
+        cb->_wantsCommit = YES;
+        dispatch_group_enter(cb->_lineGroup);
+        if (!cb->_inLine) { cb->_inLine = YES; [_line addObject:cb]; }
+        while (_line.count && _line[0]->_wantsCommit) {
+            XcmCommandBuffer *head = _line[0];
+            [_line removeObjectAtIndex:0];
+            head->_inLine = NO;
+            [head commitNow];
+            dispatch_group_leave(head->_lineGroup);
+        }
+    }
+}
 - (void)setSubmissionQueue:(dispatch_queue_t)q { _submissionQueue = q; }
 - (void)setCompletionQueue:(dispatch_queue_t)q { _completionQueue = q; }
 - (NSUInteger)getGPUPriority { return _gpuPriority; }
