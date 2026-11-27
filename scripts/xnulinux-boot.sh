@@ -180,7 +180,10 @@ for try in 1 2 3 4 5 6 7 8 9; do
 done
 # insmod gone and no xnu.ko: it did not load (no disk or collection, a parameter out of range). --wait keeps that in the run's log.
 if [ $WAIT = 0 ] && ! pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null && [ ! -d /sys/module/xnu ]; then
-  echo "xnu.ko did not load: $(cat /var/tmp/xnu-insmod.log) (the kernel's reason: journalctl -k)" >&2
+  # with what xnu.ko itself said last: insmod only has the error number's words, and for a file xnu.ko did not find (the
+  # collection, the trust cache, the disk: -2) those are "Unknown symbol in module"
+  echo "xnu.ko did not load: $(cat /var/tmp/xnu-insmod.log)" >&2
+  sudo dmesg | grep -a "fki: xnu: " | tail -3 | sed 's/^\[[^]]*\] */  /' >&2
   sudo systemctl stop xnudrmd 2>/dev/null || true
   exit 1
 fi
