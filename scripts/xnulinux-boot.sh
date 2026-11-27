@@ -14,7 +14,7 @@
 # environment:
 #   DISK (/var/tmp/mac.img)  RAM_MB (7900)  BOOTARGS  CONSOLE_IN (/var/tmp/console-in)  INPUT_IN (/var/tmp/xnu-input)
 #   FB_DUMP (/var/tmp/xnu-fb.raw)  KEYSTORE (/var/tmp/xnu-keystore.bin)  TRUSTCACHE (xnu/trustcache-mac.bin; empty: none)
-#   IMAGE (xnu/kc.bin: the kernel collection under /lib/firmware)  GPU (auto|off)  CPUS (1: the hosted system's CPUs, 32 at most)  XNU_ARGS (more xnu.ko parameters)
+#   IMAGE (xnu/kc.bin: the kernel collection under /lib/firmware)  GPU (auto|off|remote, with GPU_REMOTE=host:port: gpu/xnu-m2v-remote)  CPUS (1: the hosted system's CPUs, 32 at most)  XNU_ARGS (more xnu.ko parameters)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf	# for stop as well: the sync is typed into this system's CONSOLE_IN
@@ -102,7 +102,22 @@ done
 # insmod kills live DRM/Venus clients out from under WindowServer. Never restart xnudrmd while XNU runs.
 sudo systemctl stop xnudrmd 2>/dev/null || true
 sudo systemctl reset-failed xnudrmd 2>/dev/null || true
-if [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
+if [ "$GPU" = remote ]; then
+  # The renderer is another machine's (gpu/xnu-m2v-remote: xm2v-server there). xm2v-relay takes xnudrmd's place on the
+  # host-call device and carries the hosted system's Metal calls to it; the boot-arg tells the hosted system's
+  # libxnu_m2v to send them. With no relay the system would have no Metal device at all: no boot without it.
+  : "${GPU_REMOTE:?GPU=remote needs GPU_REMOTE=host:port (the machine that runs xm2v-server)}"
+  bash gpu/xnu-m2v-remote/build.sh relay
+  sudo systemd-run -q --unit xnudrmd --collect ${HOSTCPUS:+-p CPUAffinity="$HOSTCPUS"} "$PWD/gpu/xnu-m2v-remote/xm2v-relay" "${GPU_REMOTE%:*}" "${GPU_REMOTE##*:}"
+  DRM_READY=0
+  for _ in $(seq 1 50); do
+    if sudo journalctl -u xnudrmd -q --no-pager --since "-20s" 2>/dev/null | grep "xm2v-relay: serving" >/dev/null; then DRM_READY=1; break; fi
+    sleep 0.1
+  done
+  [ "$DRM_READY" = 1 ] || { echo "gpu: xm2v-relay did not start (journalctl -u xnudrmd)" >&2; sudo systemctl stop xnudrmd 2>/dev/null || true; exit 1; }
+  echo "gpu: the renderer is $GPU_REMOTE (xm2v-relay: journalctl -u xnudrmd)"
+  BOOTARGS="$BOOTARGS xm2v-remote=1"
+elif [ "$GPU" != off ] && [ -e /dev/dri/renderD128 ]; then
   make -s -C gpu/xnu-drm >/dev/null
   # off XNU's CPUs, the render server it starts too: a thread woken on a CPU that XNU holds runs when XNU next calls the host
   sudo systemd-run -q --unit xnudrmd --collect ${HOSTCPUS:+-p CPUAffinity="$HOSTCPUS"} "$PWD/gpu/xnu-drm/xnudrmd"

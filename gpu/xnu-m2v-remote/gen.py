@@ -121,4 +121,16 @@ open('gen_ops.h', 'w').write('enum {\n    OP_NONE,\n' + ''.join(f'    OP_{n},\n'
     'enum { K_NONE, ' + ', '.join('K_' + h for h in HANDLES) + ' };\n')
 open('gen_client.inc', 'w').write('\n'.join(cl) + '\n')
 open('gen_server.inc', 'w').write('\n'.join(sv) + '\n')
+# The library that is either: every function goes to the real libxnu_m2v beside it or to the remote one (switch.c).
+ren, sw = [], []
+for ret, name, params in protos:
+    ret = ' '.join(ret.split()); params = ' '.join(params.split())
+    ps = [] if params in ('', 'void') else [parse_param(p) for p in params.split(',')]
+    args = ', '.join(n for _, n, _ in ps)
+    ptr = f'{ret} (*{name})({params or "void"})'
+    ren.append(f'#define {name} xr_{name}')
+    sw.append((ptr, f'{ret} xr_{name}({params or "void"});\n{ret} {name}({params or "void"}) {{ {"" if ret == "void" else "return "}(xs_remote() ? xr_{name} : xs_local.{name})({args}); }}', name))
+open('gen_rename.h', 'w').write('\n'.join(ren) + '\n')
+open('gen_switch.inc', 'w').write('static struct {\n' + ''.join(f'    {p};\n' for p, _, _ in sw) + '} xs_local;\nstatic int xs_remote(void);\n' +
+    '\n'.join(b for _, b, _ in sw) + '\nstatic const char *const xs_names[] = { ' + ', '.join(f'"{n}"' for _, _, n in sw) + ' };\n')
 print(len(ops), 'functions,', len(cl), 'generated,', len(manual), 'by hand:', ' '.join(m[5:] for m in manual))

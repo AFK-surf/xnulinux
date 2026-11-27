@@ -3,7 +3,11 @@
 The hosted macOS draws on a GPU that is not in its machine: an arm64 host without one, and an x86_64 machine with one
 beside it. The cut is the C interface between the Metal plugin and metal2vulkan (`xnu_m2v.h`, 145 functions, in
 `gpu/xnu-cpu-metal/src/xnu-m2v-bridge`): the bridge itself builds and runs unchanged on Linux x86_64 with the machine's
-Vulkan driver, and in the hosted system a stand-in `libxnu_m2v.dylib` sends each call there. The plugin is not changed.
+Vulkan driver, and in the hosted system `libxnu_m2v.dylib` sends each call there. The plugin is not changed.
+
+It is an option, chosen on the host: `GPU=remote` and `GPU_REMOTE=host:port` for `scripts/xnulinux-boot.sh` (or in
+`/etc/xnulinux.conf`). The library in the bundle is then one that is either (`switch.c`): without the boot-arg the boot
+script adds (`xm2v-remote=1`) every call goes to the real library beside it, as before.
 
 ```
  hosted macOS (arm64 host)                                        the machine with the GPU
@@ -23,6 +27,8 @@ Vulkan driver, and in the hosted system a stand-in `libxnu_m2v.dylib` sends each
   may have written come back with the answer to `wait_until_completed`. On macOS it reaches the renderer through the
   DRM bridge's user client (WindowServer's sandbox denies every socket); with `XM2V_REMOTE=host:port` it connects
   itself (tests outside a sandbox, and on Linux).
+- `switch.c`: the library that is either: the real one (`libxnu_m2v_local.dylib`, loaded when it is the choice) or
+  `client.c`'s functions. `into-bundle.sh` puts it into a built `XnuCpuMetal.bundle`.
 - `server.c`: `xm2v-server PORT LOADER ICD_JSON`, a process for each connection (one Metal device of one process).
 - `relay.c`: `xm2v-relay HOST PORT` on the Linux host, as root, in `xnudrmd`'s place on `/dev/xnu-hostcall`.
 - `t2.c`, `t2.metal`: buffers both ways, textures and pipelines, against the real library or the remote one.
@@ -36,14 +42,12 @@ On the machine with the GPU (Rust 1.100.0; a checkout of this repository with me
     cargo build --release --manifest-path ../xnu-cpu-metal/src/xnu-m2v-bridge/Cargo.toml
     ./build.sh server && ./xm2v-server 7001 libvulkan.so.1 /usr/share/vulkan/icd.d/nvidia_icd.json
 
-On a Mac, the hosted system's library (it replaces `Contents/Frameworks/libxnu_m2v.dylib` of the bundle, which is
-then signed again):
+On a Mac, into the bundle that goes on the system disk (the real library becomes `libxnu_m2v_local.dylib`, the one
+that is either takes its name, the bundle is signed again):
 
-    python3 gen.py
-    clang -O2 -arch arm64 -arch arm64e -dynamiclib -I. -I../xnu-cpu-metal/src/xnu-m2v-bridge/include -I../xnu-drm client.c -framework IOKit -framework CoreFoundation \
-      -install_name @rpath/libxnu_m2v.dylib -o libxnu_m2v.dylib
+    ./into-bundle.sh path/to/XnuCpuMetal.bundle
 
-On the Linux host: `./build.sh relay && sudo ./xm2v-relay GPU_HOST 7001`.
+On the Linux host: `GPU=remote GPU_REMOTE=GPU_HOST:7001 scripts/xnulinux-boot.sh` (it builds and starts `xm2v-relay`).
 
 ## Measured (c4a-standard-4 hosting, g2-standard-8 with an NVIDIA L4 in the same zone, 0.4 ms apart)
 
@@ -58,4 +62,4 @@ On the Linux host: `./build.sh relay && sudo ./xm2v-relay GPU_HOST 7001`.
 - A shared event's handle means something only in the server process that made it.
 - A page the GPU wrote replaces the whole page in the process: a CPU write elsewhere on it since the last commit is lost.
 - A failed call that is not answered is only logged by the server.
-- Nothing here is started by the boot scripts.
+- `xm2v-server` is started by hand on the machine with the GPU.

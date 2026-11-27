@@ -20,6 +20,9 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#ifdef XR_SWITCH	// built into the library that is either (switch.c): these are the remote ones, under other names
+#include "gen_rename.h"
+#endif
 #include "xnu_m2v.h"
 #include "proto.h"
 #ifdef __APPLE__

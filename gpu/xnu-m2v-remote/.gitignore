@@ -9,3 +9,5 @@ t2-remote
 *.dylib
 *.air
 *.metallib
+gen_rename.h
+gen_switch.inc
