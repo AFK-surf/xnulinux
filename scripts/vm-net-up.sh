@@ -28,9 +28,15 @@ if command -v ethtool >/dev/null && ethtool -k "$up" 2>/dev/null | grep -q '^rx-
   sudo ethtool -K "$up" rx-gro-hw off && echo "vm-net-up: hardware GRO off on $up (its packets cannot be forwarded to xnu0)"
 fi
 command -v dnsmasq >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q dnsmasq-base >/dev/null 2>&1
+D=no
 if command -v dnsmasq >/dev/null; then
   sudo pkill -f 'dnsmasq.*xnu0' 2>/dev/null
-  sudo dnsmasq --interface=xnu0 --bind-interfaces --except-interface=lo --dhcp-range=192.168.77.2,192.168.77.50,12h \
+  # pkill does not wait for the one it ended, which holds 192.168.77.1's ports a moment longer. A dnsmasq started in that
+  # moment fails ("Address already in use") and then there is none: every second start of the hosted system had no DHCP
+  # and no DNS.
+  for _ in $(seq 1 50); do pgrep -f 'dnsmasq.*xnu0' >/dev/null || break; sleep 0.1; done
+  if sudo dnsmasq --interface=xnu0 --bind-interfaces --except-interface=lo --dhcp-range=192.168.77.2,192.168.77.50,12h \
     --dhcp-option=3,192.168.77.1 --dhcp-option=6,192.168.77.1 --pid-file=/run/dnsmasq-xnu0.pid
+  then D=yes; else D="DID NOT START (the hosted system gets no address and no DNS)"; fi
 fi
-echo "vm-net-up: xnu0 192.168.77.1/24 up, NAT via $up, dnsmasq: $(command -v dnsmasq >/dev/null && echo yes || echo no)"
+echo "vm-net-up: xnu0 192.168.77.1/24 up, NAT via $up, dnsmasq: $D"
