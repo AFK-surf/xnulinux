@@ -162,6 +162,12 @@ for try in 1 2 3 4 5 6 7 8 9; do
   fi
   echo "no contiguous memory for XNU yet: trying again in 20 s"; sleep 20
 done
+# insmod gone and no xnu.ko: it did not load (no disk or collection, a parameter out of range). --wait keeps that in the run's log.
+if [ $WAIT = 0 ] && ! pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null && [ ! -d /sys/module/xnu ]; then
+  echo "xnu.ko did not load: $(cat /var/tmp/xnu-insmod.log) (the kernel's reason: journalctl -k)" >&2
+  sudo systemctl stop xnudrmd 2>/dev/null || true
+  exit 1
+fi
 echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB_DUMP"
 [ $WAIT = 1 ] || exit 0
 
