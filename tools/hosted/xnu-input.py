@@ -102,8 +102,11 @@ def main(argv):
             for s in range(1, 11):
                 d.move(x1 + (x2 - x1) * s / 10, y1 + (y2 - y1) * s / 10)
             d.button('left', False)
-        elif cmd == 'scroll':
-            d.ev(EV_REL, 8, int(argv[i])); d.syn(); i += 1
+        elif cmd == 'scroll':   # XnuInput's wheel is one signed byte a report (-127..127): a longer turn goes in steps
+            n = int(argv[i]); i += 1
+            while n:
+                step = max(-127, min(127, n))
+                d.ev(EV_REL, 8, step); d.syn(); n -= step
         elif cmd == 'type':
             d.type(argv[i]); i += 1
         elif cmd == 'key':
