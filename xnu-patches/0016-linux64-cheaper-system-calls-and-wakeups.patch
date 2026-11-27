@@ -16,7 +16,7 @@ diff --git a/osfmk/arm/machine_routines_common.c b/osfmk/arm/machine_routines_co
 index 2d18613..f1c78a5 100644
 --- a/osfmk/arm/machine_routines_common.c
 +++ b/osfmk/arm/machine_routines_common.c
-@@ -1108,17 +1108,16 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
+@@ -1108,17 +1108,18 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
  				/*
  				 * Kernel code that runs long without going to user space or idle never sees a host interrupt
  				 * (hardware IRQs stay masked in XNU's kernel), which stalls Linux (RCU) and stops XNU's own
@@ -28,6 +28,8 @@ index 2d18613..f1c78a5 100644
 +				 * due, as the IRQ path does; and take an IPI another CPU sent. Nothing pending is the common
 +				 * case and costs one register read: reading the counter here instead (13 ns on a Cortex-X925,
 +				 * and an ISB before it) was a third of a system call.
++				 * XNU's timer is delivered here at the host's next interrupt on this CPU, its tick at the latest: late by
++				 * up to a tick (4 ms with HZ=250, and a CPU the host has stopped the tick on has none) where the bound was 2 ms.
  				 */
 -				static uint64_t linux64_last_kyield[LINUX64_CPU_SLOTS];
 -				uint64_t now = mach_absolute_time();
@@ -40,7 +42,7 @@ index 2d18613..f1c78a5 100644
  						/*
  						 * Not with preemption off (a spinlock held): Linux may reschedule this CPU's thread
  						 * away for as long as it likes, and every other CPU spins on the lock until XNU's
-@@ -1458,6 +1457,9 @@ linux64_spin_relax(void)
+@@ -1458,6 +1459,9 @@ linux64_spin_relax(void)
  	}
  }
  
@@ -50,7 +52,7 @@ index 2d18613..f1c78a5 100644
  void
  linux64_ipi_take(void)
  {
-@@ -1478,7 +1480,11 @@ linux64_cpu_signal(unsigned int cpu)
+@@ -1478,7 +1482,11 @@ linux64_cpu_signal(unsigned int cpu)
  		return;
  	}
  	mpidr = target->cpu_phys_id;
@@ -179,7 +181,7 @@ index bbc634a..77b8754 100644
  	return linux64_trace_level;
  }
  
-+/* boot-arg linux64_el0_time=1 (or linux64_trace): time the EL0 exceptions by class */
++/* boot-arg linux64_el0_time=1 (or linux64_trace), read once: time the EL0 exceptions by class */
 +static int linux64_el0_timing_on = -1;
 +static inline int
 +linux64_el0_timing(void)
