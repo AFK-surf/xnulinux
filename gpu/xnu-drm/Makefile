@@ -10,11 +10,16 @@ SRC += xnudrmd_virgl.c
 override CFLAGS += -DXNUDRM_VIRGL $(shell pkg-config --cflags virglrenderer)
 LDLIBS += $(shell pkg-config --libs virglrenderer)
 endif
-xnudrmd: $(SRC) xnudrm_proto.h xnudrmd.h
+xnudrmd: $(SRC) xnudrm_proto.h xnudrmd.h .virgl
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
+# with or without the backend is part of what xnudrmd is made from: virglrenderer installed after a first build (as
+# tools/dgx-spark's README has it) builds xnudrmd again, where make saw nothing newer than it
+.virgl: FORCE
+	@echo '$(VIRGL)' | cmp -s - $@ || echo '$(VIRGL)' > $@
+FORCE:
 # the backend alone, on the host's Vulkan driver (no fki, no hosted system)
 test-virgl: test/virgl_smoke.c xnudrmd_virgl.c xnudrm_proto.h xnudrmd.h
 	$(CC) $(CFLAGS) -I. -o test/virgl_smoke test/virgl_smoke.c xnudrmd_virgl.c $(LDLIBS)
 	test/virgl_smoke
 clean:
-	rm -f xnudrmd test/virgl_smoke
+	rm -f xnudrmd test/virgl_smoke .virgl
