@@ -22,6 +22,7 @@
 #include <asm/barrier.h>
 #include <asm/cpufeature.h>
 #include <asm/neon.h>
+#include <asm/simd.h>
 #include <asm/stacktrace.h>
 #include <asm/sysreg.h>
 #include <asm/tlbflush.h>
@@ -147,10 +148,15 @@ static __always_inline void keys_write(const struct fki_pac_keys *k)
 
 void fki_fpsimd_forget(void)
 {
+#ifdef scoped_ksimd	/* 6.19 on: kernel_neon_begin() takes the caller's buffer (the change that brought scoped_ksimd()) */
 	struct user_fpsimd_state scratch;	/* where Linux would save a kernel-mode state over a context switch: none here */
 
 	kernel_neon_begin(&scratch);
 	kernel_neon_end(&scratch);
+#else
+	kernel_neon_begin();
+	kernel_neon_end();
+#endif
 }
 
 __attribute__((target("branch-protection=none"))) unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved)
