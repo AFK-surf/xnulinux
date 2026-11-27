@@ -20,9 +20,10 @@ if [ "${1:-}" = remove ]; then
   # starts the VM again (KeepAlive): a wait for no krunkit at all met that one, sat out its two minutes, and the agent's
   # removal then killed a guest that had just booted.
   K=$(pgrep -f "${KRUN:-$HOME/.local/krunkit}/bin/krunkit" || true)
+  KEY=${VMKEY:-$P/../vmkey}; [ -f "$KEY" ] || KEY=	# the key scripts/vm.sh uses, unless VMKEY names another
   # a clean guest shutdown first (the hosted macOS's disk synced by xnulinux.service), then the agent
   ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -p "${SSH_PORT:-2223}" \
-    ${VMKEY:+-i "$VMKEY"} admin@127.0.0.1 'sudo systemctl poweroff' 2>/dev/null || true
+    ${KEY:+-i "$KEY"} admin@127.0.0.1 'sudo systemctl poweroff' 2>/dev/null || true
   for _ in $(seq 1 600); do [ -n "$K" ] || break; for p in $K; do kill -0 "$p" 2>/dev/null || break 2; done; sleep 0.2; done
   launchctl bootout "$(domain)/$L" 2>/dev/null || true
   rm -f "$PL"; echo "removed"; exit 0
