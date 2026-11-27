@@ -9,6 +9,9 @@
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 LINUX_MEM=${LINUX_MEM:-7G}; CARVE_BASE=${CARVE_BASE:-0x200000000}; CARVE_MB=${CARVE_MB:-8156}
+# the unit loads fki-ko/fki.ko at every boot, before anything else builds it (xnulinux-boot.sh, which runs from xnulinux.service,
+# and that requires this unit): build it now
+make -s -C /lib/modules/$(uname -r)/build M="$P/fki-ko" modules
 G=/etc/default/grub.d/99-xnulinux.cfg
 # nokaslr: arm64's EFI stub randomises the Linux kernel's physical load address across all EFI memory before mem=
 # takes effect, which otherwise places the kernel image inside the carve-out on some boots (fki then refuses to map it).
