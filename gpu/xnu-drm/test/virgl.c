@@ -982,6 +982,48 @@ static void t_tables(void)
 	EQ(xclose(c), 0);
 }
 
+/*
+ * xnudrmd holds a descriptor for every blob (its memory) and two for every client, and scripts/xnulinux-boot.sh starts
+ * it with systemd-run: with 1024 descriptors, unless it takes more.
+ */
+static void t_descriptors(void)
+{
+	static uint32_t h[3000];
+	struct rlimit rl;
+	int n;
+	getrlimit(RLIMIT_NOFILE, &rl);
+	if (rl.rlim_max < 4096) { say("not tested: no more than %llu descriptors to be had here", (unsigned long long)rl.rlim_max); return; }
+	rl.rlim_cur = 1024;
+	setrlimit(RLIMIT_NOFILE, &rl);
+	start();
+	uint32_t c = xopen();
+	EQ(context_init(c, 4), 0);
+	for (n = 0; n < 3000; n++) {
+		int r = blob_cmd(c, VIRTGPU_BLOB_MEM_HOST3D, VIRTGPU_BLOB_FLAG_USE_MAPPABLE, 4096, 0, NULL, 0, &h[n]);
+		if (r) { fail(__LINE__, "blob %d: RESOURCE_CREATE_BLOB %d", n + 1, r); break; }
+	}
+	if (rpc(XNUDRM_OPEN, 0, XNUDRM_VERSION, 0, NULL, 0) == 0) EQ(context_init(R->client, 4), 0);	/* and a client after them */
+	else fail(__LINE__, "OPEN %d", R->status);
+	for (int i = 0; i < n; i++) EQ(gem_close(c, h[i]), 0);
+	EQ(xclose(c), 0);
+	/* a device's memory: the descriptors its driver takes for an allocation are the render server's (lavapipe: three each) */
+	struct dev dv[8];
+	struct ring rg = client_ring(&c);
+	int nd = devices(&rg, dv, 8), di = 0;
+	while (di < nd && !dv[di].id) di++;
+	if (di < nd) {
+		struct dev *d = &dv[di];
+		uint32_t t = 0, x;
+		while (t < d->ntypes && !(d->type[t].flags & 2)) t++;
+		for (n = 0; n < 1500 && t < d->ntypes; n++) {
+			uint64_t mem = alloc(&rg, d, 4096, t, 1);
+			int r = mem ? blob_cmd(c, VIRTGPU_BLOB_MEM_HOST3D, VIRTGPU_BLOB_FLAG_USE_MAPPABLE, 4096, mem, NULL, 0, &x) : -ENOMEM;
+			if (r) { fail(__LINE__, "%s: allocation %d: %s %d", d->name, n + 1, mem ? "RESOURCE_CREATE_BLOB" : "vkAllocateMemory", mem ? r : (int)rg.reply[1]); break; }
+		}
+	}
+	EQ(xclose(c), 0);
+}
+
 int main(int argc, char **argv)
 {
 	static const struct { const char *name; void (*f)(void); int secs; } tests[] = {
@@ -989,7 +1031,7 @@ int main(int argc, char **argv)
 		{ "blobs of shared memory", t_blob, 60 }, { "MAP", t_map, 60 }, { "a ring", t_ring, 120 }, { "fences", t_fence, 120 },
 		{ "device memory", t_device_memory, 900 },
 		{ "rounds", t_rounds, 600 }, { "a client that died", t_crashed, 900 }, { "255 clients", t_clients, 600 },
-		{ "the tables", t_tables, 600 },
+		{ "the tables", t_tables, 600 }, { "more blobs than 1024 descriptors", t_descriptors, 300 },
 	};
 	int failed = 0, st, r;
 	pid_t pid;

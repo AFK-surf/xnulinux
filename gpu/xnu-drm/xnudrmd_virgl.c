@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <drm/drm.h>
 #include <drm/virtgpu_drm.h>
@@ -52,9 +53,21 @@ static struct virgl_renderer_callbacks cbs = {
 
 int vg_init(void)
 {
-	int r = virgl_renderer_init(&cbs, VIRGL_RENDERER_VENUS | VIRGL_RENDERER_RENDER_SERVER | VIRGL_RENDERER_NO_VIRGL, &cbs);
+	const rlim_t want = VG_RES + 2 * VG_CLIENTS + 64;
+	struct rlimit rl;
 	uint32_t ver = 0, size = 0;
+	int r;
 
+	/*
+	 * Every resource is a descriptor here (its memory's) and every client two, and a service starts with 1024 of them.
+	 * Before the render server starts: its processes get the same, and there a Vulkan driver takes what it takes for
+	 * each allocation (lavapipe: three descriptors).
+	 */
+	if (!getrlimit(RLIMIT_NOFILE, &rl) && rl.rlim_cur < want) {
+		rl.rlim_cur = rl.rlim_max < want ? rl.rlim_max : want;
+		setrlimit(RLIMIT_NOFILE, &rl);
+	}
+	r = virgl_renderer_init(&cbs, VIRGL_RENDERER_VENUS | VIRGL_RENDERER_RENDER_SERVER | VIRGL_RENDERER_NO_VIRGL, &cbs);
 	if (r) { fprintf(stderr, "xnudrmd: virgl_renderer_init: %d\n", r); return -1; }
 	virgl_renderer_get_cap_set(CAPSET_VENUS, &ver, &size);
 	if (!size) { fprintf(stderr, "xnudrmd: virglrenderer has no Venus capset\n"); return -1; }
