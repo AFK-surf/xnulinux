@@ -33,7 +33,8 @@ if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced fi
   echo 1 | sudo tee /sys/module/xnu/parameters/stop_run >/dev/null
   # every XNU CPU sees the stop at its next host call; one in a long one (disk I/O while the VM shuts down) takes a while
   for _ in $(seq 1 600); do pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null || break; sleep 0.2; done
-  if [ -d /sys/module/xnu ]; then sudo rmmod xnu; fi
+  # (under systemd --wait's collect unloads it too, and may get there between this test and the rmmod: not a failed stop)
+  if [ -d /sys/module/xnu ]; then e=$(sudo rmmod xnu 2>&1) || [ ! -d /sys/module/xnu ] || { echo "$e" >&2; exit 1; }; fi
   sudo systemctl stop xnudrmd 2>/dev/null || true
   for f in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do [ -e "$f" ] && echo 0 | sudo tee "$f" >/dev/null 2>&1 || true; done	# XNU's CPUs are Linux's again
   irqs_back
@@ -186,7 +187,8 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   local LOGDIR=/var/log/xnulinux LOG
   # insmod has returned but xnu.ko stays loaded after a run that ended by itself (a panic, a halt): unload it, or the
   # next start (systemd's restart after a panic) finds it and refuses
-  if [ -d /sys/module/xnu ]; then sudo rmmod xnu || echo "xnu.ko did not unload" >&2; fi
+  # (a stop that was asked for unloads it as well: whichever of the two gets there second finds it gone)
+  if [ -d /sys/module/xnu ]; then sudo rmmod xnu 2>/dev/null || [ ! -d /sys/module/xnu ] || echo "xnu.ko did not unload" >&2; fi
   sudo systemctl stop xnudrmd 2>/dev/null || true
   # XNU's CPUs are Linux's again, as after a stop: a run that ended by itself otherwise left them out of the deep idle states
   for f in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do [ -e "$f" ] && echo 0 | sudo tee "$f" >/dev/null 2>&1 || true; done
