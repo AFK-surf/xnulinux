@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")"
 O=${TMPDIR:-/tmp}
-cc -O2 -o $O/fpcheck fpcheck.c && cc -O2 -o $O/memcheck memcheck.c
+cc -O2 -o $O/fpcheck fpcheck.c; cc -O2 -o $O/memcheck memcheck.c	# (not &&: set -e would pass over a failed first compile)
 $O/fpcheck 0 25 & fp_pid=$!
 m=0; sudo $O/memcheck 4 25 || m=$?
 f=0; wait "$fp_pid" || f=$?
