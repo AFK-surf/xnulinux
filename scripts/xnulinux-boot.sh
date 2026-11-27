@@ -16,6 +16,8 @@
 #   FB_DUMP (/var/tmp/xnu-fb.raw)  KEYSTORE (/var/tmp/xnu-keystore.bin)  TRUSTCACHE (xnu/trustcache-mac.bin; empty: none)
 #   IMAGE (xnu/kc.bin: the kernel collection under /lib/firmware)  GPU (auto|off)  CPUS (1: the hosted system's CPUs, 32 at most)  XNU_ARGS (more xnu.ko parameters)
 set -euo pipefail
+# a relative MAC_CONF or DISK in the environment is a file where the caller is (docs/free-kc.md: MAC_CONF=pd.conf DISK=pd.img)
+for v in MAC_CONF DISK; do [[ ${!v:-/} = /* ]] || printf -v "$v" %s "$PWD/${!v}"; done
 cd "$(dirname "$0")/.."
 [ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf	# for stop as well: the sync is typed into this system's CONSOLE_IN
 if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced first) and remove xnu.ko
