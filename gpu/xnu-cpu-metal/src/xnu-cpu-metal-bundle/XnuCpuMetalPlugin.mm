@@ -314,8 +314,24 @@ static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
         // buffer until `_fallbackDeallocator` is invoked below.
         mach_vm_address_t addr = (mach_vm_address_t)_fallbackPtr;
         if (xcmRangeIsFullyWritable(_fallbackPtr, _fallbackLen)) {
-            mach_vm_allocate(mach_task_self(), &addr, (mach_vm_size_t)_fallbackLen,
-                             VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+            // The memory is the caller's and keeps what it holds, as on Metal: its deallocator may only drop a
+            // reference to it, and a program reads what the GPU wrote there after the buffer is gone. Pages of its
+            // own with the buffer's bytes take the place of the GPU's in one step; zero-filled ones, as it was for
+            // every buffer, only where those cannot be had.
+            mach_vm_size_t len = (mach_vm_size_t)_fallbackLen;
+            mach_vm_address_t kept = 0;
+            vm_prot_t curProt = 0, maxProt = 0;
+            bool moved = false;
+            if (mach_vm_allocate(mach_task_self(), &kept, len, VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
+                memcpy((void *)kept, _fallbackPtr, _fallbackLen);
+                moved = mach_vm_remap(mach_task_self(), &addr, len, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                                      mach_task_self(), kept, FALSE, &curProt, &maxProt, VM_INHERIT_DEFAULT) == KERN_SUCCESS;
+                mach_vm_deallocate(mach_task_self(), kept, len);
+            }
+            if (!moved) {
+                addr = (mach_vm_address_t)_fallbackPtr;
+                mach_vm_allocate(mach_task_self(), &addr, len, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+            }
         }
         _fallbackAliased = NO;
     }
