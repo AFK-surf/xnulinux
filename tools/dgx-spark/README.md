@@ -56,4 +56,6 @@ their output over the `xnu0` link, for when the kernel log is flooded.
 - Without the GPU bridge `iconservicesagent` crashes in lavapipe (a JIT-compiled fragment shader reads a missing
   sampler entry); the Dock then has no icons.
 - A system disk restored by a virtual Mac has its Data volume encrypted with that VM's keys: the hosted system cannot
-  open it, and the volume has to be made again unencrypted.
+  open it, and the volume has to be made again unencrypted. If the old volume stays in the container, every boot's
+  first login shows "The disk "Data" can't be unlocked" (APFSUserAgent asks for each locked volume); a line in the
+  hosted system's `/etc/fstab` stops that: `UUID=<old volume's UUID> none apfs rw,noauto`.
