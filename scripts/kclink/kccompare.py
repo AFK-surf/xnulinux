@@ -3,7 +3,9 @@
 """Compares two kernel collections: their fixups (decoded), their fileset entries' segments and sections, the bytes of
 each entry's segments with pointers taken out, and their prelink info. For checking kclink against another linker.
 
-    kccompare.py A B"""
+    kccompare.py A B
+
+Its exit status is 1 when they differ."""
 import plistlib
 import struct
 import sys
@@ -92,7 +94,8 @@ def main():
         print('prelink info: top-level keys differ')
         problems += 1
     print(f'{problems} differences')
+    return problems
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(1 if main() else 0)

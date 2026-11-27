@@ -42,6 +42,7 @@ class Compared(unittest.TestCase):
         self.assertEqual(err, '')
         lines = out.splitlines()
         self.assertTrue(lines[0].startswith(f'header {BASE:#x} / {BASE:#x}; '), lines[0])
+        self.assertEqual(status, 0 if lines[-1] == '0 differences' else 1, 'its exit status says whether they differ')
         return lines[1:]
 
     def one_difference(self, other, about):
