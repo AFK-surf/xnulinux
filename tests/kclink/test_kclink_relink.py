@@ -108,6 +108,22 @@ class Natives(unittest.TestCase):
         big[0].section('__DATA', '__bss', zerofill=0x10000)
         self.assertIn(f'{THREE}: no room for its __DATA (0x100d0 bytes) in __DATA',
                       self.refused('--native', w.native(SPEC_THREE, big)))
+        # what kextld finds before it links, too: in one line, with the kext
+        odd = kext_three('_kernel_data')
+        odd[0].section('__DATA', '__objc_const', bytes(8), 3)
+        self.assertIn(f'{THREE}: three0.o: section __DATA,__objc_const has no place in a kext',
+                      self.refused('--native', w.native(SPEC_THREE, odd)))
+        self.assertIn(f'{THREE}: _three_start defined twice (in three1.o and at __TEXT_EXEC,__text)',
+                      self.refused('--native', w.native(SPEC_THREE, kext_three('_kernel_data') * 2)))
+        spec = w.native(SPEC_THREE, kext_three('_kernel_data'))
+        other = bytearray(w.read('three0.o'))
+        other[4:8] = struct.pack('<I', 0x01000007)              # CPU_TYPE_X86_64
+        w.write('three0.o', bytes(other))
+        self.assertIn(f'{THREE}: three0.o: not an arm64', self.refused('--native', spec))
+        packed = kext_three('_kernel_data')
+        packed[0].pointer(packed[0].section('__DATA', '__const', bytes(16), 0), 1, 0)
+        self.assertIn('three0.o: pointer at __const+0x1 not at a multiple of 4',
+                      self.refused('--native', w.native(SPEC_THREE, packed)))
         w.kernel('kernel.odd', more=[('__ODD', 0x38000)])
         self.assertIn('kernel segment __ODD has no place in the collection', self.refused(kernel='kernel.odd'))
         w.kernel('kernel.over', more=[('__KLD', 0x40000)])       # code where the prelink info is
