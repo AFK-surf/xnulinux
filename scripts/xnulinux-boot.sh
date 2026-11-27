@@ -183,7 +183,8 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   for f in /sys/devices/system/cpu/cpu*/cpuidle/state[1-9]*/disable; do [ -e "$f" ] && echo 0 | sudo tee "$f" >/dev/null 2>&1 || true; done
   sudo mkdir -p "$LOGDIR"
   LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
-  { cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:"; } |
+  # (no line of fki's at all when xnu.ko did not load: set -e must not end the script here, before it says how the run ended)
+  { cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:" || true; } |
     sudo tee "$LOG" >/dev/null
   ls -1t "$LOGDIR"/run-*.log | tail -n +21 | xargs -r sudo rm -f	# the last 20 runs
   if grep -aq "XNU panic" "$LOG"; then echo "the hosted system panicked: $LOG" >&2; return 2; fi
