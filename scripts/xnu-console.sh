@@ -7,7 +7,7 @@
 P=$(cd "$(dirname "$0")/.." && pwd)
 # (the reader's ssh gets no input of its own: the first command of a background pipeline has the script's, the lines typed)
 bash "$P/scripts/vm.sh" 'sudo journalctl -k -f -n 0 -q -o cat' < /dev/null | sed -un 's/^fki: darwin console: //p' &
-TP=$!; trap 'kill $TP 2>/dev/null' EXIT
+trap 'pkill -P $$' EXIT	# the reader: its ssh as well as its sed ($! is only the sed)
 while IFS= read -r line; do
   printf '%s\n' "$line" | bash "$P/scripts/vm.sh" 'cat >> /var/tmp/console-in'
 done
