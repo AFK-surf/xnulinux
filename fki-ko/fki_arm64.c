@@ -334,7 +334,8 @@ static int fki_carve_check(unsigned long base, unsigned long len)
 		pr_err("fki: carve-out [%#lx, %#lx) overflows physical address space\n", base, end);
 		return -EINVAL;
 	}
-	if (p_efi_mem_type && p_efi_mem_type(base) >= 0) {
+	/* (-ENOTSUPP: there is no firmware map to ask. An address the map does not have is no memory at all.) */
+	if (p_efi_mem_type && p_efi_mem_type(base) != -ENOTSUPP) {
 		unsigned long a;
 
 		for (a = base; a < end; a += SZ_2M) {
