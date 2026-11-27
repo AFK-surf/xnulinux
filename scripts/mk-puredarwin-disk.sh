@@ -4,7 +4,7 @@
 # with one journaled HFS+ volume (hfs.kext, Apple's or the free collection's, mounts it), and the ROOT_UUID xnu.ko boots it by.
 # The kernel mounts the root read-only; PureDarwin's own images use ext4, whose kext clears that, and its mount(8) has no
 # -uw for launchctl's remount, so /sbin/fsck (which launchctl runs first, on a read-only root) remounts it read-write as
-# PureDarwin's HFS images do. The disk is checked on the Linux side before each boot (fsck.hfsplus), not here.
+# PureDarwin's HFS images do. Nothing checks the disk, here or before a boot (xnulinux-boot.sh runs no fsck.hfsplus).
 #   mk-puredarwin-disk.sh ROOT.tar.gz OUT.img [SIZE (1g)]   prints the disk's configuration for xnulinux-boot.sh (MAC_CONF):
 #   ROOT_UUID and BOOT_UUID, the partition's GUID
 set -euo pipefail
@@ -19,7 +19,7 @@ sudo rm -rf "$M/.fseventsd" "$M/.Spotlight-V100"
 F=$(mktemp)
 cat > "$F" <<'FSCK'
 #!/bin/zsh
-# xnulinux: the disk was checked on the Linux host before boot (fsck.hfsplus); remount the HFS+ root read-write
+# xnulinux: no check (nothing checks this disk before a boot); remount the HFS+ root read-write
 dev=$(/bin/df / | /bin/awk 'NR==2 {print $1}')
 /sbin/mount -t hfs -o update,rw "$dev" / && echo "xnulinux: root $dev remounted read-write"
 exit 0
