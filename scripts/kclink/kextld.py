@@ -46,6 +46,7 @@ ZEROFILL = {'__bss', '__common'}
 # arm64 relocation types
 UNSIGNED, SUBTRACTOR, BRANCH26, PAGE21, PAGEOFF12, GOT_LOAD_PAGE21, GOT_LOAD_PAGEOFF12, POINTER_TO_GOT = range(8)
 ADDEND, AUTHENTICATED_POINTER = 10, 11
+CPU_SUBTYPE_ARM64E = 2
 
 # kmod_info_t (<mach/kmod.h>, 4-byte packed): next, info_version, id, name[64], version[64], reference_count,
 # reference_list, address, size, hdr_size, start, stop
@@ -76,8 +77,11 @@ class Obj:
         self.path = path
         self.buf = open(path, 'rb').read()
         self.img = Image(self.buf)
-        if self.img.filetype != MH_OBJECT or self.img.cputype != CPU_TYPE_ARM64:
-            raise LinkError(f'{path}: not an arm64 object')
+        # arm64e only (the subtype's low 24 bits; the rest is the pointer authentication ABI's version): an arm64 object
+        # signs none of its pointers, and the kext is an arm64e one whatever went into it
+        if (self.img.filetype != MH_OBJECT or self.img.cputype != CPU_TYPE_ARM64 or
+                self.img.cpusubtype & 0xffffff != CPU_SUBTYPE_ARM64E):
+            raise LinkError(f'{path}: not an arm64e object')
         self.sects = self.img.sections()       # input sections, 1-based in nlist n_sect
         self.syms = self.img.symbols()
         self.where = {}                         # input section index -> (OutSection, offset)
