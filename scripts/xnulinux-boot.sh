@@ -199,12 +199,15 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   { cat /var/tmp/xnu-insmod.log; sudo journalctl -k -q -o short-monotonic --no-pager --since @"$START" | grep -a "fki:" || true; } |
     sudo tee "$LOG" >/dev/null
   ls -1t "$LOGDIR"/run-*.log | tail -n +21 | xargs -r sudo rm -f	# the last 20 runs
-  if grep -aq "XNU panic" "$LOG"; then echo "the hosted system panicked: $LOG" >&2; return 2; fi
+  # how it ended is in xnu.ko's own lines, not in what the hosted console printed (the log has those too: a console that
+  # showed the words "XNU panic" turned a clean shutdown into a panic, and systemd started the system again)
+  said() { grep -av "fki: darwin console: " "$LOG" | grep -aq "$1"; }
+  if said "XNU panic"; then echo "the hosted system panicked: $LOG" >&2; return 2; fi
   # shut down from inside (shutdown -h, the Apple menu): a halt is a clean end; a restart ends with 4 for systemd to start it again
   # (checked before the stop: the other CPUs log "run stopped by the host" as they leave after it)
-  if grep -aq "xnu: the hosted system halted" "$LOG"; then echo "the hosted system shut down: $LOG"; return 0; fi
-  if grep -aq "xnu: the hosted system asked for a restart" "$LOG"; then echo "the hosted system restarts: $LOG"; return 4; fi
-  if [ "${1:-}" = stopped ] || grep -aq "run stopped by the host" "$LOG"; then echo "the hosted system stopped: $LOG"; return 0; fi
+  if said "xnu: the hosted system halted"; then echo "the hosted system shut down: $LOG"; return 0; fi
+  if said "xnu: the hosted system asked for a restart"; then echo "the hosted system restarts: $LOG"; return 4; fi
+  if [ "${1:-}" = stopped ] || said "run stopped by the host"; then echo "the hosted system stopped: $LOG"; return 0; fi
   echo "the run ended: $LOG" >&2; return 3
 }
 # systemctl stop: ExecStop (xnulinux-boot.sh stop) ends the run, then systemd sends this script SIGTERM
