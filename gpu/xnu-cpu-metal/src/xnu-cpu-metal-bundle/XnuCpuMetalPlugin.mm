@@ -1810,6 +1810,12 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 - (void)setStencilFrontReferenceValue:(uint32_t)f backReferenceValue:(uint32_t)b {
     if (_handle) xm2v_render_encoder_set_stencil_reference_values(_handle, f, b);
 }
+// The store actions a descriptor left MTLStoreActionUnknown: Metal takes them from these, any time before endEncoding.
+- (void)setColorStoreAction:(MTLStoreAction)action atIndex:(NSUInteger)index {
+    if (_handle) xm2v_render_encoder_set_color_store_action(_handle, (uint64_t)action, (uint32_t)index);
+}
+- (void)setDepthStoreAction:(MTLStoreAction)action { if (_handle) xm2v_render_encoder_set_depth_store_action(_handle, (uint64_t)action); }
+- (void)setStencilStoreAction:(MTLStoreAction)action { if (_handle) xm2v_render_encoder_set_stencil_store_action(_handle, (uint64_t)action); }
 - (void)setVisibilityResultMode:(MTLVisibilityResultMode)mode offset:(NSUInteger)offset { (void)mode; (void)offset; }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u stages:(MTLRenderStages)st {
     if (!_handle || !r) return;
@@ -1953,10 +1959,13 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
     xm2v_blit_encoder_copy_buffer_to_buffer(_handle, ((XcmBuffer *)src)->_handle, srcOff, ((XcmBuffer *)dst)->_handle, dstOff, size);
 }
+// The two copies between a buffer and a texture, with Metal's options (one aspect of a depth/stencil texture, PVRTC rows)
+// and without. A caller of either form must find it: WebKit's ANGLE and WebGPU use the ones with options:.
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)srcOff
      sourceBytesPerRow:(NSUInteger)bpr sourceBytesPerImage:(NSUInteger)bpi
             sourceSize:(MTLSize)sz toTexture:(id<MTLTexture>)dst
-      destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin {
+      destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin
+               options:(MTLBlitOption)options {
     if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmBuffer class]] || ![(id)dst isKindOfClass:[XcmTexture class]]) return;
     [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
     if (((XcmTexture *)dst)->_iosurface) {
@@ -1964,16 +1973,30 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
         [_cmdBuf markDirtyIOSurfaceTexture:(XcmTexture *)dst];
     }
     xm2v_blit_encoder_copy_buffer_to_texture(_handle, ((XcmBuffer *)src)->_handle, srcOff, bpr, bpi,
-        sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, slice, level, origin.x, origin.y, origin.z);
+        sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, slice, level, origin.x, origin.y, origin.z, (uint64_t)options);
+}
+- (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)srcOff
+     sourceBytesPerRow:(NSUInteger)bpr sourceBytesPerImage:(NSUInteger)bpi
+            sourceSize:(MTLSize)sz toTexture:(id<MTLTexture>)dst
+      destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin {
+    [self copyFromBuffer:src sourceOffset:srcOff sourceBytesPerRow:bpr sourceBytesPerImage:bpi sourceSize:sz
+               toTexture:dst destinationSlice:slice destinationLevel:level destinationOrigin:origin options:MTLBlitOptionNone];
 }
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level
            sourceOrigin:(MTLOrigin)origin sourceSize:(MTLSize)sz toBuffer:(id<MTLBuffer>)dst
-      destinationOffset:(NSUInteger)dstOff destinationBytesPerRow:(NSUInteger)bpr destinationBytesPerImage:(NSUInteger)bpi {
+      destinationOffset:(NSUInteger)dstOff destinationBytesPerRow:(NSUInteger)bpr destinationBytesPerImage:(NSUInteger)bpi
+                options:(MTLBlitOption)options {
     if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmTexture class]] || ![(id)dst isKindOfClass:[XcmBuffer class]]) return;
     [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
     [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
     xm2v_blit_encoder_copy_texture_to_buffer(_handle, ((XcmTexture *)src)->_handle, slice, level,
-        origin.x, origin.y, origin.z, sz.width, sz.height, sz.depth, ((XcmBuffer *)dst)->_handle, dstOff, bpr, bpi);
+        origin.x, origin.y, origin.z, sz.width, sz.height, sz.depth, ((XcmBuffer *)dst)->_handle, dstOff, bpr, bpi, (uint64_t)options);
+}
+- (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level
+           sourceOrigin:(MTLOrigin)origin sourceSize:(MTLSize)sz toBuffer:(id<MTLBuffer>)dst
+      destinationOffset:(NSUInteger)dstOff destinationBytesPerRow:(NSUInteger)bpr destinationBytesPerImage:(NSUInteger)bpi {
+    [self copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:origin sourceSize:sz
+                 toBuffer:dst destinationOffset:dstOff destinationBytesPerRow:bpr destinationBytesPerImage:bpi options:MTLBlitOptionNone];
 }
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
            sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)sz toTexture:(id<MTLTexture>)dst
@@ -1987,6 +2010,27 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     }
     xm2v_blit_encoder_copy_texture_to_texture(_handle, ((XcmTexture *)src)->_handle, ss, sl,
         so.x, so.y, so.z, sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, ds, dl, do_.x, do_.y, do_.z);
+}
+// Metal's two copies of whole surfaces. metal2vulkan pairs the levels and the slices as Metal does (a cube's faces are slices).
+- (BOOL)xcmWholeCopyFrom:(id<MTLTexture>)src to:(id<MTLTexture>)dst {
+    if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmTexture class]] || ![(id)dst isKindOfClass:[XcmTexture class]]) return NO;
+    [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
+    [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
+    if (((XcmTexture *)dst)->_iosurface) {
+        [(XcmTexture *)dst syncFromIOSurfaceIfNeeded];   // the copy may cover a part; the write-back covers all
+        [_cmdBuf markDirtyIOSurfaceTexture:(XcmTexture *)dst];
+    }
+    return YES;
+}
+- (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
+              toTexture:(id<MTLTexture>)dst destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl
+             sliceCount:(NSUInteger)slices levelCount:(NSUInteger)levels {
+    if ([self xcmWholeCopyFrom:src to:dst])
+        xm2v_blit_encoder_copy_texture_slices(_handle, ((XcmTexture *)src)->_handle, ss, sl, ((XcmTexture *)dst)->_handle, ds, dl, slices, levels);
+}
+- (void)copyFromTexture:(id<MTLTexture>)src toTexture:(id<MTLTexture>)dst {
+    if ([self xcmWholeCopyFrom:src to:dst])
+        xm2v_blit_encoder_copy_texture(_handle, ((XcmTexture *)src)->_handle, ((XcmTexture *)dst)->_handle);
 }
 - (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
     if (!_handle || !buffer || ![(id)buffer isKindOfClass:[XcmBuffer class]]) return;
@@ -2253,6 +2297,7 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
             rd.color_attachments[i].texture = xt->_handle;
             rd.color_attachments[i].level = ca.level;
             rd.color_attachments[i].slice = ca.slice;
+            rd.color_attachments[i].depth_plane = ca.depthPlane;
             rd.color_attachments[i].load_action = (uint64_t)ca.loadAction;
             rd.color_attachments[i].store_action = (uint64_t)ca.storeAction;
             rd.color_attachments[i].clear_r = ca.clearColor.red;
@@ -2264,6 +2309,8 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     if (desc.depthAttachment.texture && [desc.depthAttachment.texture isKindOfClass:[XcmTexture class]]) {
         [self retainResource:desc.depthAttachment.texture];
         rd.depth_texture = ((XcmTexture *)desc.depthAttachment.texture)->_handle;
+        rd.depth_level = desc.depthAttachment.level;
+        rd.depth_slice = desc.depthAttachment.slice;
         rd.depth_load_action = (uint64_t)desc.depthAttachment.loadAction;
         rd.depth_store_action = (uint64_t)desc.depthAttachment.storeAction;
         rd.clear_depth = desc.depthAttachment.clearDepth;
@@ -2271,6 +2318,8 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     if (desc.stencilAttachment.texture && [desc.stencilAttachment.texture isKindOfClass:[XcmTexture class]]) {
         [self retainResource:desc.stencilAttachment.texture];
         rd.stencil_texture = ((XcmTexture *)desc.stencilAttachment.texture)->_handle;
+        rd.stencil_level = desc.stencilAttachment.level;
+        rd.stencil_slice = desc.stencilAttachment.slice;
         rd.stencil_load_action = (uint64_t)desc.stencilAttachment.loadAction;
         rd.stencil_store_action = (uint64_t)desc.stencilAttachment.storeAction;
         rd.clear_stencil = desc.stencilAttachment.clearStencil;
@@ -3257,6 +3306,7 @@ static id xcmDev_newSampler(id self, SEL, MTLSamplerDescriptor *desc) {
     sd.s_address_mode = (uint64_t)desc.sAddressMode;
     sd.t_address_mode = (uint64_t)desc.tAddressMode;
     sd.r_address_mode = (uint64_t)desc.rAddressMode;
+    sd.border_color = (uint64_t)desc.borderColor;
     sd.max_anisotropy = desc.maxAnisotropy;
     sd.compare_function = (uint64_t)desc.compareFunction;
     sd.lod_min_clamp = desc.lodMinClamp;

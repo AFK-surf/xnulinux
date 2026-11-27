@@ -99,6 +99,7 @@ typedef struct Xm2vRenderPassColorAttachment {
     Xm2vTexture *texture;
     uint64_t level;
     uint64_t slice;
+    uint64_t depth_plane;
     uint64_t load_action;
     uint64_t store_action;
     double clear_r, clear_g, clear_b, clear_a;
@@ -108,10 +109,14 @@ typedef struct Xm2vRenderPassDesc {
     uint32_t color_attachment_count;
     Xm2vRenderPassColorAttachment color_attachments[8];
     Xm2vTexture *depth_texture;
+    uint64_t depth_level;
+    uint64_t depth_slice;
     uint64_t depth_load_action;
     uint64_t depth_store_action;
     double clear_depth;
     Xm2vTexture *stencil_texture;
+    uint64_t stencil_level;
+    uint64_t stencil_slice;
     uint64_t stencil_load_action;
     uint64_t stencil_store_action;
     uint32_t clear_stencil;
@@ -124,6 +129,7 @@ typedef struct Xm2vSamplerDesc {
     uint64_t s_address_mode;
     uint64_t t_address_mode;
     uint64_t r_address_mode;
+    uint64_t border_color;
     uint64_t max_anisotropy;
     uint64_t compare_function;
     float lod_min_clamp;
@@ -317,6 +323,9 @@ bool xm2v_render_encoder_set_cull_mode(Xm2vRenderEncoder *enc, uint64_t mode);
 bool xm2v_render_encoder_set_front_facing_winding(Xm2vRenderEncoder *enc, uint64_t winding);
 bool xm2v_render_encoder_set_stencil_reference_values(Xm2vRenderEncoder *enc, uint32_t front, uint32_t back);
 bool xm2v_render_encoder_set_blend_color(Xm2vRenderEncoder *enc, float r, float g, float b, float a);
+bool xm2v_render_encoder_set_color_store_action(Xm2vRenderEncoder *enc, uint64_t action, uint32_t index);
+bool xm2v_render_encoder_set_depth_store_action(Xm2vRenderEncoder *enc, uint64_t action);
+bool xm2v_render_encoder_set_stencil_store_action(Xm2vRenderEncoder *enc, uint64_t action);
 bool xm2v_render_encoder_set_vertex_buffer(Xm2vRenderEncoder *enc, Xm2vBuffer *buf, uint64_t offset, uint32_t index);
 bool xm2v_render_encoder_set_vertex_bytes(Xm2vRenderEncoder *enc, const void *bytes, size_t len, uint32_t index);
 bool xm2v_render_encoder_set_vertex_texture(Xm2vRenderEncoder *enc, Xm2vTexture *tex, uint32_t index);
@@ -346,17 +355,23 @@ bool xm2v_blit_encoder_copy_buffer_to_texture(Xm2vBlitEncoder *enc, Xm2vBuffer *
                                               uint64_t src_bpr, uint64_t src_bpi,
                                               uint64_t w, uint64_t h, uint64_t d,
                                               Xm2vTexture *dst, uint64_t dst_slice, uint64_t dst_level,
-                                              uint64_t dx, uint64_t dy, uint64_t dz);
+                                              uint64_t dx, uint64_t dy, uint64_t dz, uint64_t options);
 bool xm2v_blit_encoder_copy_texture_to_buffer(Xm2vBlitEncoder *enc, Xm2vTexture *src, uint64_t src_slice, uint64_t src_level,
                                               uint64_t sx, uint64_t sy, uint64_t sz,
                                               uint64_t w, uint64_t h, uint64_t d,
-                                              Xm2vBuffer *dst, uint64_t dst_off, uint64_t dst_bpr, uint64_t dst_bpi);
+                                              Xm2vBuffer *dst, uint64_t dst_off, uint64_t dst_bpr, uint64_t dst_bpi,
+                                              uint64_t options);
 bool xm2v_blit_encoder_copy_texture_to_texture(Xm2vBlitEncoder *enc,
                                                Xm2vTexture *src, uint64_t src_slice, uint64_t src_level,
                                                uint64_t sx, uint64_t sy, uint64_t sz,
                                                uint64_t w, uint64_t h, uint64_t d,
                                                Xm2vTexture *dst, uint64_t dst_slice, uint64_t dst_level,
                                                uint64_t dx, uint64_t dy, uint64_t dz);
+bool xm2v_blit_encoder_copy_texture_slices(Xm2vBlitEncoder *enc,
+                                           Xm2vTexture *src, uint64_t src_slice, uint64_t src_level,
+                                           Xm2vTexture *dst, uint64_t dst_slice, uint64_t dst_level,
+                                           uint64_t slice_count, uint64_t level_count);
+bool xm2v_blit_encoder_copy_texture(Xm2vBlitEncoder *enc, Xm2vTexture *src, Xm2vTexture *dst);
 bool xm2v_blit_encoder_fill_buffer(Xm2vBlitEncoder *enc, Xm2vBuffer *buf, uint64_t location, uint64_t length, uint8_t value);
 bool xm2v_blit_encoder_generate_mipmaps(Xm2vBlitEncoder *enc, Xm2vTexture *tex);
 bool xm2v_blit_encoder_synchronize_buffer(Xm2vBlitEncoder *enc, Xm2vBuffer *buf);

@@ -24,7 +24,7 @@ use metal2vulkan_runtime::{
     PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState,
     ResourceOptions, ResourceRef, SamplerState, ScissorRect, ShaderCacheOptions, SharedEvent,
     SharedEventHandle, SharedEventListener, Size, StoreAction, SurfaceYCbCrMatrix, Texture,
-    TextureDescriptor, Viewport,
+    TextureDescriptor, Viewport, sampler_border_color,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
@@ -144,7 +144,19 @@ fn raw_store(v: u64) -> Result<StoreAction, String> {
         1 => Ok(StoreAction::Store),
         2 => Ok(StoreAction::MultisampleResolve),
         3 => Ok(StoreAction::StoreAndMultisampleResolve),
+        4 => Ok(StoreAction::Unknown),
+        5 => Ok(StoreAction::CustomSampleDepthStore),
         _ => Err(format!("invalid store_action: {v}")),
+    }
+}
+
+fn raw_blit(v: u64) -> Result<BlitOption, String> {
+    match v {
+        0 => Ok(BlitOption::None),
+        1 => Ok(BlitOption::DepthFromDepthStencil),
+        2 => Ok(BlitOption::StencilFromDepthStencil),
+        4 => Ok(BlitOption::RowLinearPVRTC),
+        _ => Err(format!("invalid blit option: {v}")),
     }
 }
 
@@ -222,6 +234,7 @@ pub struct Xm2vRenderPassColorAttachment {
     pub texture: *mut Texture,
     pub level: u64,
     pub slice: u64,
+    pub depth_plane: u64,
     pub load_action: u64,
     pub store_action: u64,
     pub clear_r: f64,
@@ -235,10 +248,14 @@ pub struct Xm2vRenderPassDesc {
     pub color_attachment_count: u32,
     pub color_attachments: [Xm2vRenderPassColorAttachment; 8],
     pub depth_texture: *mut Texture,
+    pub depth_level: u64,
+    pub depth_slice: u64,
     pub depth_load_action: u64,
     pub depth_store_action: u64,
     pub clear_depth: f64,
     pub stencil_texture: *mut Texture,
+    pub stencil_level: u64,
+    pub stencil_slice: u64,
     pub stencil_load_action: u64,
     pub stencil_store_action: u64,
     pub clear_stencil: u32,
@@ -252,6 +269,7 @@ pub struct Xm2vSamplerDesc {
     pub s_address_mode: u64,
     pub t_address_mode: u64,
     pub r_address_mode: u64,
+    pub border_color: u64,
     pub max_anisotropy: u64,
     pub compare_function: u64,
     pub lod_min_clamp: f32,
@@ -702,6 +720,22 @@ pub extern "C" fn xm2v_texture_gpu_resource_id(tex: *const Texture) -> u64 {
     guard(0, || Ok(get(tex)?.gpu_resource_id().0))
 }
 
+// How much of the caller's memory a replaceRegion or getBytes may reach: Metal passes no length,
+// and metal2vulkan touches the region's rows alone. Metal takes a bytesPerRow of 0 (a PVRTC
+// texture takes no other): every row then lies at the image's first byte, or the level's blocks
+// lie packed. No format holds more than 16 bytes a texel.
+fn region_len(w: u64, h: u64, d: u64, bytes_per_row: u64, bytes_per_image: u64) -> usize {
+    let row = match bytes_per_row {
+        0 => w.max(1) * 16,
+        row => row,
+    };
+    let image = match bytes_per_image {
+        0 => row * h.max(1),
+        image => image,
+    };
+    (image * d.max(1)) as usize
+}
+
 #[no_mangle]
 pub extern "C" fn xm2v_texture_replace_region(
     tex: *const Texture,
@@ -722,12 +756,8 @@ pub extern "C" fn xm2v_texture_replace_region(
         if bytes.is_null() {
             return Err("null bytes".to_string());
         }
-        let total = if bytes_per_image > 0 {
-            bytes_per_image * d.max(1)
-        } else {
-            bytes_per_row * h.max(1) * d.max(1)
-        };
-        let src = unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), total as usize) };
+        let total = region_len(w, h, d, bytes_per_row, bytes_per_image);
+        let src = unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), total) };
         let region = Region::new_3d(x, y, z, w, h, d);
         tex.replace_region(region, mip_level, slice, src, bytes_per_row, bytes_per_image)
             .map_err(|e| format!("replace_region: {e:?}"))?;
@@ -755,12 +785,8 @@ pub extern "C" fn xm2v_texture_get_bytes(
         if out_bytes.is_null() {
             return Err("null out_bytes".to_string());
         }
-        let total = if bytes_per_image > 0 {
-            bytes_per_image * d.max(1)
-        } else {
-            bytes_per_row * h.max(1) * d.max(1)
-        };
-        let dst = unsafe { std::slice::from_raw_parts_mut(out_bytes.cast::<u8>(), total as usize) };
+        let total = region_len(w, h, d, bytes_per_row, bytes_per_image);
+        let dst = unsafe { std::slice::from_raw_parts_mut(out_bytes.cast::<u8>(), total) };
         let region = Region::new_3d(x, y, z, w, h, d);
         tex.get_bytes(dst, bytes_per_row, bytes_per_image, region, mip_level, slice)
             .map_err(|e| format!("get_bytes: {e:?}"))?;
@@ -1393,6 +1419,9 @@ pub extern "C" fn xm2v_sampler_new(
         sd.s_address_mode = raw_enum::<SamplerAddressMode>(d.s_address_mode, "SAddressMode")?;
         sd.t_address_mode = raw_enum::<SamplerAddressMode>(d.t_address_mode, "TAddressMode")?;
         sd.r_address_mode = raw_enum::<SamplerAddressMode>(d.r_address_mode, "RAddressMode")?;
+        // Metal makes a sampler of any raw border colour: it keeps the low two bits, and 3, which
+        // names no colour, samples transparent black. So nothing is refused here.
+        sd.border_color = sampler_border_color(d.border_color);
         sd.max_anisotropy = (d.max_anisotropy.max(1)) as u32;
         sd.compare_function = raw_enum::<CompareFunction>(d.compare_function, "CompareFunction")?;
         sd.lod_min_clamp = d.lod_min_clamp;
@@ -1871,6 +1900,7 @@ pub extern "C" fn xm2v_render_encoder_new(
                 att.texture = Some(get(ca.texture)?.clone());
                 att.level = ca.level;
                 att.slice = ca.slice;
+                att.depth_plane = ca.depth_plane;
                 att.load_action = raw_load(ca.load_action)?;
                 att.store_action = raw_store(ca.store_action)?;
                 att.clear_color = ClearColor::new(ca.clear_r, ca.clear_g, ca.clear_b, ca.clear_a);
@@ -1878,12 +1908,16 @@ pub extern "C" fn xm2v_render_encoder_new(
         }
         if !d.depth_texture.is_null() {
             rpd.depth_attachment.texture = Some(get(d.depth_texture)?.clone());
+            rpd.depth_attachment.level = d.depth_level;
+            rpd.depth_attachment.slice = d.depth_slice;
             rpd.depth_attachment.load_action = raw_load(d.depth_load_action)?;
             rpd.depth_attachment.store_action = raw_store(d.depth_store_action)?;
             rpd.depth_attachment.clear_depth = d.clear_depth;
         }
         if !d.stencil_texture.is_null() {
             rpd.stencil_attachment.texture = Some(get(d.stencil_texture)?.clone());
+            rpd.stencil_attachment.level = d.stencil_level;
+            rpd.stencil_attachment.slice = d.stencil_slice;
             rpd.stencil_attachment.load_action = raw_load(d.stencil_load_action)?;
             rpd.stencil_attachment.store_action = raw_store(d.stencil_store_action)?;
             rpd.stencil_attachment.clear_stencil = d.clear_stencil;
@@ -1944,6 +1978,48 @@ pub extern "C" fn xm2v_render_encoder_set_blend_color(
 ) -> bool {
     guard(false, || {
         get_mut(enc)?.set_blend_color(r, g, b, a);
+        Ok(true)
+    })
+}
+
+// The store action of an attachment whose descriptor left it MTLStoreActionUnknown, set before
+// the encoder ends.
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_set_color_store_action(
+    enc: *mut RenderCommandEncoder,
+    action: u64,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .set_color_store_action(raw_store(action)?, index)
+            .map_err(|e| format!("set_color_store_action: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_set_depth_store_action(
+    enc: *mut RenderCommandEncoder,
+    action: u64,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .set_depth_store_action(raw_store(action)?)
+            .map_err(|e| format!("set_depth_store_action: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_set_stencil_store_action(
+    enc: *mut RenderCommandEncoder,
+    action: u64,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .set_stencil_store_action(raw_store(action)?)
+            .map_err(|e| format!("set_stencil_store_action: {e:?}"))?;
         Ok(true)
     })
 }
@@ -2360,8 +2436,10 @@ pub extern "C" fn xm2v_blit_encoder_copy_buffer_to_texture(
     dx: u64,
     dy: u64,
     dz: u64,
+    options: u64,
 ) -> bool {
     guard(false, || {
+        let options = raw_blit(options)?;
         get_mut(enc)?
             .copy_from_buffer_to_texture(
                 get(src)?,
@@ -2373,7 +2451,7 @@ pub extern "C" fn xm2v_blit_encoder_copy_buffer_to_texture(
                 dst_slice,
                 dst_level,
                 Origin::new(dx, dy, dz),
-                BlitOption::None,
+                options,
             )
             .map_err(|e| format!("copy_from_buffer_to_texture: {e:?}"))?;
         Ok(true)
@@ -2396,8 +2474,10 @@ pub extern "C" fn xm2v_blit_encoder_copy_texture_to_buffer(
     dst_off: u64,
     dst_bpr: u64,
     dst_bpi: u64,
+    options: u64,
 ) -> bool {
     guard(false, || {
+        let options = raw_blit(options)?;
         get_mut(enc)?
             .copy_from_texture_to_buffer(
                 get(src)?,
@@ -2409,7 +2489,7 @@ pub extern "C" fn xm2v_blit_encoder_copy_texture_to_buffer(
                 dst_off,
                 dst_bpr,
                 dst_bpi,
-                BlitOption::None,
+                options,
             )
             .map_err(|e| format!("copy_from_texture_to_buffer: {e:?}"))?;
         Ok(true)
@@ -2449,6 +2529,49 @@ pub extern "C" fn xm2v_blit_encoder_copy_texture_to_texture(
                 Origin::new(dx, dy, dz),
             )
             .map_err(|e| format!("copy_from_texture_to_texture: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_blit_encoder_copy_texture_slices(
+    enc: *mut BlitCommandEncoder,
+    src: *mut Texture,
+    src_slice: u64,
+    src_level: u64,
+    dst: *mut Texture,
+    dst_slice: u64,
+    dst_level: u64,
+    slice_count: u64,
+    level_count: u64,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .copy_texture_slices(
+                get(src)?,
+                src_slice,
+                src_level,
+                get(dst)?,
+                dst_slice,
+                dst_level,
+                slice_count,
+                level_count,
+            )
+            .map_err(|e| format!("copy_texture_slices: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_blit_encoder_copy_texture(
+    enc: *mut BlitCommandEncoder,
+    src: *mut Texture,
+    dst: *mut Texture,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .copy_texture(get(src)?, get(dst)?)
+            .map_err(|e| format!("copy_texture: {e:?}"))?;
         Ok(true)
     })
 }
