@@ -274,6 +274,9 @@ class Kext:
                     if typ in (UNSIGNED, AUTHENTICATED_POINTER):
                         if length != 3:
                             raise LinkError(f'{o.path}: {8 << length}-bit pointer at {s.sectname}+{raddr:#x}')
+                        if place & 3:           # (a collection's chained fixups are at multiples of 4)
+                            raise LinkError(f'{o.path}: pointer at {s.sectname}+{raddr:#x} not at a multiple of 4 '
+                                            f'bytes ({place:#x})')
                         raw = struct.unpack_from('<Q', out.data, pos)[0]
                         if typ == AUTHENTICATED_POINTER:
                             add = raw & 0xffffffff

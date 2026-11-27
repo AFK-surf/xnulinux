@@ -442,6 +442,20 @@ class Pointers(Case):
         o.reloc(d, 0, UNSIGNED, f, length=2)
         self.assertIn('32-bit pointer at __data+0x0', self.refused(o))
 
+    def test_a_pointer_not_at_a_multiple_of_4(self):
+        """A collection's chained fixups are at multiples of 4 (a pointer in a packed structure may not be): refused
+        with the object and the place, not left for the collection's writer to find."""
+        for off in (1, 2, 7):
+            o, t, d, f, p = self.holder()
+            c = o.section('__DATA', '__const', bytes(16), 0)
+            o.pointer(c, off, f)
+            self.assertIn(f'o0.o: pointer at __const+{off:#x} not at a multiple of 4', self.refused(o))
+        o, t, d, f, p = self.holder()
+        c = o.section('__DATA', '__const', bytes(16), 0)
+        o.pointer(c, 4, f)                                      # 4 is fine, 8 is not needed
+        k = self.link(o)
+        self.assertEqual(self.pointer(k, k.section('__DATA_CONST', '__const')[0] + 4), (k.symbols['_f'], None))
+
     def test_a_symbol_nothing_defines(self):
         o, t, d, f, p = self.holder()
         o.pointer(d, 0, o.undefined('_nowhere'))
