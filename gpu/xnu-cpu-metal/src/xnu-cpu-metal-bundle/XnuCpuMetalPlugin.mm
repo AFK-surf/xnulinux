@@ -56,6 +56,14 @@
 - (NSString *)name;
 @end
 
+@protocol XcmTextureViewDescriptor   // MTLTextureViewDescriptor (macOS 26) by its getters: an older SDK has no such class
+- (MTLPixelFormat)pixelFormat;
+- (MTLTextureType)textureType;
+- (NSRange)levelRange;
+- (NSRange)sliceRange;
+- (MTLTextureSwizzleChannels)swizzle;
+@end
+
 static bool xcmTraceOn() { static bool on = getenv("XNU_CPU_METAL_TRACE") != nullptr; return on; }
 
 static NSError *xcmError(NSString *domain, NSInteger code, const char *fallback) {
@@ -306,8 +314,24 @@ static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
         // buffer until `_fallbackDeallocator` is invoked below.
         mach_vm_address_t addr = (mach_vm_address_t)_fallbackPtr;
         if (xcmRangeIsFullyWritable(_fallbackPtr, _fallbackLen)) {
-            mach_vm_allocate(mach_task_self(), &addr, (mach_vm_size_t)_fallbackLen,
-                             VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+            // The memory is the caller's and keeps what it holds, as on Metal: its deallocator may only drop a
+            // reference to it, and a program reads what the GPU wrote there after the buffer is gone. Pages of its
+            // own with the buffer's bytes take the place of the GPU's in one step; zero-filled ones, as it was for
+            // every buffer, only where those cannot be had.
+            mach_vm_size_t len = (mach_vm_size_t)_fallbackLen;
+            mach_vm_address_t kept = 0;
+            vm_prot_t curProt = 0, maxProt = 0;
+            bool moved = false;
+            if (mach_vm_allocate(mach_task_self(), &kept, len, VM_FLAGS_ANYWHERE) == KERN_SUCCESS) {
+                memcpy((void *)kept, _fallbackPtr, _fallbackLen);
+                moved = mach_vm_remap(mach_task_self(), &addr, len, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                                      mach_task_self(), kept, FALSE, &curProt, &maxProt, VM_INHERIT_DEFAULT) == KERN_SUCCESS;
+                mach_vm_deallocate(mach_task_self(), kept, len);
+            }
+            if (!moved) {
+                addr = (mach_vm_address_t)_fallbackPtr;
+                mach_vm_allocate(mach_task_self(), &addr, len, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+            }
         }
         _fallbackAliased = NO;
     }
@@ -358,6 +382,10 @@ static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
 
 /* ======================== Texture (with IOSurface bidirectional sync) ======================== */
 
+@protocol XcmSurfaceWriter   // XcmCommandBuffer, to a texture that reads a surface it wrote
+- (void)waitForSurfaces;
+@end
+
 @interface XcmTexture : XcmObject {
 @public
     Xm2vTexture *_handle;
@@ -376,6 +404,8 @@ static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
     XcmBuffer *_buffer;
     NSUInteger _bufferOffset;
     NSUInteger _bufferBytesPerRow;
+    XcmTexture *_parent;   // of a view: the texture it was made from, and its first level and slice there
+    NSUInteger _parentLevel, _parentSlice;
 }
 - (instancetype)initWithHandle:(Xm2vTexture *)h device:(id)dev descriptor:(MTLTextureDescriptor *)desc;
 - (void)syncFromIOSurfaceIfNeeded;
@@ -423,6 +453,7 @@ static void xcmRecordIOSurfaceWriter(IOSurfaceRef surf, id cmdBuf) {
     gIOSurfaceLastWriter[sid] = cmdBuf;
 }
 
+static bool xcmCommandBufferSubmitted(id cmdBuf);
 static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
     if (!surf) return;
     uint32_t sid = IOSurfaceGetID(surf);
@@ -433,9 +464,10 @@ static void xcmFlushIOSurfaceWriter(IOSurfaceRef surf) {
         auto it = gIOSurfaceLastWriter.find(sid);
         if (it != gIOSurfaceLastWriter.end()) writer = it->second;
     }
-    if (writer && [writer respondsToSelector:@selector(waitUntilCompleted)] &&
-        [(id<MTLCommandBuffer>)writer status] >= MTLCommandBufferStatusCommitted) {
-        [(id<MTLCommandBuffer>)writer waitUntilCompleted];
+    // Not one that waits in its queue's line (enqueue): it runs after command buffers that are not committed yet.
+    // And for what it drew only: its handlers keep their turn, which may be behind one that wants a lock the caller holds.
+    if (writer && [writer respondsToSelector:@selector(waitForSurfaces)] && xcmCommandBufferSubmitted(writer)) {
+        [(id<XcmSurfaceWriter>)writer waitForSurfaces];
     }
 }
 
@@ -443,11 +475,14 @@ static NSUInteger xcmPixelFormatBpp(MTLPixelFormat fmt) {
     switch (fmt) {
         case MTLPixelFormatA8Unorm: case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Snorm:
         case MTLPixelFormatR8Uint: case MTLPixelFormatR8Sint: case MTLPixelFormatStencil8:
+        case MTLPixelFormatR8Unorm_sRGB:
             return 1;
         case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: case MTLPixelFormatR16Uint:
         case MTLPixelFormatR16Sint: case MTLPixelFormatR16Float: case MTLPixelFormatRG8Unorm:
         case MTLPixelFormatRG8Snorm: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG8Sint:
-        case MTLPixelFormatDepth16Unorm:
+        case MTLPixelFormatDepth16Unorm: case MTLPixelFormatRG8Unorm_sRGB:
+        case MTLPixelFormatB5G6R5Unorm: case MTLPixelFormatA1BGR5Unorm: case MTLPixelFormatABGR4Unorm:
+        case MTLPixelFormatBGR5A1Unorm: case MTLPixelFormatGBGR422: case MTLPixelFormatBGRG422:
             return 2;
         case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRGBA16Snorm: case MTLPixelFormatRGBA16Uint:
         case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA16Float:
@@ -594,7 +629,9 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
     NSUInteger sz = MAX(1ul, _width) * MAX(1ul, _height) * MAX(1ul, _depth) * MAX(1ul, _arrayLength) * MAX(1ul, _sampleCount) * bpp;
     return (sz + 255ul) & ~255ul;
 }
-- (id<MTLTexture>)parentTexture { return nil; }
+- (id<MTLTexture>)parentTexture { return (id<MTLTexture>)_parent; }
+- (NSUInteger)parentRelativeLevel { return _parentLevel; }
+- (NSUInteger)parentRelativeSlice { return _parentSlice; }
 - (id<MTLBuffer>)buffer { return (id<MTLBuffer>)_buffer; }
 - (NSUInteger)bufferOffset { return _bufferOffset; }
 - (NSUInteger)bufferBytesPerRow { return _bufferBytesPerRow; }
@@ -659,6 +696,11 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
     desc.usage = _usage;
     desc.resourceOptions = _options;
     XcmTexture *view = [[XcmTexture alloc] initWithHandle:vh device:_device descriptor:desc];
+    if (view) {   // as Metal's view, it keeps the texture it was made from
+        view->_parent = self;
+        view->_parentLevel = levelRange.location;
+        view->_parentSlice = sliceRange.location;
+    }
     if (view && _iosurface && levelRange.location == 0 && sliceRange.location == 0) {
         CFRetain(_iosurface);
         view->_iosurface = _iosurface;
@@ -686,6 +728,11 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
                                         swizzle:(MTLTextureSwizzleChannels)swizzle {
     (void)swizzle;
     return [self newTextureViewWithPixelFormat:pixelFormat textureType:textureType levels:levelRange slices:sliceRange];
+}
+- (id<MTLTexture>)newTextureViewWithDescriptor:(id<XcmTextureViewDescriptor>)d {   // macOS 26's form of the same call
+    if (!d) return nil;
+    return [self newTextureViewWithPixelFormat:d.pixelFormat textureType:d.textureType levels:d.levelRange slices:d.sliceRange
+                                       swizzle:d.swizzle];
 }
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }
@@ -1434,17 +1481,41 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     NSMutableArray<XcmTexture *> *_dirtyIOSurfaceTextures;
     NSMutableArray *_retainedResources;
     dispatch_group_t _handlersGroup;
+    dispatch_queue_t _handlerQ;   // its queue's
+    dispatch_group_t _turnGroup;  // entered while its waiter is in that queue: its handlers have not had their turn
+    BOOL _hasTurn;
+    BOOL _schedFired;      // its scheduled handlers, which a waitUntilScheduled may run before that turn
+    uint64_t _serial;      // its place among its queue's commits
+    pthread_t _schedThread;
+    dispatch_group_t _schedGroup;
     pthread_t _handlersThread;
     BOOL _committed;
     BOOL _handlersFired;
     BOOL _iosurfaceFlushed;
     BOOL _retainedReleased;
     NSUInteger _protectionOptions;
+    BOOL _inLine, _wantsCommit;    // its place in its queue's line (XcmQueue), under the queue's lock
+    dispatch_group_t _lineGroup;   // entered from its commit until the bridge has it
 }
 - (instancetype)initWithHandle:(Xm2vCommandBuffer *)h device:(id)dev queue:(id)q;
 - (void)markDirtyIOSurfaceTexture:(XcmTexture *)tex;
 - (void)retainResource:(id)obj;
+- (void)commitNow;
+- (void)waitForSurfaces;
+- (void)_fireScheduledOnce;
 @end
+static thread_local const void *tXcmHandlerLine;   // the XcmQueue (its _handlerQ) whose handler this thread is running, if any
+@protocol XcmCommandLine   // XcmQueue
+- (void)xcmEnqueue:(XcmCommandBuffer *)cb;
+- (void)xcmCommit:(XcmCommandBuffer *)cb;
+- (void)xcmScheduledLater:(XcmCommandBuffer *)cb;
+- (void)xcmRunScheduledThrough:(XcmCommandBuffer *)cb;
+@end
+static bool xcmCommandBufferSubmitted(id cmdBuf) {
+    if (![cmdBuf isKindOfClass:[XcmCommandBuffer class]]) return true;
+    Xm2vCommandBuffer *h = ((XcmCommandBuffer *)cmdBuf)->_handle;
+    return !h || xm2v_command_buffer_status(h) >= MTLCommandBufferStatusCommitted;
+}
 
 /* ======================== Encoders ======================== */
 
@@ -2038,6 +2109,9 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
         _dirtyIOSurfaceTextures = [NSMutableArray array];
         _retainedResources = [NSMutableArray array];
         _handlersGroup = dispatch_group_create();
+        _turnGroup = dispatch_group_create();
+        _schedGroup = dispatch_group_create();
+        _lineGroup = dispatch_group_create();
     }
     return self;
 }
@@ -2069,6 +2143,10 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 - (CFTimeInterval)kernelStartTime { return 0.0; }
 - (CFTimeInterval)kernelEndTime { return 0.0; }
 - (MTLCommandBufferStatus)status {
+    // In its queue's line the bridge does not have it yet: Metal's Enqueued there, and Committed from its commit.
+    @synchronized(_queue) {
+        if (_inLine) return _wantsCommit ? MTLCommandBufferStatusCommitted : MTLCommandBufferStatusEnqueued;
+    }
     return _handle ? (MTLCommandBufferStatus)xm2v_command_buffer_status(_handle) : MTLCommandBufferStatusError;
 }
 - (NSError *)error {
@@ -2086,7 +2164,7 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     }
     return nil;
 }
-- (void)enqueue {}
+- (void)enqueue { [(id<XcmCommandLine>)_queue xcmEnqueue:self]; }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {
     if (!block) return;
     @synchronized(self) {
@@ -2105,6 +2183,35 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
         _iosurfaceFlushed = YES;
         for (XcmTexture *tex in _dirtyIOSurfaceTextures) [tex syncToIOSurface];
         [_dirtyIOSurfaceTextures removeAllObjects];
+    }
+}
+// The scheduled handlers alone, for the queue's line of them (xcmRunScheduledThrough:). Once: a thread that asks while
+// another runs them waits until they ran.
+- (void)_fireScheduledOnce {
+    NSArray<MTLCommandBufferHandler> *sched = nil;
+    BOOL mine = NO, others = NO;
+    @synchronized(self) {
+        if (!_schedFired) {
+            _schedFired = mine = YES;
+            sched = [_scheduledHandlers copy];
+            [_scheduledHandlers removeAllObjects];
+            _schedThread = pthread_self();
+            dispatch_group_enter(_schedGroup);
+        } else {
+            others = !(_schedThread != nullptr && pthread_equal(_schedThread, pthread_self()) != 0);
+        }
+    }
+    if (mine) {
+        const void *line = tXcmHandlerLine;
+        tXcmHandlerLine = (__bridge void *)_handlerQ;
+        for (MTLCommandBufferHandler h in sched) h((id<MTLCommandBuffer>)self);
+        tXcmHandlerLine = line;
+        @synchronized(self) {
+            _schedThread = nullptr;
+        }
+        dispatch_group_leave(_schedGroup);
+    } else if (others) {
+        dispatch_group_wait(_schedGroup, DISPATCH_TIME_FOREVER);
     }
 }
 - (void)_fireHandlersOnce {
@@ -2166,7 +2273,8 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     }
     (void)toRelease;
 }
-- (void)commit {
+- (void)commit { [(id<XcmCommandLine>)_queue xcmCommit:self]; }
+- (void)commitNow {
     BOOL needsWait = NO;
     NSUInteger nSched = 0, nComp = 0, nDirty = 0, nRet = 0;
     NSArray *retSnapshot = nil;
@@ -2179,6 +2287,7 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
         nRet = _retainedResources.count;
         if (nRet) retSnapshot = [_retainedResources copy];
         needsWait = (nSched || nComp || nDirty || nRet);
+        _hasTurn = needsWait;
     }
     for (id res in retSnapshot) {
         if ([res isKindOfClass:[XcmBuffer class]]) {
@@ -2191,15 +2300,32 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     if (xcmTraceOn()) fprintf(stderr, "XCM commit cb=%p sched=%lu comp=%lu dirty=%lu ret=%lu\n",
                               (__bridge void *)self, (unsigned long)nSched,
                               (unsigned long)nComp, (unsigned long)nDirty, (unsigned long)nRet);
+    bool refused = false;
+    if (needsWait) dispatch_group_enter(_turnGroup);   // before the bridge has it: a wait for it may be under way
     if (_handle) {
         bool ok = xm2v_command_buffer_commit(_handle);
         if (!ok) fprintf(stderr, "XCM commit FAILED cb=%p err=%s\n", (__bridge void *)self, xm2v_last_error());
+        refused = !ok;
     }
     if (needsWait) {
         static dispatch_queue_t waitQ;
         static dispatch_once_t once;
         dispatch_once(&once, ^{ waitQ = dispatch_queue_create("xcm.cb.wait", DISPATCH_QUEUE_CONCURRENT); });
-        dispatch_async(waitQ, ^{
+        // What it drew goes back into its IOSurfaces as soon as it is done, on a thread of its own: the waiter below
+        // comes after the handlers of the command buffers before it, and those may take their time.
+        if (nDirty && !refused) dispatch_async(waitQ, ^{
+            if (_handle) xm2v_command_buffer_wait_until_completed(_handle, 0);
+            [self _flushIOSurfacesOnce];
+        });
+        // The waiter goes to its queue's serial dispatch queue, and this runs under the queue's lock (xcmCommit:): the
+        // waiters line up in the order the bridge got the command buffers. Metal runs the handlers of a queue's
+        // command buffers one at a time, in that order; with every waiter on the concurrent queue two ran at once, or
+        // the later one first. One the bridge refused may never be done there: its waiter stays where it was, out of
+        // the others' way.
+        if (refused) dispatch_group_leave(_turnGroup);
+        else if (nSched) [(id<XcmCommandLine>)_queue xcmScheduledLater:self];
+        dispatch_async(refused ? waitQ : _handlerQ, ^{
+            if (!refused) tXcmHandlerLine = (__bridge void *)_handlerQ;
             if (_handle) {
                 bool wok = xm2v_command_buffer_wait_until_completed(_handle, 0);
                 uint32_t st = xm2v_command_buffer_status(_handle);
@@ -2211,8 +2337,10 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
                 }
             }
             [self _flushIOSurfacesOnce];
+            if (!refused) [(id<XcmCommandLine>)_queue xcmRunScheduledThrough:self];
             [self _fireHandlersOnce];
             [self _releaseRetainedResourcesOnce];
+            if (!refused) { tXcmHandlerLine = nullptr; dispatch_group_leave(_turnGroup); }
         });
     }
 }
@@ -2220,11 +2348,29 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     [self commit];
 }
 - (void)waitUntilScheduled {
-    [self waitUntilCompleted];
+    BOOL turn;
+    @synchronized(self) { turn = _hasTurn; }
+    if (!turn || tXcmHandlerLine == (__bridge void *)_handlerQ) { [self waitUntilCompleted]; return; }   // as it always was
+    [self waitForSurfaces];
+    // On Metal a command buffer is scheduled, and its scheduled handlers run, well before the one before it completes:
+    // its waitUntilScheduled does not wait for that one's completed handlers (one of which may need this very thread).
+    // Here the scheduled handlers run at completion, in the same line; so where their turn has not come, they run from
+    // here, those of the command buffers before it first. They may then overlap a completed handler still under way.
+    [(id<XcmCommandLine>)_queue xcmRunScheduledThrough:self];
 }
-- (void)waitUntilCompleted {
+- (void)waitForSurfaces {   // it is done and what it drew is in its IOSurfaces
+    // Committed behind one enqueued before it: the bridge gets it at that one's commit.
+    dispatch_group_wait(_lineGroup, DISPATCH_TIME_FOREVER);
     if (_handle) xm2v_command_buffer_wait_until_completed(_handle, 0);
     [self _flushIOSurfacesOnce];
+}
+- (void)waitUntilCompleted {
+    [self waitForSurfaces];
+    // Metal's wait returns once the completed handlers ran, and they have their turn on the queue's dispatch queue
+    // (commitNow): run from here they would jump the line. In one of that queue's own handlers the turn cannot come
+    // while it waits (Metal's wait never returns there): there, and for one without a waiter, they run here as before.
+    if (tXcmHandlerLine != (__bridge void *)_handlerQ) dispatch_group_wait(_turnGroup, DISPATCH_TIME_FOREVER);
+    [(id<XcmCommandLine>)_queue xcmRunScheduledThrough:self];
     [self _fireHandlersOnce];
     [self _releaseRetainedResourcesOnce];
 }
@@ -2237,6 +2383,15 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType:(MTLDispatchType)dispatchType {
     (void)dispatchType;
     return [self computeCommandEncoder];
+}
+// A pass descriptor adds counter sampling, which this device does not offer, and the dispatch type: the plain encoder.
+- (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor:(MTLComputePassDescriptor *)desc {
+    (void)desc;
+    return [self computeCommandEncoder];
+}
+- (id<MTLBlitCommandEncoder>)blitCommandEncoderWithDescriptor:(MTLBlitPassDescriptor *)desc {
+    (void)desc;
+    return [self blitCommandEncoder];
 }
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)desc {
     if (!_handle || !desc) return nil;
@@ -2324,6 +2479,17 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
             os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: encodeWaitForEvent failed: %{public}s", xm2v_last_error() ?: "?");
     }
 }
+// Metal presents a drawable when its command buffer is scheduled. The scheduled handlers here run at completion, after
+// the texture went back into the drawable's IOSurface (_flushIOSurfacesOnce): the first moment its pixels can be shown.
+- (void)presentDrawable:(id<MTLDrawable>)drawable {
+    [self addScheduledHandler:^(id<MTLCommandBuffer>) { [drawable present]; }];
+}
+- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
+    [self addScheduledHandler:^(id<MTLCommandBuffer>) { [drawable presentAtTime:presentationTime]; }];
+}
+- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
+    [self addScheduledHandler:^(id<MTLCommandBuffer>) { [drawable presentAfterMinimumDuration:duration]; }];
+}
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 @end
@@ -2336,17 +2502,72 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     NSUInteger _bgGpuPriority;
     dispatch_queue_t _submissionQueue;
     dispatch_queue_t _completionQueue;
+    dispatch_queue_t _handlerQ;   // serial: the waiters of its command buffers, in commit order
+    NSMutableArray<XcmCommandBuffer *> *_schedLine;   // those whose scheduled handlers have not run, in that order
+    uint64_t _commits;
+    NSMutableArray<XcmCommandBuffer *> *_line;
 }
 - (instancetype)initWithHandle:(Xm2vQueue *)h device:(id)dev;
 @end
 
 @implementation XcmQueue
 - (instancetype)initWithHandle:(Xm2vQueue *)h device:(id)dev {
-    if ((self = [super init])) { _handle = h; _device = dev; _gpuPriority = 1; _bgGpuPriority = 2; }
+    if ((self = [super init])) {
+        _handle = h; _device = dev; _gpuPriority = 1; _bgGpuPriority = 2;
+        _handlerQ = dispatch_queue_create("xcm.cb.handlers", DISPATCH_QUEUE_SERIAL);
+        _schedLine = [NSMutableArray array];
+        _line = [NSMutableArray array];
+    }
     return self;
 }
 - (void)dealloc { if (_handle) { xm2v_queue_release(_handle); _handle = nullptr; } }
 - (id<MTLDevice>)device { return _device; }
+// Metal runs a queue's command buffers in the order they were enqueued (a commit enqueues one that was not), whatever
+// the order of their commits. The bridge has no enqueue and runs them in commit order, so each waits in line here until
+// every one before it is committed. One enqueued and never committed holds up all behind it, as on Metal.
+- (void)xcmEnqueue:(XcmCommandBuffer *)cb {
+    @synchronized(self) {
+        if (!cb->_inLine && !cb->_wantsCommit) { cb->_inLine = YES; [_line addObject:cb]; }
+    }
+}
+- (void)xcmCommit:(XcmCommandBuffer *)cb {
+    @synchronized(self) {
+        if (cb->_wantsCommit) return;
+        cb->_wantsCommit = YES;
+        dispatch_group_enter(cb->_lineGroup);
+        if (!cb->_inLine) { cb->_inLine = YES; [_line addObject:cb]; }
+        while (_line.count && _line[0]->_wantsCommit) {
+            XcmCommandBuffer *head = _line[0];
+            [_line removeObjectAtIndex:0];
+            head->_inLine = NO;
+            @synchronized(head) { head->_serial = ++_commits; }
+            [head commitNow];
+            dispatch_group_leave(head->_lineGroup);
+        }
+    }
+}
+// The scheduled handlers of the queue's command buffers run in commit order, each when its command buffer is done: from
+// the waiter in its turn, or before that from a thread in waitUntilScheduled. Whoever comes takes them from the head,
+// up to the command buffer it comes for (which need not have any itself).
+- (void)xcmScheduledLater:(XcmCommandBuffer *)cb {
+    @synchronized(_schedLine) { [_schedLine addObject:cb]; }
+}
+- (void)xcmRunScheduledThrough:(XcmCommandBuffer *)cb {
+    uint64_t last = 0, serial = 0;
+    @synchronized(cb) { last = cb->_serial; }
+    for (;;) {
+        XcmCommandBuffer *head = nil;
+        @synchronized(_schedLine) { head = _schedLine.firstObject; }
+        if (!head) return;
+        @synchronized(head) { serial = head->_serial; }
+        if (serial > last) return;
+        [head waitForSurfaces];
+        [head _fireScheduledOnce];
+        @synchronized(_schedLine) {
+            if (_schedLine.firstObject == head) [_schedLine removeObjectAtIndex:0];
+        }
+    }
+}
 - (void)setSubmissionQueue:(dispatch_queue_t)q { _submissionQueue = q; }
 - (void)setCompletionQueue:(dispatch_queue_t)q { _completionQueue = q; }
 - (NSUInteger)getGPUPriority { return _gpuPriority; }
@@ -2359,7 +2580,9 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 - (id<MTLCommandBuffer>)commandBuffer {
     if (!_handle) return nil;
     Xm2vCommandBuffer *cb = xm2v_command_buffer_new(_handle);
-    return cb ? (id<MTLCommandBuffer>)[[XcmCommandBuffer alloc] initWithHandle:cb device:_device queue:self] : nil;
+    XcmCommandBuffer *out = cb ? [[XcmCommandBuffer alloc] initWithHandle:cb device:_device queue:self] : nil;
+    if (out) out->_handlerQ = _handlerQ;
+    return (id<MTLCommandBuffer>)out;
 }
 - (id<MTLCommandBuffer>)commandBufferWithUnretainedReferences { return [self commandBuffer]; }
 - (id<MTLCommandBuffer>)commandBufferWithDescriptor:(MTLCommandBufferDescriptor *)desc {
@@ -2477,6 +2700,11 @@ static id xcmDev_newCommandQueue(id self, SEL) {
     return q ? [[XcmQueue alloc] initWithHandle:q device:self] : nil;
 }
 static id xcmDev_newCommandQueueMax(id self, SEL, NSUInteger) {
+    return xcmDev_newCommandQueue(self, nullptr);
+}
+// The descriptor's command buffer limit and log state have no counterpart in the bridge, as the count above has none.
+static id xcmDev_newCommandQueueDesc(id self, SEL, id) NS_RETURNS_RETAINED;
+static id xcmDev_newCommandQueueDesc(id self, SEL, id) {
     return xcmDev_newCommandQueue(self, nullptr);
 }
 static id xcmDev_newBufferLen(id self, SEL, NSUInteger length, MTLResourceOptions opts) {
@@ -3035,9 +3263,11 @@ static id xcmDev_newComputePSODesc(id self, SEL, MTLComputePipelineDescriptor *d
     return [[XcmComputePipeline alloc] initWithHandle:pso device:self];
 }
 static void xcmDev_newComputePSOAsync(id self, SEL, id<MTLFunction> fn, void (^handler)(id<MTLComputePipelineState>, NSError *)) {
-    NSError *err = nil;
-    id pso = xcmDev_newComputePSO(self, nullptr, fn, &err);
-    if (handler) handler(pso, err);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{   // not inside the call: see xcmDev_newRenderPSOAsync
+        NSError *err = nil;
+        id pso = xcmDev_newComputePSO(self, nullptr, fn, &err);
+        if (handler) handler(pso, err);
+    });
 }
 static id xcmDev_newRenderPSO(id self, SEL, MTLRenderPipelineDescriptor *desc, NSError **error) {
     if (!gXm2vDevice || !desc || ![desc.vertexFunction isKindOfClass:[XcmFunction class]] || !((XcmFunction *)desc.vertexFunction)->_handle) {
@@ -3247,6 +3477,38 @@ static id xcmDev_newRenderPSO(id self, SEL, MTLRenderPipelineDescriptor *desc, N
 static id xcmDev_newRenderPSOOpts(id self, SEL, MTLRenderPipelineDescriptor *desc, MTLPipelineOption, MTLRenderPipelineReflection **refl, NSError **error) {
     if (refl) *refl = nil;
     return xcmDev_newRenderPSO(self, nullptr, desc, error);
+}
+// The forms that answer through a handler. _MTLDevice's own (what the device class gets for a selector it does not
+// list) return without ever calling it: the caller waits for its pipeline for ever. Off the caller's thread, as
+// Metal's are: the caller may hold a lock its handler takes. The descriptor is the caller's to change after the call.
+static void xcmDev_newRenderPSOAsync(id self, SEL, MTLRenderPipelineDescriptor *desc, void (^handler)(id<MTLRenderPipelineState>, NSError *)) {
+    desc = [desc copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        id pso = xcmDev_newRenderPSO(self, nullptr, desc, &err);
+        if (handler) handler(pso, err);
+    });
+}
+static void xcmDev_newRenderPSOOptsAsync(id self, SEL, MTLRenderPipelineDescriptor *desc, MTLPipelineOption,
+                                         void (^handler)(id<MTLRenderPipelineState>, MTLRenderPipelineReflection *, NSError *)) {
+    xcmDev_newRenderPSOAsync(self, nullptr, desc, ^(id<MTLRenderPipelineState> pso, NSError *err) { if (handler) handler(pso, nil, err); });
+}
+static void xcmDev_newComputePSOOptsAsync(id self, SEL, id<MTLFunction> fn, MTLPipelineOption,
+                                          void (^handler)(id<MTLComputePipelineState>, MTLComputePipelineReflection *, NSError *)) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        id pso = xcmDev_newComputePSO(self, nullptr, fn, &err);
+        if (handler) handler(pso, nil, err);
+    });
+}
+static void xcmDev_newComputePSODescAsync(id self, SEL, MTLComputePipelineDescriptor *desc, MTLPipelineOption opts,
+                                          void (^handler)(id<MTLComputePipelineState>, MTLComputePipelineReflection *, NSError *)) {
+    desc = [desc copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *err = nil;
+        id pso = xcmDev_newComputePSODesc(self, nullptr, desc, opts, nullptr, &err);
+        if (handler) handler(pso, nil, err);
+    });
 }
 static id xcmDev_newSampler(id self, SEL, MTLSamplerDescriptor *desc) {
     if (!gXm2vDevice || !desc) return nil;
@@ -3484,6 +3746,7 @@ static Class createBackendDeviceClass(void) {
             {"resourcePatchingTypeForResourceType:", (IMP)xcmDev_zeroU1, "Q24@0:8Q16"},
             {"newCommandQueue", (IMP)xcmDev_newCommandQueue, "@16@0:8"},
             {"newCommandQueueWithMaxCommandBufferCount:", (IMP)xcmDev_newCommandQueueMax, "@24@0:8Q16"},
+            {"newCommandQueueWithDescriptor:", (IMP)xcmDev_newCommandQueueDesc, "@24@0:8@16"},
             {"newBufferWithLength:options:", (IMP)xcmDev_newBufferLen, "@32@0:8Q16Q24"},
             {"newBufferWithBytes:length:options:", (IMP)xcmDev_newBufferBytes, "@40@0:8^v16Q24Q32"},
             {"newBufferWithBytesNoCopy:length:options:deallocator:", (IMP)xcmDev_newBufferNoCopy, "@48@0:8^v16Q24Q32@?40"},
@@ -3507,6 +3770,10 @@ static Class createBackendDeviceClass(void) {
             {"newComputePipelineStateWithFunction:completionHandler:", (IMP)xcmDev_newComputePSOAsync, "v32@0:8@16@?24"},
             {"newRenderPipelineStateWithDescriptor:error:", (IMP)xcmDev_newRenderPSO, "@32@0:8@16^@24"},
             {"newRenderPipelineStateWithDescriptor:options:reflection:error:", (IMP)xcmDev_newRenderPSOOpts, "@48@0:8@16Q24^@32^@40"},
+            {"newRenderPipelineStateWithDescriptor:completionHandler:", (IMP)xcmDev_newRenderPSOAsync, "v32@0:8@16@?24"},
+            {"newRenderPipelineStateWithDescriptor:options:completionHandler:", (IMP)xcmDev_newRenderPSOOptsAsync, "v40@0:8@16Q24@?32"},
+            {"newComputePipelineStateWithFunction:options:completionHandler:", (IMP)xcmDev_newComputePSOOptsAsync, "v40@0:8@16Q24@?32"},
+            {"newComputePipelineStateWithDescriptor:options:completionHandler:", (IMP)xcmDev_newComputePSODescAsync, "v40@0:8@16Q24@?32"},
             {"newSamplerStateWithDescriptor:", (IMP)xcmDev_newSampler, "@24@0:8@16"},
             {"newDepthStencilStateWithDescriptor:", (IMP)xcmDev_newDepthStencil, "@24@0:8@16"},
             {"newEvent", (IMP)xcmDev_newEvent, "@16@0:8"},
