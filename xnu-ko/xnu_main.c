@@ -106,16 +106,16 @@ module_param(xo_compat, int, 0444);
 static char *el0_fips_sha256 = "";
 module_param(el0_fips_sha256, charp, 0444);
 
-__attribute__((target("branch-protection=none"), noreturn))
+/* fki_pac_swap failed in an EL0 upcall: said here (XNU's keys may still be loaded); world.S then ends the run */
+__attribute__((target("branch-protection=none")))
 void xnu_world_pac_abort_el0(int err);
-__attribute__((target("branch-protection=none"), noreturn))
+__attribute__((target("branch-protection=none")))
 void xnu_world_pac_abort_el0(int err)
 {
-	static const char msg[] = "xnu: FATAL: fki_pac_swap failed in EL0 upcall\n";
+	static const char msg[] = "xnu: fki_pac_swap failed in EL0 upcall; ending the run\n";
 
 	(void)err;
 	fki_log_alert(msg, sizeof(msg) - 1);
-	BUG();
 }
 
 static struct xnu_image img;
