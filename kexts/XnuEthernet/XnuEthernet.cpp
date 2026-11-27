@@ -134,13 +134,15 @@ IOReturn XnuEthernet::disable(IONetworkInterface *interface)
 }
 
 // No output queue: the interface calls in from the stack's threads, so the one transmit buffer is taken under a lock.
+// The return value goes to the stack as if_output's errno (IONetworkInterface::if_output): a frame dropped here is lost like one
+// dropped on the wire, 0; an output queue's kIOReturnOutputDropped (1) would be EPERM to the sender.
 UInt32 XnuEthernet::outputPacket(mbuf_t packet, void *param)
 {
     size_t length = mbuf_pkthdr_len(packet);
     if (!fEnabled || length < ETHER_HDR_LEN || length > frameBytes) {
         ++fTxDrops;
         freePacket(packet);
-        return kIOReturnOutputDropped;
+        return kIOReturnOutputSuccess;
     }
     IOLockLock(fTxLock);
     long sent = mbuf_copydata(packet, 0, length, fTx) == 0 ? linux64_net_send(fTx, length) : 0;
@@ -150,7 +152,7 @@ UInt32 XnuEthernet::outputPacket(mbuf_t packet, void *param)
     freePacket(packet);
     if (sent <= 0) {
         ++fTxDrops;
-        return kIOReturnOutputDropped;
+        return kIOReturnOutputSuccess;
     }
     ++fTxPackets;
     fActive = true;
