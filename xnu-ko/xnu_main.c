@@ -1295,7 +1295,8 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 	adt_node(&a, 1 + (rd_size ? 1 : 0) + (tc_size ? 1 : 0), 0);	/* /chosen/memory-map (no AuxKC) */
 	adt_prop_str(&a, "name", "memory-map");
 	if (rd_size) {
-		u64_t rd[2] = { phys + off_rd, rd_size };
+		/* in whole 4 KB pages, as XNU makes md0 of it (IOFindBSDRoot: size >> 12): a last page's part was cut off the disk */
+		u64_t rd[2] = { phys + off_rd, (rd_size + 0xfff) & ~0xfffULL };
 		adt_prop(&a, "RAMDisk", rd, sizeof(rd));
 	}
 	if (tc_size) {

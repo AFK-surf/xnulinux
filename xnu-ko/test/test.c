@@ -850,6 +850,7 @@ static void blobs(unsigned long rd, unsigned long tc)
 	if (tc) { trustcache = "tc"; firmware[2].name = trustcache; firmware[2].size = tc; firmware[2].data = bytes(tc, 2); }
 }
 static int c_blobs(void) { small(); blobs(64 << 10, 5000); return insmod(0, handed); }
+static int c_rd_512(void) { small(); blobs(137 * 512, 0); return insmod(0, handed); }	/* a disk image of whole sectors, not of whole 4 KB pages */
 static int c_tc_only(void) { small(); blobs(0, 16384 - 8); fb_width = want.fb_w = 0; return insmod(0, handed); }	/* with its header, 16 KB exactly */
 static int c_hostdisk(void) { small(); host_files = 1; hostdisk = "/var/tmp/root.img"; want.md0 = 1; return insmod(0, handed); }
 
@@ -1226,6 +1227,7 @@ static const struct { const char *what; int (*run)(void); } cases[] = {
 	{ "a boot_uuid of 41 characters is refused, and said", c_boot_uuid_long },
 	{ "a preboot_uuid that is not hexadecimal is refused, and said", c_preboot_uuid_bad },
 	{ "a RAM disk and a trust cache: in XNU's memory, in /chosen/memory-map, rd=md0", c_blobs },
+	{ "a RAM disk of whole sectors, not whole 4 KB pages: md0 holds all of it", c_rd_512 },
 	{ "a trust cache that ends on a page, no framebuffer", c_tc_only },
 	{ "hostdisk: rd=md0 and no RAMDisk", c_hostdisk },
 	{ "fb_height=0: no framebuffer, no Video, no /arm-io/gpu", c_fb_none },
