@@ -25,6 +25,7 @@
 #include <asm/stacktrace.h>
 #include <asm/sysreg.h>
 #include <asm/tlbflush.h>
+#include <asm/virt.h>
 
 unsigned long fki_caps(void)
 {
@@ -628,6 +629,22 @@ int fki_arch_init(void)
 {
 	int cpu;
 
+	/*
+	 * Two hosts are refused here, before a foreign kernel can be started on them (docs/hosted-service.md, 2.1):
+	 * - Linux at EL2, a bare-metal kernel with VHE. The foreign kernel is entered at Linux's own exception level and is
+	 *   built for EL1. kvm-arm.mode=nvhe on the command line keeps Linux at EL1; a guest is always there.
+	 * - no pointer authentication. fki_enter() switches the keys whatever fki_caps() said: without FEAT_PAuth (or with
+	 *   it hidden from this kernel) those registers are an undefined instruction, taken in the kernel with interrupts
+	 *   off on the first entry.
+	 */
+	if (is_kernel_in_hyp_mode()) {
+		pr_err("fki: Linux runs at EL2 (VHE) here and a foreign kernel needs it at EL1: boot with kvm-arm.mode=nvhe, or use a guest\n");
+		return -ENODEV;
+	}
+	if (!system_supports_address_auth()) {
+		pr_err("fki: no pointer authentication (FEAT_PAuth) on this CPU, or this kernel does not use it: the foreign kernel's entry switches its keys\n");
+		return -ENODEV;
+	}
 	for_each_possible_cpu(cpu) {
 		struct page *pg = alloc_pages(GFP_KERNEL, FKI_ALT_STACK_ORDER);
 
