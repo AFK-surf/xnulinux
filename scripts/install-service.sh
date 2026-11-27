@@ -7,7 +7,10 @@
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 U=$(id -un)
-[ -f /var/tmp/mac.conf ] || { echo "no /var/tmp/mac.conf: make the disk first (scripts/mk-macvm-disk.sh)" >&2; exit 1; }
+# the disk's UUIDs, where the service's xnulinux-boot.sh will look for them: MAC_CONF of /etc/xnulinux.conf (a PureDarwin
+# disk's pd.conf, say), /var/tmp/mac.conf without one
+M=$(unset MAC_CONF; [ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf >/dev/null; echo "${MAC_CONF:-/var/tmp/mac.conf}")
+(cd "$P" && [ -f "$M" ]) || { echo "no $M: make the disk first (scripts/mk-macvm-disk.sh, scripts/mk-puredarwin-disk.sh)" >&2; exit 1; }
 [ -f /etc/xnulinux.conf ] || sudo tee /etc/xnulinux.conf >/dev/null <<'CONF'
 # The hosted macOS (scripts/xnulinux-boot.sh reads this, then /var/tmp/mac.conf for the disk's UUIDs); the environment
 # overrides what is written as ${NAME:-default}
