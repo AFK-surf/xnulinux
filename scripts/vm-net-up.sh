@@ -11,8 +11,10 @@ sudo sysctl -q -w net.ipv4.ip_forward=1
 # the default route's interface: the word after "dev", wherever it is ("default dev wg0 scope link" has no gateway before
 # it, and a multipath route names its interfaces on the next-hop lines)
 up=$(ip route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
-sudo iptables -t nat -C POSTROUTING -s 192.168.77.0/24 -o "$up" -j MASQUERADE 2>/dev/null ||
-  sudo iptables -t nat -A POSTROUTING -s 192.168.77.0/24 -o "$up" -j MASQUERADE
+if [ -n "$up" ]; then
+  sudo iptables -t nat -C POSTROUTING -s 192.168.77.0/24 -o "$up" -j MASQUERADE 2>/dev/null ||
+    sudo iptables -t nat -A POSTROUTING -s 192.168.77.0/24 -o "$up" -j MASQUERADE
+fi
 sudo iptables -C FORWARD -i xnu0 -j ACCEPT 2>/dev/null || sudo iptables -I FORWARD -i xnu0 -j ACCEPT
 sudo iptables -C FORWARD -o xnu0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null ||
   sudo iptables -I FORWARD -o xnu0 -m state --state RELATED,ESTABLISHED -j ACCEPT
@@ -39,4 +41,5 @@ if command -v dnsmasq >/dev/null; then
     --dhcp-option=3,192.168.77.1 --dhcp-option=6,192.168.77.1 --pid-file=/run/dnsmasq-xnu0.pid
   then D=yes; else D="DID NOT START (the hosted system gets no address and no DNS)"; fi
 fi
-echo "vm-net-up: xnu0 192.168.77.1/24 up, NAT via $up, dnsmasq: $D"
+[ -n "$up" ] && N="via $up" || N="none (this host has no default route)"
+echo "vm-net-up: xnu0 192.168.77.1/24 up, NAT $N, dnsmasq: $D"
