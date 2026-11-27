@@ -4,10 +4,10 @@
 
 Rode o userspace do macOS no Linux carregando o kernel do macOS dentro dele.
 
-O xnulinux compila o XNU, o kernel open-source do macOS, a partir de fontes publicadas pela Apple e o executa como um módulo carregável do kernel (xnu.ko) dentro de um kernel Linux arm64 sem modificações. O XNU hospedado controla a CPU e a MMU diretamente, fazendo com que os processos do macOS rodem de forma nativa lado a lado com os processos do Linux nas mesmas CPUs, sem nenhum hypervisor entre eles. O Linux empresta ao XNU sua memória, timers, arquivos, rede e GPU por meio de um pequeno módulo de interface (`fki.ko`).
+O xnulinux compila o XNU, o kernel open-source do macOS, a partir de fontes publicadas pela Apple e o executa como um módulo carregável do kernel (`xnu.ko`) dentro de um kernel Linux arm64 sem modificações. O XNU hospedado controla a CPU e a MMU diretamente, fazendo com que os processos do macOS rodem de forma nativa lado a lado com os processos do Linux nas mesmas CPUs, sem nenhum hypervisor entre eles. O Linux empresta ao XNU sua memória, timers, arquivos, rede e GPU por meio de um pequeno módulo de interface (`fki.ko`).
 
 
-Com um kernel stock do Ubuntu, o comando insmod xnu.ko inicializa um disco do sistema do macOS 27 gerado pelo próprio instalador da Apple diretamente ao desktop: loginwindow, WindowServer, Dock, Finder, Safari e Chrome.
+Com um kernel stock do Ubuntu, o comando `insmod xnu.ko` inicializa um disco do sistema do macOS 27 gerado pelo próprio instalador da Apple diretamente ao desktop: loginwindow, WindowServer, Dock, Finder, Safari e Chrome.
 
 ![Userspaces macOS e Linux lado a lado](docs/images/macos-and-linux.jpg)
 
@@ -48,7 +48,7 @@ XNU (compilado do código-fonte, camada LINUX64, kexts) │
 - **CPUs**: cada CPU hospedada é uma kernel thread do Linux fixada a uma CPU do Linux. O XNU roda nela até fazer uma chamada ao host (idle, I/O, um timer); o Linux mantém seus próprios exception vectors, e o `fki.ko` encaminha os faults e as exceções de usuário do código do XNU para os handlers do XNU.
 - **Memória**: o XNU recebe um único bloco fisicamente contíguo do Linux (CMA) e o gerencia com seu próprio pmap; o XNU e o Linux compartilham a metade de usuário do layout do espaço de endereçamento (páginas de 4K).
 - **Dispositivos**: as kexts em `kexts/` fornecem ao macOS um disco (um arquivo no lado do Linux), uma tela (um framebuffer que o Linux lê), um teclado e ponteiro, um link Ethernet (uma interface de rede do Linux), um keystore e uma GPU bridge.
-- **GPU**: o Metal no macOS hospedado roda sobre o `gpu/xnu-cpu-metal` (metal2vulkan sob Vulkan). O Vulkan acessa a GPU do host Linux através da DRM bridge (`kexts/XnuDrm` → chamada ao host → `gpu/xnu-drm/xnudrmd` → o render node do Linux), usando o driver Venus do Mesa; sem um backend de DRM bridge compatível, ele faz fallback para o lavapipe do Mesa na CPU.
+- **GPU**: o Metal no macOS hospedado roda sobre o `gpu/xnu-cpu-metal` (metal2vulkan sobre Vulkan). O Vulkan acessa a GPU do host Linux através da DRM bridge (`kexts/XnuDrm` → chamada ao host → `gpu/xnu-drm/xnudrmd` → o render node do Linux), usando o driver Venus do Mesa; sem um backend de DRM bridge compatível, ele faz fallback para o lavapipe do Mesa na CPU.
 
 ## Status
 
