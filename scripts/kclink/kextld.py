@@ -146,7 +146,9 @@ class Kext:
                         prev = self.globals[n]
                         raise LinkError(f'{n} defined twice (in {o.path} and at {prev[0].seg},{prev[0].name})')
                     weak.discard(n)                     # over a weak one
-                elif d & 0x80:
+                elif not d & 0x80:
+                    weak.discard(n)                     # (at the place of a weak one too: the two are one, not weak)
+                elif n not in self.globals:
                     weak.add(n)
                 self.globals[n] = where
         # a GOT entry for every symbol the code loads through one
