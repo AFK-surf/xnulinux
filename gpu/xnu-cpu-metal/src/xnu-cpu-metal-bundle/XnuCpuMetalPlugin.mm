@@ -376,6 +376,8 @@ static BOOL xcmRangeIsFullyWritable(void *ptr, size_t len) {
     XcmBuffer *_buffer;
     NSUInteger _bufferOffset;
     NSUInteger _bufferBytesPerRow;
+    XcmTexture *_parent;   // of a view: the texture it was made from, and its first level and slice there
+    NSUInteger _parentLevel, _parentSlice;
 }
 - (instancetype)initWithHandle:(Xm2vTexture *)h device:(id)dev descriptor:(MTLTextureDescriptor *)desc;
 - (void)syncFromIOSurfaceIfNeeded;
@@ -594,7 +596,9 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
     NSUInteger sz = MAX(1ul, _width) * MAX(1ul, _height) * MAX(1ul, _depth) * MAX(1ul, _arrayLength) * MAX(1ul, _sampleCount) * bpp;
     return (sz + 255ul) & ~255ul;
 }
-- (id<MTLTexture>)parentTexture { return nil; }
+- (id<MTLTexture>)parentTexture { return (id<MTLTexture>)_parent; }
+- (NSUInteger)parentRelativeLevel { return _parentLevel; }
+- (NSUInteger)parentRelativeSlice { return _parentSlice; }
 - (id<MTLBuffer>)buffer { return (id<MTLBuffer>)_buffer; }
 - (NSUInteger)bufferOffset { return _bufferOffset; }
 - (NSUInteger)bufferBytesPerRow { return _bufferBytesPerRow; }
@@ -659,6 +663,11 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
     desc.usage = _usage;
     desc.resourceOptions = _options;
     XcmTexture *view = [[XcmTexture alloc] initWithHandle:vh device:_device descriptor:desc];
+    if (view) {   // as Metal's view, it keeps the texture it was made from
+        view->_parent = self;
+        view->_parentLevel = levelRange.location;
+        view->_parentSlice = sliceRange.location;
+    }
     if (view && _iosurface && levelRange.location == 0 && sliceRange.location == 0) {
         CFRetain(_iosurface);
         view->_iosurface = _iosurface;
