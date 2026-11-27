@@ -6,6 +6,8 @@
 // this device, publishes its media, the GUID partition scheme finds the container partition and APFS mounts its volumes,
 // as on a Mac's internal SSD. I/O goes through the host: xnu.ko disk=, LINUX64_CALL_DISK_RW and _SIZE in
 // bsd/kern/linux64_host.c, done synchronously through a bounce buffer (the host reads and writes the file in Linux context).
+// A write is in Linux's page cache when it returns; a flush (doSynchronize: DKIOCSYNCHRONIZE, which F_FULLFSYNC and the
+// file systems' journal and checkpoint barriers come down to) has the host fsync the file, LINUX64_CALL_DISK_SYNC.
 // IOBlockStorageDevice.h declares some of its virtual methods (doLockUnlockMedia, reportLockability,
 // reportPollRequirements, doDiscard) only under TARGET_OS_OSX; the collection's IOStorageFamily is the macOS one, so
 // without it this class's vtable is three slots short of the family's and the family's calls land on the wrong methods
@@ -23,6 +25,7 @@
 
 extern "C" uint64_t linux64_disk_size(void);
 extern "C" long linux64_disk_rw(int write, void *buffer, unsigned long length, unsigned long offset);
+extern "C" long linux64_disk_sync(void);
 
 namespace {
 constexpr UInt64 kBlockSize = 512;          // the partition table's LBA size as the host tools wrote it
@@ -66,7 +69,7 @@ public:
     IOReturn reportWriteProtection(bool *protect) override { *protect = false; return kIOReturnSuccess; }
     IOReturn getWriteCacheState(bool *enabled) override { *enabled = false; return kIOReturnSuccess; }
     IOReturn setWriteCacheState(bool) override { return kIOReturnSuccess; }
-    IOReturn doSynchronize(UInt64, UInt64, IOStorageSynchronizeOptions) override { return kIOReturnSuccess; }
+    IOReturn doSynchronize(UInt64, UInt64, IOStorageSynchronizeOptions) override;
     IOReturn doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UInt64 nblks, IOStorageAttributes *attributes,
                               IOStorageCompletion *completion) override;
 };
@@ -184,6 +187,16 @@ IOReturn XnuDisk::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UIn
     }
     IOStorage::complete(completion, status, status == kIOReturnSuccess ? total : done);
     return kIOReturnSuccess;
+}
+
+// The written blocks to the host's disk. Reads and writes may go on meanwhile (no lock: the bounce buffer is not used).
+IOReturn XnuDisk::doSynchronize(UInt64, UInt64, IOStorageSynchronizeOptions)
+{
+    long status = linux64_disk_sync();
+    if (status == 0 || status == -38)   // -ENOSYS: an xnu.ko from before the call, which cannot flush (as it was)
+        return kIOReturnSuccess;
+    IOLog("XnuDisk: the host could not flush the disk (%ld)\n", status);
+    return kIOReturnIOError;
 }
 
 // Module start/stop for the collection's kext entry; the driver starts through IOKit matching.
