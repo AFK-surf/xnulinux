@@ -22,6 +22,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 
@@ -175,6 +176,27 @@ static ssize_t hc_write(struct file *f, const char __user *buf, size_t n, loff_t
 	return n;
 }
 
+/*
+ * The page frame behind va in a device mapping (VM_IO, VM_PFNMAP), with mmap_lock held. The kernel's call for it changed
+ * within the kernels of one Ubuntu release (24.04: 6.8, then 6.11, 6.14, 6.17 and 7.0 as HWE kernels): follow_pfn() up
+ * to 6.11, follow_pfnmap_start() from 6.12 (6.14 has no follow_pfn() any more).
+ */
+static int hc_device_pfn(struct vm_area_struct *vma, unsigned long va, unsigned long *pfn)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	struct follow_pfnmap_args args = { .vma = vma, .address = va };
+	int err = follow_pfnmap_start(&args);
+
+	if (err)
+		return err;
+	*pfn = args.pfn;
+	follow_pfnmap_end(&args);
+	return 0;
+#else
+	return follow_pfn(vma, va, pfn);
+#endif
+}
+
 static long hc_xlate_one(struct mm_struct *mm, unsigned long va, u64 *pa)
 {
 	struct vm_area_struct *vma = vma_lookup(mm, va);
@@ -183,12 +205,12 @@ static long hc_xlate_one(struct mm_struct *mm, unsigned long va, u64 *pa)
 	if (!vma)
 		return -EFAULT;
 	if (vma->vm_flags & (VM_IO | VM_PFNMAP)) {
-		struct follow_pfnmap_args args = { .vma = vma, .address = va };
-		int err = follow_pfnmap_start(&args);
+		unsigned long pfn;
+		int err = hc_device_pfn(vma, va, &pfn);
+
 		if (err)
 			return err;
-		*pa = (u64)args.pfn << PAGE_SHIFT;
-		follow_pfnmap_end(&args);
+		*pa = (u64)pfn << PAGE_SHIFT;
 		return 0;
 	}
 	if (get_user_pages_remote(mm, va, 1, FOLL_WRITE, &pg, NULL) != 1)
