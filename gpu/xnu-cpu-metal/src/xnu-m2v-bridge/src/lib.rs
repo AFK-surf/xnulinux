@@ -150,6 +150,16 @@ fn raw_store(v: u64) -> Result<StoreAction, String> {
     }
 }
 
+fn raw_blit(v: u64) -> Result<BlitOption, String> {
+    match v {
+        0 => Ok(BlitOption::None),
+        1 => Ok(BlitOption::DepthFromDepthStencil),
+        2 => Ok(BlitOption::StencilFromDepthStencil),
+        4 => Ok(BlitOption::RowLinearPVRTC),
+        _ => Err(format!("invalid blit option: {v}")),
+    }
+}
+
 /* ---- C descriptor structs ---- */
 
 #[repr(C)]
@@ -2426,8 +2436,10 @@ pub extern "C" fn xm2v_blit_encoder_copy_buffer_to_texture(
     dx: u64,
     dy: u64,
     dz: u64,
+    options: u64,
 ) -> bool {
     guard(false, || {
+        let options = raw_blit(options)?;
         get_mut(enc)?
             .copy_from_buffer_to_texture(
                 get(src)?,
@@ -2439,7 +2451,7 @@ pub extern "C" fn xm2v_blit_encoder_copy_buffer_to_texture(
                 dst_slice,
                 dst_level,
                 Origin::new(dx, dy, dz),
-                BlitOption::None,
+                options,
             )
             .map_err(|e| format!("copy_from_buffer_to_texture: {e:?}"))?;
         Ok(true)
@@ -2462,8 +2474,10 @@ pub extern "C" fn xm2v_blit_encoder_copy_texture_to_buffer(
     dst_off: u64,
     dst_bpr: u64,
     dst_bpi: u64,
+    options: u64,
 ) -> bool {
     guard(false, || {
+        let options = raw_blit(options)?;
         get_mut(enc)?
             .copy_from_texture_to_buffer(
                 get(src)?,
@@ -2475,7 +2489,7 @@ pub extern "C" fn xm2v_blit_encoder_copy_texture_to_buffer(
                 dst_off,
                 dst_bpr,
                 dst_bpi,
-                BlitOption::None,
+                options,
             )
             .map_err(|e| format!("copy_from_texture_to_buffer: {e:?}"))?;
         Ok(true)

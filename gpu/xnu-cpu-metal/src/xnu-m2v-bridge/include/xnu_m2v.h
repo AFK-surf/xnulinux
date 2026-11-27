@@ -355,11 +355,12 @@ bool xm2v_blit_encoder_copy_buffer_to_texture(Xm2vBlitEncoder *enc, Xm2vBuffer *
                                               uint64_t src_bpr, uint64_t src_bpi,
                                               uint64_t w, uint64_t h, uint64_t d,
                                               Xm2vTexture *dst, uint64_t dst_slice, uint64_t dst_level,
-                                              uint64_t dx, uint64_t dy, uint64_t dz);
+                                              uint64_t dx, uint64_t dy, uint64_t dz, uint64_t options);
 bool xm2v_blit_encoder_copy_texture_to_buffer(Xm2vBlitEncoder *enc, Xm2vTexture *src, uint64_t src_slice, uint64_t src_level,
                                               uint64_t sx, uint64_t sy, uint64_t sz,
                                               uint64_t w, uint64_t h, uint64_t d,
-                                              Xm2vBuffer *dst, uint64_t dst_off, uint64_t dst_bpr, uint64_t dst_bpi);
+                                              Xm2vBuffer *dst, uint64_t dst_off, uint64_t dst_bpr, uint64_t dst_bpi,
+                                              uint64_t options);
 bool xm2v_blit_encoder_copy_texture_to_texture(Xm2vBlitEncoder *enc,
                                                Xm2vTexture *src, uint64_t src_slice, uint64_t src_level,
                                                uint64_t sx, uint64_t sy, uint64_t sz,

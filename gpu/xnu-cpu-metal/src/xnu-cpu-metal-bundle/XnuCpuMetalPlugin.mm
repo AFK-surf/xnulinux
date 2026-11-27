@@ -1959,10 +1959,13 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
     xm2v_blit_encoder_copy_buffer_to_buffer(_handle, ((XcmBuffer *)src)->_handle, srcOff, ((XcmBuffer *)dst)->_handle, dstOff, size);
 }
+// The two copies between a buffer and a texture, with Metal's options (one aspect of a depth/stencil texture, PVRTC rows)
+// and without. A caller of either form must find it: WebKit's ANGLE and WebGPU use the ones with options:.
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)srcOff
      sourceBytesPerRow:(NSUInteger)bpr sourceBytesPerImage:(NSUInteger)bpi
             sourceSize:(MTLSize)sz toTexture:(id<MTLTexture>)dst
-      destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin {
+      destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin
+               options:(MTLBlitOption)options {
     if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmBuffer class]] || ![(id)dst isKindOfClass:[XcmTexture class]]) return;
     [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
     if (((XcmTexture *)dst)->_iosurface) {
@@ -1970,16 +1973,30 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
         [_cmdBuf markDirtyIOSurfaceTexture:(XcmTexture *)dst];
     }
     xm2v_blit_encoder_copy_buffer_to_texture(_handle, ((XcmBuffer *)src)->_handle, srcOff, bpr, bpi,
-        sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, slice, level, origin.x, origin.y, origin.z);
+        sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, slice, level, origin.x, origin.y, origin.z, (uint64_t)options);
+}
+- (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)srcOff
+     sourceBytesPerRow:(NSUInteger)bpr sourceBytesPerImage:(NSUInteger)bpi
+            sourceSize:(MTLSize)sz toTexture:(id<MTLTexture>)dst
+      destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin {
+    [self copyFromBuffer:src sourceOffset:srcOff sourceBytesPerRow:bpr sourceBytesPerImage:bpi sourceSize:sz
+               toTexture:dst destinationSlice:slice destinationLevel:level destinationOrigin:origin options:MTLBlitOptionNone];
 }
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level
            sourceOrigin:(MTLOrigin)origin sourceSize:(MTLSize)sz toBuffer:(id<MTLBuffer>)dst
-      destinationOffset:(NSUInteger)dstOff destinationBytesPerRow:(NSUInteger)bpr destinationBytesPerImage:(NSUInteger)bpi {
+      destinationOffset:(NSUInteger)dstOff destinationBytesPerRow:(NSUInteger)bpr destinationBytesPerImage:(NSUInteger)bpi
+                options:(MTLBlitOption)options {
     if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmTexture class]] || ![(id)dst isKindOfClass:[XcmBuffer class]]) return;
     [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
     [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
     xm2v_blit_encoder_copy_texture_to_buffer(_handle, ((XcmTexture *)src)->_handle, slice, level,
-        origin.x, origin.y, origin.z, sz.width, sz.height, sz.depth, ((XcmBuffer *)dst)->_handle, dstOff, bpr, bpi);
+        origin.x, origin.y, origin.z, sz.width, sz.height, sz.depth, ((XcmBuffer *)dst)->_handle, dstOff, bpr, bpi, (uint64_t)options);
+}
+- (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level
+           sourceOrigin:(MTLOrigin)origin sourceSize:(MTLSize)sz toBuffer:(id<MTLBuffer>)dst
+      destinationOffset:(NSUInteger)dstOff destinationBytesPerRow:(NSUInteger)bpr destinationBytesPerImage:(NSUInteger)bpi {
+    [self copyFromTexture:src sourceSlice:slice sourceLevel:level sourceOrigin:origin sourceSize:sz
+                 toBuffer:dst destinationOffset:dstOff destinationBytesPerRow:bpr destinationBytesPerImage:bpi options:MTLBlitOptionNone];
 }
 - (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
            sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)sz toTexture:(id<MTLTexture>)dst
