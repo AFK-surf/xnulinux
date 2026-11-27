@@ -11,7 +11,7 @@ for _ in range(ncmds):
         vmaddr, vmsize, fileoff, filesize = struct.unpack_from('<QQQQ', d, off + 24)
         if vmaddr <= va < vmaddr + filesize:
             fo = fileoff + (va - vmaddr); code = d[fo:fo + n]
-            words = struct.unpack('<%dI' % (len(code) // 4), code)
+            words = struct.unpack_from('<%dI' % (len(code) // 4), code)    # (the whole instructions of a length that is not a multiple of 4)
             import tempfile, os
             t = tempfile.mkdtemp()
             open(t + '/c.s', 'w').write('.text\n.globl _x\n_x:\n' + ''.join('.inst 0x%08x\n' % w for w in words))
