@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# The XNU patch series (xnu-patches/*.patch) applies, in order, to the tree the build applies it to, and every hunk is as
+# long as its header says: tests/xnu-patches/apply.sh. Nothing is compiled (git and python3 only, a few seconds), so a
+# change to the series is checked here before anybody builds a kernel from it.
+name: xnu-patches
+on:
+  push:
+    paths:
+      - .github/workflows/xnu-patches.yml
+      - tests/xnu-patches/**
+      - xnu-patches/**
+  pull_request:
+    paths:
+      - .github/workflows/xnu-patches.yml
+      - tests/xnu-patches/**
+      - xnu-patches/**
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: The series applies to the k27 tree
+        run: bash tests/xnu-patches/apply.sh
