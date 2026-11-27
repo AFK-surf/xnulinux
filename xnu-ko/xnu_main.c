@@ -2377,6 +2377,7 @@ static void xnu_cleanup(void)
 static int __init xnu_init(void)
 {
 	const void *data; unsigned long size;
+	u64_t extra;
 	int err;
 
 	if (fki_version() != FKI_VERSION)
@@ -2429,7 +2430,13 @@ static int __init xnu_init(void)
 	}
 	err = fki_blob_get(image, &data, &size, &blob);
 	if (err) { logkv("xnu: cannot read image, err", (u64_t)err); goto fail; }
-	err = macho_load(&img, data, size, mode == 3 ? ~0UL : mode == 2 ? (unsigned long)ram_mb << 20 : 0);
+	/*
+	 * run_m2a's region (every mode but 1 and 3): the image, room for the boot data build_boot puts after it (run_m2b's
+	 * sum), then ram_mb. The RAM alone left a RAM disk or a framebuffer larger than it to be written past the region.
+	 */
+	extra = 0x60000 + BOOT_EXTRA + ((u64_t)ram_mb << 20);
+	if (extra < BOOT_EXTRA) { logs("xnu: ram_mb overflow"); err = -22; goto fail; }
+	err = macho_load(&img, data, size, mode == 3 ? ~0UL : mode == 1 ? 0 : (unsigned long)extra);
 	if (err) { logkv("xnu: load failed", (u64_t)err); goto fail; }
 	logkv("xnu: image vmlow", img.vmlow);
 	logkv("xnu: image size", img.vmhigh - img.vmlow);
