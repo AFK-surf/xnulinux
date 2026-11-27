@@ -56,6 +56,14 @@
 - (NSString *)name;
 @end
 
+@protocol XcmTextureViewDescriptor   // MTLTextureViewDescriptor (macOS 26) by its getters: an older SDK has no such class
+- (MTLPixelFormat)pixelFormat;
+- (MTLTextureType)textureType;
+- (NSRange)levelRange;
+- (NSRange)sliceRange;
+- (MTLTextureSwizzleChannels)swizzle;
+@end
+
 static bool xcmTraceOn() { static bool on = getenv("XNU_CPU_METAL_TRACE") != nullptr; return on; }
 
 static NSError *xcmError(NSString *domain, NSInteger code, const char *fallback) {
@@ -695,6 +703,11 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
                                         swizzle:(MTLTextureSwizzleChannels)swizzle {
     (void)swizzle;
     return [self newTextureViewWithPixelFormat:pixelFormat textureType:textureType levels:levelRange slices:sliceRange];
+}
+- (id<MTLTexture>)newTextureViewWithDescriptor:(id<XcmTextureViewDescriptor>)d {   // macOS 26's form of the same call
+    if (!d) return nil;
+    return [self newTextureViewWithPixelFormat:d.pixelFormat textureType:d.textureType levels:d.levelRange slices:d.sliceRange
+                                       swizzle:d.swizzle];
 }
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }
