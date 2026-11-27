@@ -344,6 +344,19 @@ static int c_logkv(void)	/* a key longer than the line is cut: 108 characters of
 	return strlen(last_log) != 108 + 3 + 16;
 }
 
+/* bootargs longer than what XNU's command line has left were dropped whole, in silence, and the system started without them */
+static int c_bootargs_long(void)
+{
+	static char args[901];
+
+	memset(args, 'a', sizeof(args) - 1);
+	kernel(KV + 0x1000, FIXUP); bootargs = args;
+	if (insmod(-22, 0)) return 1;
+	if (strncmp(last_log, "xnu: bootargs do not fit in XNU's command line", 46)) { printf("test: the last log line is \"%s\"\n", last_log); return 1; }
+	return 0;
+}
+static int c_bootargs(void) { kernel(KV + 0x1000, FIXUP); bootargs = "-v debug=0x14e serial=3"; return insmod(0, rebased); }
+
 static const struct { const char *what; int (*run)(void); } cases[] = {
 	{ "mode 2 with the defaults: a bare kernel loads, its threaded fixups applied", c_defaults },
 	{ "mode 2, ram_mb=4: the framebuffer is inside the region", c_ram4 },
@@ -356,6 +369,8 @@ static const struct { const char *what; int (*run)(void); } cases[] = {
 	{ "a Mach-O header outside the image is refused", c_header },
 	{ "EL0 host: the log line for corecrypto patches that are not the expected two", c_fips },
 	{ "a log key longer than the line is cut", c_logkv },
+	{ "bootargs that do not fit XNU's command line are refused, and said", c_bootargs_long },
+	{ "bootargs that fit load as before", c_bootargs },
 };
 
 int main(void)
