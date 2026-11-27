@@ -8,6 +8,8 @@
 // 5. Ring buffer: concurrent CPU write to slice N+1 while GPU executes on slice N.
 // 6. Calling [buf contents] before commit and inside addCompletedHandler: never blocks or deadlocks.
 // 7. 33 MB wallpaper-sized NoCopy buffer submitted 10 times with 0 per-commit copies (proven by xcmNoCopyStats).
+// 9. The memory of a NoCopy buffer is the caller's: in the deallocator and after the buffer is gone it holds what the
+//    program put there and what the GPU wrote (as on Apple's device: this one also passes with "default").
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -439,6 +441,55 @@ static int test8_NoDeallocatorConcurrentUnmapNoGuardCrash(id<MTLDevice> dev) {
     return 0;
 }
 
+static int test9_CallerMemoryKeptAfterRelease(id<MTLDevice> dev) {
+    // A deallocator need not free the memory: it may only learn that Metal is done with it (the memory belongs to an
+    // NSData, a pool, a mapping the program goes on using), and the program may read the GPU's results from it.
+    size_t len = 2 * (size_t)vm_page_size, words = len / 4;
+    uint32_t *mem = (uint32_t *)mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (mem == MAP_FAILED) { fprintf(stderr, "FAIL [9/9]: mmap failed\n"); return 1; }
+    for (size_t i = 0; i < words; i++) mem[i] = 0xA5000000u | (uint32_t)i;
+    static uint32_t seen[3];
+    static std::atomic<int> fired{0};
+    @autoreleasepool {
+        id<MTLBuffer> buf = [dev newBufferWithBytesNoCopy:mem length:len options:MTLResourceStorageModeShared
+                                              deallocator:^(void *p, NSUInteger l) {
+            const uint32_t *m = (const uint32_t *)p;   // the program keeps the memory: it only looks
+            seen[0] = m[0]; seen[1] = m[100]; seen[2] = m[l / 4 - 1];
+            fired.fetch_add(1);
+        }];
+        if (!buf) { fprintf(stderr, "FAIL [9/9]: alloc nil\n"); return 1; }
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit fillBuffer:buf range:NSMakeRange(400, 4) value:0x7F];   // word 100: the GPU's part
+        [blit endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (mem[0] != 0xA5000000u || mem[100] != 0x7F7F7F7Fu) {
+            fprintf(stderr, "FAIL [9/9]: while the buffer lives the memory holds [0]=0x%08x [100]=0x%08x\n", mem[0], mem[100]);
+            return 1;
+        }
+    }
+    for (int i = 0; i < 2000 && !fired.load(); i++) usleep(1000);   // the last reference may go on another thread
+    const uint32_t last = 0xA5000000u | (uint32_t)(words - 1);
+    if (fired.load() != 1 || seen[0] != 0xA5000000u || seen[1] != 0x7F7F7F7Fu || seen[2] != last) {
+        fprintf(stderr, "FAIL [9/9]: the deallocator ran %d time(s) and saw [0]=0x%08x [100]=0x%08x [last]=0x%08x (expected 0xa5000000, 0x7f7f7f7f, 0x%08x)\n",
+                fired.load(), seen[0], seen[1], seen[2], last);
+        return 1;
+    }
+    if (mem[0] != 0xA5000000u || mem[100] != 0x7F7F7F7Fu || mem[words - 1] != last) {
+        fprintf(stderr, "FAIL [9/9]: after the buffer is gone the memory holds [0]=0x%08x [100]=0x%08x [last]=0x%08x (expected 0xa5000000, 0x7f7f7f7f, 0x%08x)\n",
+                mem[0], mem[100], mem[words - 1], last);
+        return 1;
+    }
+    mem[1] = 0x12345678u;   // and it is still the program's to write
+    bool writable = mem[1] == 0x12345678u;
+    munmap(mem, len);
+    if (!writable) { fprintf(stderr, "FAIL [9/9]: the memory does not take a write after the buffer is gone\n"); return 1; }
+    printf("PASS [9/9]: a NoCopy buffer's memory keeps the program's data and the GPU's in the deallocator and after the buffer is gone\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         const char *bundlePath = (argc > 1) ? argv[1] : getenv("XNU_CPU_METAL_BUNDLE");
@@ -455,6 +506,7 @@ int main(int argc, char **argv) {
         rc |= test6_ContentsNeverBlocks(dev);
         rc |= test7_Wallpaper33MBZeroCopy(dev);
         rc |= test8_NoDeallocatorConcurrentUnmapNoGuardCrash(dev);
+        rc |= test9_CallerMemoryKeptAfterRelease(dev);
         if (rc == 0) printf("ALL ROUND 20 TESTS PASSED!\n");
         return rc;
     }
