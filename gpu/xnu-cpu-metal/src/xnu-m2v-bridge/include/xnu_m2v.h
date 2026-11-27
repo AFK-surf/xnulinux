@@ -129,6 +129,7 @@ typedef struct Xm2vSamplerDesc {
     uint64_t s_address_mode;
     uint64_t t_address_mode;
     uint64_t r_address_mode;
+    uint64_t border_color;
     uint64_t max_anisotropy;
     uint64_t compare_function;
     float lod_min_clamp;

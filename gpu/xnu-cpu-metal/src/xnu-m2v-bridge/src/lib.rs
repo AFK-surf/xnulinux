@@ -24,7 +24,7 @@ use metal2vulkan_runtime::{
     PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState,
     ResourceOptions, ResourceRef, SamplerState, ScissorRect, ShaderCacheOptions, SharedEvent,
     SharedEventHandle, SharedEventListener, Size, StoreAction, SurfaceYCbCrMatrix, Texture,
-    TextureDescriptor, Viewport,
+    TextureDescriptor, Viewport, sampler_border_color,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
@@ -259,6 +259,7 @@ pub struct Xm2vSamplerDesc {
     pub s_address_mode: u64,
     pub t_address_mode: u64,
     pub r_address_mode: u64,
+    pub border_color: u64,
     pub max_anisotropy: u64,
     pub compare_function: u64,
     pub lod_min_clamp: f32,
@@ -1408,6 +1409,9 @@ pub extern "C" fn xm2v_sampler_new(
         sd.s_address_mode = raw_enum::<SamplerAddressMode>(d.s_address_mode, "SAddressMode")?;
         sd.t_address_mode = raw_enum::<SamplerAddressMode>(d.t_address_mode, "TAddressMode")?;
         sd.r_address_mode = raw_enum::<SamplerAddressMode>(d.r_address_mode, "RAddressMode")?;
+        // Metal makes a sampler of any raw border colour: it keeps the low two bits, and 3, which
+        // names no colour, samples transparent black. So nothing is refused here.
+        sd.border_color = sampler_border_color(d.border_color);
         sd.max_anisotropy = (d.max_anisotropy.max(1)) as u32;
         sd.compare_function = raw_enum::<CompareFunction>(d.compare_function, "CompareFunction")?;
         sd.lod_min_clamp = d.lod_min_clamp;

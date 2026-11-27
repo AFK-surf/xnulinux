@@ -3268,6 +3268,7 @@ static id xcmDev_newSampler(id self, SEL, MTLSamplerDescriptor *desc) {
     sd.s_address_mode = (uint64_t)desc.sAddressMode;
     sd.t_address_mode = (uint64_t)desc.tAddressMode;
     sd.r_address_mode = (uint64_t)desc.rAddressMode;
+    sd.border_color = (uint64_t)desc.borderColor;
     sd.max_anisotropy = desc.maxAnisotropy;
     sd.compare_function = (uint64_t)desc.compareFunction;
     sd.lod_min_clamp = desc.lodMinClamp;
