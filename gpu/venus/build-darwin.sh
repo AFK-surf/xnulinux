@@ -10,11 +10,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 MESA=26.3.1
 ARCHS=${ARCHS:-arm64 arm64e}
 W=${W:-$HOME/w/venus-darwin}; OUT=${OUT:-$W/out}; mkdir -p "$W"; cd "$W"
+UV=$(command -v uv || true)	# before PATH is narrowed: uv's own installer puts it in ~/.local/bin
 export PATH=$W/venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # Mesa wants Python >= 3.10 (macOS ships 3.9): uv's own when there is uv, else Homebrew's
 if ! { [ -x venv/bin/meson ] && venv/bin/python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))'; }; then
   rm -rf venv
-  if command -v uv >/dev/null; then uv venv -q -p 3.13 venv && VIRTUAL_ENV=$W/venv uv pip install -q meson ninja mako pyyaml packaging
+  if [ -n "$UV" ]; then "$UV" venv -q -p 3.13 venv && VIRTUAL_ENV=$W/venv "$UV" pip install -q meson ninja mako pyyaml packaging
   else /opt/homebrew/bin/python3 -m venv venv && venv/bin/pip -q install meson ninja mako pyyaml packaging; fi
 fi
 [ -f mesa-$MESA.tar.xz ] || curl -sSLo mesa-$MESA.tar.xz https://archive.mesa3d.org/mesa-$MESA.tar.xz
