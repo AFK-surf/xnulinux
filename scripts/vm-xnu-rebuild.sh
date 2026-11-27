@@ -35,6 +35,7 @@ rm -rf $T/osfmk/corecrypto $T/osfmk/arm64/corecrypto
 mirror "$P"/corecrypto/include/corecrypto $T/EXTERNAL_HEADERS/corecrypto
 mirror "$P"/corecrypto/kernel $T/osfmk/xnulinux_crypto
 t=$SECONDS; JOBS=12 bash k27/build-kernel27.sh 2>&1 | tail -15; echo "kernel: $((SECONDS - t)) s"
+sudo mkdir -p /lib/firmware/xnu	# where xnu.ko takes the kernel and the collection from: a new host has none
 if [ -e out/kc/kc27.bin ]; then
   cp k27/segaddrs.sh /tmp/segaddrs.before
   python3 k27/kc27-layout.py out/kc/kc27.bin out/k27/kernel-k27.macho --write k27/segaddrs.sh | tail -2
