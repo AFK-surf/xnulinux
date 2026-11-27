@@ -1,0 +1,78 @@
+Upstream: Mesa 26.3.1 (https://archive.mesa3d.org/mesa-26.3.1.tar.xz)
+Upstream-License: MIT
+Patch-License: MIT (provided under the same license as upstream)
+Subject: venus: wait with the CPU, not with sched_yield(), on macOS
+
+vn_relax() yields 255 times (a reply from the renderer) or 15 times (a semaphore, a query, ring space) before it
+sleeps. On macOS sched_yield() is swtch_pri(): the thread is depressed to the lowest priority until the other runnable
+threads have run. A round trip to the renderer takes 20 us on an idle system; with four busy threads beside it the same
+two round trips of an uncached vkCreateBuffer took 20 ms (0.11 ms with this patch), and WindowServer's main thread sat
+runnable in swtch_pri for an eighth of its time while a window moved.
+
+On macOS the wait before the first sleep is now a spin on the clock: VN_BUSY_WAIT_US microseconds (25 by default)
+where 15 yields were, 16 times that where 255 were; 0 gives the yields back. The sleeps after it are unchanged.
+
+--- a/src/virtio/vulkan/vn_common.c	2026-11-26 13:27:47
++++ b/src/virtio/vulkan/vn_common.c	2026-11-26 13:27:47
+@@ -11,6 +11,9 @@
+ #include "vn_common.h"
+ 
+ #include <stdarg.h>
++#ifdef __APPLE__
++#include <mach/mach_time.h>
++#endif
+ 
+ #include "util/log.h"
+ #include "util/os_misc.h"
+@@ -251,6 +254,39 @@
+    const uint32_t abort_order = state->profile.abort_order;
+ 
+    uint32_t *iter = &state->iter;
++#ifdef __APPLE__
++   /* sched_yield() is swtch_pri() here: it depresses the thread to the lowest
++    * priority until the other runnable threads have run, which on a busy
++    * system is milliseconds for a reply that takes microseconds. Wait with
++    * the CPU instead, for a time that covers a renderer round trip
++    * (VN_BUSY_WAIT_US, 0 for the yields), then sleep as elsewhere.
++    */
++   if (*iter == 0) {
++      static uint64_t ticks_per_us;
++      static int busy_us = -1;
++      if (busy_us < 0) {
++         mach_timebase_info_data_t tb;
++         mach_timebase_info(&tb);
++         ticks_per_us = MAX2((uint64_t)1000 * tb.denom / tb.numer, 1);
++         const char *env = os_get_option("VN_BUSY_WAIT_US");
++         busy_us = env ? MAX2(atoi(env), 0) : 25;
++      }
++      /* 255 yields wait for a reply, 15 for work of unknown length */
++      state->busy_end =
++         busy_us ? mach_absolute_time() +
++                      ((uint64_t)busy_us << (busy_wait_order - 4)) * ticks_per_us
++                 : 0;
++   }
++   if (state->busy_end) {
++      if (mach_absolute_time() < state->busy_end) {
++         for (int i = 0; i < 8; i++)
++            __asm__ volatile("yield");
++         return;
++      }
++      state->busy_end = 0;
++      *iter = (1 << busy_wait_order) - 1;
++   }
++#endif
+    (*iter)++;
+    if (*iter < (1 << busy_wait_order)) {
+       thrd_yield();
+--- a/src/virtio/vulkan/vn_common.h	2026-11-26 13:27:47
++++ b/src/virtio/vulkan/vn_common.h	2026-11-26 13:27:47
+@@ -275,6 +275,9 @@
+    const struct vn_relax_profile profile;
+    const char *reason_str;
+    bool warn;
++#ifdef __APPLE__
++   uint64_t busy_end; /* mach_absolute_time() where the busy wait ends */
++#endif
+ };
+ 
+ /* TLS ring
