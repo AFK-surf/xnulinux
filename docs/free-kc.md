@@ -62,7 +62,8 @@ Apple's kexts from their own copy of macOS into a collection of their own, and c
    `scripts/apple-kc/link.sh KIT`. It reads macOS 27.2's `kernelcache.release.vma2` straight from Apple's IPSW (its URL
    is in `kit.json`; only that member is downloaded, with HTTP range requests), links the collection with
    `scripts/kclink` and installs it as `/lib/firmware/xnu/kc-apple.bin`. A second argument gives the
-   kernelcache instead: an IPSW or its URL, the IM4P, or that unpacked (`scripts/apple-kc/im4p.py`). The collection is
+   kernelcache instead: an IPSW or its URL, the IM4P, the kernelcache file of an installed macOS (an IMG4), or that
+   unpacked (`scripts/apple-kc/im4p.py`; a file that is cut short or damaged is refused). The collection is
    the one `vm-xnu-rebuild.sh` links from the same kernelcache, byte for byte. Another kernelcache is refused: the
    kernel's segment slots were laid out for that one.
 3. `IMAGE=xnu/kc-apple.bin scripts/xnulinux-boot.sh` boots macOS on it; `IMAGE=xnu/kc-free.bin` boots PureDarwin.
