@@ -130,6 +130,7 @@ EXPORT_SYMBOL(fki_hostcall);
 /* The service: read() the next request, prefixed with its 8-byte sequence number. */
 static ssize_t hc_read(struct file *f, char __user *buf, size_t n, loff_t *off)
 {
+	unsigned long len;
 	u64 seq;
 	int err;
 
@@ -137,18 +138,24 @@ static ssize_t hc_read(struct file *f, char __user *buf, size_t n, loff_t *off)
 	if (err)
 		return err;
 	spin_lock(&hc_lock);
-	if (hc_state != 1) {
+	if (hc_state != 1 || n < 8 + hc_len) {
+		err = hc_state != 1 ? -EAGAIN : -EMSGSIZE;	/* too small a buffer: the request stays, for a read() with room */
 		spin_unlock(&hc_lock);
-		return -EAGAIN;
+		return err;
 	}
 	hc_state = 2;
 	seq = hc_seq;
+	len = hc_len;
 	spin_unlock(&hc_lock);
-	if (n < 8 + hc_len)
-		return -EMSGSIZE;
-	if (copy_to_user(buf, &seq, 8) || copy_to_user(buf + 8, hc_buf, hc_len))
-		return -EFAULT;
-	return 8 + hc_len;
+	if (copy_to_user(buf, &seq, 8) || copy_to_user(buf + 8, hc_buf, len))
+		err = -EFAULT;
+	spin_lock(&hc_lock);
+	if (err && hc_state == 2 && hc_seq == seq)
+		hc_state = 1;		/* not delivered: the next read() gets it */
+	spin_unlock(&hc_lock);
+	if (err)
+		wake_up_interruptible(&hc_req_wait);
+	return err ? err : 8 + len;
 }
 
 /* The service: write() the reply, prefixed with the request's sequence number. */
