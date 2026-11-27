@@ -193,6 +193,19 @@ module_param(preboot_uuid, charp, 0444);
 static char *root_uuid;
 module_param(root_uuid, charp, 0444);
 static char root_matching[256];
+/* One of the three as XNU takes it (uuid_parse: kern.bootuuid, kern.apfsprebootuuid): 8-4-4-4-12 hexadecimal digits; an empty one is none */
+static int uuid_ok(const char *s)
+{
+	int i;
+
+	if (!s || !s[0]) return 1;
+	for (i = 0; s[i] && i < 36; i++) {
+		char c = s[i];
+		if (i == 8 || i == 13 || i == 18 || i == 23 ? c != '-' : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+			return 0;
+	}
+	return i == 36 && !s[i];
+}
 static void *in_file; static fki_u64 in_off;
 struct xnu_world xnu_W;
 
@@ -1237,10 +1250,11 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 		x_memcpy(root_matching + sizeof(pre) - 1, root_uuid, 36);
 		x_memcpy(root_matching + sizeof(pre) - 1 + 36, post, sizeof(post));
 	}
-	adt_node(&a, 22 + (boot_uuid ? 1 : 0) + (preboot_uuid ? 1 : 0) + (root_matching[0] ? 1 : 0), 3);	/* /chosen */
+	/* (an empty boot_uuid went in as it was, and XNU waited for the root volume of that UUID) */
+	adt_node(&a, 22 + (boot_uuid && boot_uuid[0] ? 1 : 0) + (preboot_uuid && preboot_uuid[0] ? 1 : 0) + (root_matching[0] ? 1 : 0), 3);	/* /chosen */
 	if (root_matching[0]) adt_prop_str(&a, "root-matching", root_matching);
-	if (boot_uuid) adt_prop_str(&a, "boot-uuid", boot_uuid);
-	if (preboot_uuid) adt_prop_str(&a, "apfs-preboot-uuid", preboot_uuid);
+	if (boot_uuid && boot_uuid[0]) adt_prop_str(&a, "boot-uuid", boot_uuid);
+	if (preboot_uuid && preboot_uuid[0]) adt_prop_str(&a, "apfs-preboot-uuid", preboot_uuid);
 	adt_prop_str(&a, "name", "chosen");
 	adt_prop_u64(&a, "dram-base", phys);
 	adt_prop_u64(&a, "dram-size", size);
@@ -2403,6 +2417,11 @@ static int __init xnu_init(void)
 	/* (up to 65536 was taken, and the hosted kernel panicked on the memory once the host had found it) */
 	if (ram_mb <= 0 || (u64_t)ram_mb << 20 >= XNU_MEM_MAX) {
 		logkv("xnu: ram_mb must be 1 or more, and less than (MiB)", XNU_MEM_MAX >> 20);
+		return -22;
+	}
+	/* (one that is not: root_uuid was left out without a word, the two others went to XNU, which does not take them) */
+	if (!uuid_ok(root_uuid) || !uuid_ok(boot_uuid) || !uuid_ok(preboot_uuid)) {
+		logs("xnu: root_uuid, boot_uuid and preboot_uuid are UUIDs: 8-4-4-4-12 hexadecimal digits");
 		return -22;
 	}
 	el0_mode = !!(fki_caps() & FKI_CAP_EL0);

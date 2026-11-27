@@ -821,6 +821,20 @@ static int c_uuids(void)
 	preboot_uuid = (char *)(want.preboot_uuid = UUID2);
 	return insmod(0, handed);
 }
+static int c_uuids_empty(void) { small(); root_uuid = ""; boot_uuid = ""; preboot_uuid = ""; return insmod(0, handed); }	/* unset variables: none */
+static int refused_uuid(void)	/* (where it loads all the same: what XNU would find of it) */
+{
+	if (insmod(-22, handed)) return 1;
+	if (!strstr(last_log, "UUID")) { printf("test: the last log line does not say why: \"%s\"\n", last_log); return 1; }
+	return 0;
+}
+static int c_root_uuid_short(void) { small(); root_uuid = (char *)(want.root_uuid = "0F9D5B7A-3C41-4E0B-9A6D-52E1C7B8A93"); return refused_uuid(); }
+static int c_boot_uuid_long(void) { small(); boot_uuid = (char *)(want.boot_uuid = UUID2 "-0001"); return refused_uuid(); }
+static int c_preboot_uuid_bad(void)
+{
+	small(); preboot_uuid = (char *)(want.preboot_uuid = "6b1e2c3d-4f50-4a61-8b72-93a4b5c6d7eZ");
+	return refused_uuid();
+}
 
 /* the RAM disk and the static trust cache: in XNU's memory, described in /chosen/memory-map; rd=md0 */
 static unsigned char *bytes(unsigned long n, unsigned seed)
@@ -1207,6 +1221,10 @@ static const struct { const char *what; int (*run)(void); } cases[] = {
 	{ "a model of 78 characters: the last that fits the root's compatible", c_model_78 },
 	{ "a soc_name the device tree has no room for is refused", c_name_huge },
 	{ "root_uuid, boot_uuid and preboot_uuid: root-matching, boot-uuid, apfs-preboot-uuid", c_uuids },
+	{ "the three given empty: no property", c_uuids_empty },
+	{ "a root_uuid of 35 characters is refused, and said", c_root_uuid_short },
+	{ "a boot_uuid of 41 characters is refused, and said", c_boot_uuid_long },
+	{ "a preboot_uuid that is not hexadecimal is refused, and said", c_preboot_uuid_bad },
 	{ "a RAM disk and a trust cache: in XNU's memory, in /chosen/memory-map, rd=md0", c_blobs },
 	{ "a trust cache that ends on a page, no framebuffer", c_tc_only },
 	{ "hostdisk: rd=md0 and no RAMDisk", c_hostdisk },
