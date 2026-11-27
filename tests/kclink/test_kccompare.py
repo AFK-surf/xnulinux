@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """scripts/kclink/kccompare.py on collections that are the same and on ones made to differ in one thing: a word of a
 kext's code, a byte of a string, where a pointer goes, how it is signed, a kext's zero-filled data, a byte of the
-kernel, a kext's entry in the prelink info. The collections are those of mkcollection.py.
+kernel, a kext's entry in the prelink info, a kext that only one has, the size of a segment of the collection, a key
+of the prelink info itself. The collections are those of mkcollection.py.
 
     python3 tests/kclink/test_kccompare.py
 """
@@ -101,6 +102,35 @@ class Compared(unittest.TestCase):
         spec = dict(SPEC_ONE, libraries={'com.apple.kpi.libkern': '9.0'})
         line = self.one_difference(self.link('b.kc', spec_one=spec), f'prelink info {ONE}: ')
         self.assertIn("('OSBundleLibraries', {'com.apple.kpi.libkern': '8.0'}, {'com.apple.kpi.libkern': '9.0'})", line)
+
+    def test_a_kext_that_only_one_has(self):
+        """Its entry in the collection and its entry in the prelink info: two differences, not none."""
+        w = self.w
+        status, out, err = w.link('--native', w.native(SPEC_ONE, kext_one()), output='b.kc')
+        self.assertEqual((status, err), (0, ''))
+        for a, b in (('a.kc', 'b.kc'), ('b.kc', 'a.kc')):
+            self.assertEqual(self.compare(a, b), [f"  entries in one only: ['{THREE}']",
+                                                  f"prelink info: entries in one only: ['{THREE}']", '2 differences'])
+
+    def test_a_segment_of_the_collection(self):
+        """A prelink info of two pages where the other's has one: __PRELINK_INFO is another size."""
+        spec = dict(SPEC_ONE, plist={'Padding': 'x' * 0x4000})
+        lines = self.compare('a.kc', self.link('b.kc', spec_one=spec))
+        self.assertEqual(len(lines), 3, lines)
+        self.assertEqual(lines[0], f'  segment __PRELINK_INFO {BASE + 0x40000:#x}+0x4000 / __PRELINK_INFO '
+                                   f'{BASE + 0x40000:#x}+0x8000')
+        self.assertTrue(lines[1].startswith(f"prelink info {ONE}: [('Padding', None, 'xxxx"), lines[1])
+        self.assertEqual(lines[2], '2 differences')
+
+    def test_a_key_of_the_prelink_info_itself(self):
+        template = self.w.read('template.kc')
+        self.assertEqual(template.count(b'xnulinux-free-kc'), 1)
+        self.w.write('other.kc', template.replace(b'xnulinux-free-kc', b'xnulinux-free-kd'))
+        w = self.w
+        status, out, err = w.link('--native', w.native(SPEC_ONE, kext_one()),
+                                  w.native(SPEC_THREE, kext_three('_kernel_data')), base='other.kc', output='b.kc')
+        self.assertEqual((status, err), (0, ''))
+        self.assertEqual(self.compare('a.kc', 'b.kc'), ['prelink info: top-level keys differ', '1 differences'])
 
 
 if __name__ == '__main__':
