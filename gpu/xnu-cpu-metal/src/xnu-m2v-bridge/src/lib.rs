@@ -702,6 +702,22 @@ pub extern "C" fn xm2v_texture_gpu_resource_id(tex: *const Texture) -> u64 {
     guard(0, || Ok(get(tex)?.gpu_resource_id().0))
 }
 
+// How much of the caller's memory a replaceRegion or getBytes may reach: Metal passes no length,
+// and metal2vulkan touches the region's rows alone. Metal takes a bytesPerRow of 0 (a PVRTC
+// texture takes no other): every row then lies at the image's first byte, or the level's blocks
+// lie packed. No format holds more than 16 bytes a texel.
+fn region_len(w: u64, h: u64, d: u64, bytes_per_row: u64, bytes_per_image: u64) -> usize {
+    let row = match bytes_per_row {
+        0 => w.max(1) * 16,
+        row => row,
+    };
+    let image = match bytes_per_image {
+        0 => row * h.max(1),
+        image => image,
+    };
+    (image * d.max(1)) as usize
+}
+
 #[no_mangle]
 pub extern "C" fn xm2v_texture_replace_region(
     tex: *const Texture,
@@ -722,12 +738,8 @@ pub extern "C" fn xm2v_texture_replace_region(
         if bytes.is_null() {
             return Err("null bytes".to_string());
         }
-        let total = if bytes_per_image > 0 {
-            bytes_per_image * d.max(1)
-        } else {
-            bytes_per_row * h.max(1) * d.max(1)
-        };
-        let src = unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), total as usize) };
+        let total = region_len(w, h, d, bytes_per_row, bytes_per_image);
+        let src = unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), total) };
         let region = Region::new_3d(x, y, z, w, h, d);
         tex.replace_region(region, mip_level, slice, src, bytes_per_row, bytes_per_image)
             .map_err(|e| format!("replace_region: {e:?}"))?;
@@ -755,12 +767,8 @@ pub extern "C" fn xm2v_texture_get_bytes(
         if out_bytes.is_null() {
             return Err("null out_bytes".to_string());
         }
-        let total = if bytes_per_image > 0 {
-            bytes_per_image * d.max(1)
-        } else {
-            bytes_per_row * h.max(1) * d.max(1)
-        };
-        let dst = unsafe { std::slice::from_raw_parts_mut(out_bytes.cast::<u8>(), total as usize) };
+        let total = region_len(w, h, d, bytes_per_row, bytes_per_image);
+        let dst = unsafe { std::slice::from_raw_parts_mut(out_bytes.cast::<u8>(), total) };
         let region = Region::new_3d(x, y, z, w, h, d);
         tex.get_bytes(dst, bytes_per_row, bytes_per_image, region, mip_level, slice)
             .map_err(|e| format!("get_bytes: {e:?}"))?;
