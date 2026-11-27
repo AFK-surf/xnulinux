@@ -16,10 +16,14 @@ if [ "${1:-}" = remove ]; then
   # the VM as the agent runs it: the SSH_PORT and KRUN written into the agent at install, unless the environment says
   setting() { local v; v=$([ -f "$PL" ] && /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$1" "$PL" 2>/dev/null) && echo "$v" || true; }
   SSH_PORT=${SSH_PORT:-$(setting SSH_PORT)}; KRUN=${KRUN:-$(setting KRUN)}
+  # The wait is for one of the krunkits that run now to end: the VM that is told to power off. The moment it has, launchd
+  # starts the VM again (KeepAlive): a wait for no krunkit at all met that one, sat out its two minutes, and the agent's
+  # removal then killed a guest that had just booted.
+  K=$(pgrep -f "${KRUN:-$HOME/.local/krunkit}/bin/krunkit" || true)
   # a clean guest shutdown first (the hosted macOS's disk synced by xnulinux.service), then the agent
   ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -p "${SSH_PORT:-2223}" \
     ${VMKEY:+-i "$VMKEY"} admin@127.0.0.1 'sudo systemctl poweroff' 2>/dev/null || true
-  for _ in $(seq 1 120); do pgrep -f "${KRUN:-$HOME/.local/krunkit}/bin/krunkit" >/dev/null || break; sleep 1; done
+  for _ in $(seq 1 600); do [ -n "$K" ] || break; for p in $K; do kill -0 "$p" 2>/dev/null || break 2; done; sleep 0.2; done
   launchctl bootout "$(domain)/$L" 2>/dev/null || true
   rm -f "$PL"; echo "removed"; exit 0
 fi
