@@ -118,11 +118,13 @@ class Kext:
                 out.pieces.append((oi, si, off))
                 out.size, out.align = off + s.size, max(out.align, s.align)
                 o.where[si] = (out, off)
-        # common symbols: zero-filled storage in __DATA,__common
+        # common symbols: zero-filled storage in __DATA,__common (but for one an object defines: that is the symbol)
         common = {}
+        defined = {n for o in self.objs for n, t, sc, d, v in o.syms
+                   if not t & N_STAB and t & (N_EXT | N_PEXT) and (t & N_TYPE) == N_SECT}
         for o in self.objs:
             for n, t, sc, d, v in o.syms:
-                if not t & N_STAB and (t & N_TYPE) == N_UNDF and t & N_EXT and v:
+                if not t & N_STAB and (t & N_TYPE) == N_UNDF and t & N_EXT and v and n not in defined:
                     size, al = common.get(n, (0, 0))
                     common[n] = (max(size, v), max(al, (d >> 8) & 0xf))
         if common:
