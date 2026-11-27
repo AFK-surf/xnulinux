@@ -2011,6 +2011,27 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     xm2v_blit_encoder_copy_texture_to_texture(_handle, ((XcmTexture *)src)->_handle, ss, sl,
         so.x, so.y, so.z, sz.width, sz.height, sz.depth, ((XcmTexture *)dst)->_handle, ds, dl, do_.x, do_.y, do_.z);
 }
+// Metal's two copies of whole surfaces. metal2vulkan pairs the levels and the slices as Metal does (a cube's faces are slices).
+- (BOOL)xcmWholeCopyFrom:(id<MTLTexture>)src to:(id<MTLTexture>)dst {
+    if (!_handle || !src || !dst || ![(id)src isKindOfClass:[XcmTexture class]] || ![(id)dst isKindOfClass:[XcmTexture class]]) return NO;
+    [_cmdBuf retainResource:src]; [_cmdBuf retainResource:dst];
+    [(XcmTexture *)src syncFromIOSurfaceIfNeeded];
+    if (((XcmTexture *)dst)->_iosurface) {
+        [(XcmTexture *)dst syncFromIOSurfaceIfNeeded];   // the copy may cover a part; the write-back covers all
+        [_cmdBuf markDirtyIOSurfaceTexture:(XcmTexture *)dst];
+    }
+    return YES;
+}
+- (void)copyFromTexture:(id<MTLTexture>)src sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
+              toTexture:(id<MTLTexture>)dst destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl
+             sliceCount:(NSUInteger)slices levelCount:(NSUInteger)levels {
+    if ([self xcmWholeCopyFrom:src to:dst])
+        xm2v_blit_encoder_copy_texture_slices(_handle, ((XcmTexture *)src)->_handle, ss, sl, ((XcmTexture *)dst)->_handle, ds, dl, slices, levels);
+}
+- (void)copyFromTexture:(id<MTLTexture>)src toTexture:(id<MTLTexture>)dst {
+    if ([self xcmWholeCopyFrom:src to:dst])
+        xm2v_blit_encoder_copy_texture(_handle, ((XcmTexture *)src)->_handle, ((XcmTexture *)dst)->_handle);
+}
 - (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
     if (!_handle || !buffer || ![(id)buffer isKindOfClass:[XcmBuffer class]]) return;
     [_cmdBuf retainResource:buffer];

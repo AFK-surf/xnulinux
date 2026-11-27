@@ -2534,6 +2534,49 @@ pub extern "C" fn xm2v_blit_encoder_copy_texture_to_texture(
 }
 
 #[no_mangle]
+pub extern "C" fn xm2v_blit_encoder_copy_texture_slices(
+    enc: *mut BlitCommandEncoder,
+    src: *mut Texture,
+    src_slice: u64,
+    src_level: u64,
+    dst: *mut Texture,
+    dst_slice: u64,
+    dst_level: u64,
+    slice_count: u64,
+    level_count: u64,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .copy_texture_slices(
+                get(src)?,
+                src_slice,
+                src_level,
+                get(dst)?,
+                dst_slice,
+                dst_level,
+                slice_count,
+                level_count,
+            )
+            .map_err(|e| format!("copy_texture_slices: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_blit_encoder_copy_texture(
+    enc: *mut BlitCommandEncoder,
+    src: *mut Texture,
+    dst: *mut Texture,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .copy_texture(get(src)?, get(dst)?)
+            .map_err(|e| format!("copy_texture: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn xm2v_blit_encoder_fill_buffer(
     enc: *mut BlitCommandEncoder,
     buf: *mut Buffer,

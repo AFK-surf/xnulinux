@@ -367,6 +367,11 @@ bool xm2v_blit_encoder_copy_texture_to_texture(Xm2vBlitEncoder *enc,
                                                uint64_t w, uint64_t h, uint64_t d,
                                                Xm2vTexture *dst, uint64_t dst_slice, uint64_t dst_level,
                                                uint64_t dx, uint64_t dy, uint64_t dz);
+bool xm2v_blit_encoder_copy_texture_slices(Xm2vBlitEncoder *enc,
+                                           Xm2vTexture *src, uint64_t src_slice, uint64_t src_level,
+                                           Xm2vTexture *dst, uint64_t dst_slice, uint64_t dst_level,
+                                           uint64_t slice_count, uint64_t level_count);
+bool xm2v_blit_encoder_copy_texture(Xm2vBlitEncoder *enc, Xm2vTexture *src, Xm2vTexture *dst);
 bool xm2v_blit_encoder_fill_buffer(Xm2vBlitEncoder *enc, Xm2vBuffer *buf, uint64_t location, uint64_t length, uint8_t value);
 bool xm2v_blit_encoder_generate_mipmaps(Xm2vBlitEncoder *enc, Xm2vTexture *tex);
 bool xm2v_blit_encoder_synchronize_buffer(Xm2vBlitEncoder *enc, Xm2vBuffer *buf);
