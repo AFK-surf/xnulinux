@@ -650,7 +650,9 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
     desc.depth = MAX(1ul, _depth >> levelRange.location);
     desc.mipmapLevelCount = levelRange.length;
     desc.sampleCount = _sampleCount;
-    desc.arrayLength = sliceRange.length;
+    // arrayLength counts cubes for a cube type, and a cube is six of the slices
+    bool cubes = textureType == MTLTextureTypeCube || textureType == MTLTextureTypeCubeArray;
+    desc.arrayLength = cubes ? MAX(1ul, sliceRange.length / 6) : sliceRange.length;
     desc.usage = _usage;
     desc.resourceOptions = _options;
     XcmTexture *view = [[XcmTexture alloc] initWithHandle:vh device:_device descriptor:desc];
@@ -669,9 +671,10 @@ static bool xcmIOSurfacePlaneLayout(IOSurfaceRef surf, NSUInteger plane, NSUInte
     return (id<MTLTexture>)view;
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat {
+    bool cubes = _textureType == MTLTextureTypeCube || _textureType == MTLTextureTypeCubeArray;   // six slices each
     return [self newTextureViewWithPixelFormat:pixelFormat textureType:_textureType
                                         levels:NSMakeRange(0, _mipLevels)
-                                        slices:NSMakeRange(0, _arrayLength)];
+                                        slices:NSMakeRange(0, cubes ? _arrayLength * 6 : _arrayLength)];
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat
                                     textureType:(MTLTextureType)textureType
