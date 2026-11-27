@@ -2358,6 +2358,17 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
             os_log_error(OS_LOG_DEFAULT, "XnuCpuMetal: encodeWaitForEvent failed: %{public}s", xm2v_last_error() ?: "?");
     }
 }
+// Metal presents a drawable when its command buffer is scheduled. The scheduled handlers here run at completion, after
+// the texture went back into the drawable's IOSurface (_flushIOSurfacesOnce): the first moment its pixels can be shown.
+- (void)presentDrawable:(id<MTLDrawable>)drawable {
+    [self addScheduledHandler:^(id<MTLCommandBuffer>) { [drawable present]; }];
+}
+- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)presentationTime {
+    [self addScheduledHandler:^(id<MTLCommandBuffer>) { [drawable presentAtTime:presentationTime]; }];
+}
+- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
+    [self addScheduledHandler:^(id<MTLCommandBuffer>) { [drawable presentAfterMinimumDuration:duration]; }];
+}
 - (void)pushDebugGroup:(NSString *)string { (void)string; }
 - (void)popDebugGroup {}
 @end
