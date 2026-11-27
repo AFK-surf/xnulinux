@@ -131,18 +131,24 @@ class Kext:
                 off = align(out.size, 1 << al)
                 out.size, out.align = off + size, max(out.align, al)
                 self.globals[n] = (out, off)
-        # defined external symbols (private externs too: one kext is one linkage unit)
+        # defined external symbols (private externs too: one kext is one linkage unit). Of several definitions the one
+        # that is not weak (N_WEAK_DEF) is the kext's, wherever its object comes; of weak ones only, the first
+        weak = set()                            # the symbols whose definition so far is a weak one
         for oi, o in enumerate(self.objs):
             for n, t, sc, d, v in o.syms:
                 if t & N_STAB or not t & (N_EXT | N_PEXT) or (t & N_TYPE) != N_SECT:
                     continue
                 where = self.place_of(o, sc, v)
                 if n in self.globals and self.globals[n] != where:
-                    if not d & 0x80:                    # N_WEAK_DEF: the first definition stays
+                    if d & 0x80:                        # N_WEAK_DEF: the definition there stays
+                        continue
+                    if n not in weak:
                         prev = self.globals[n]
                         raise LinkError(f'{n} defined twice (in {o.path} and at {prev[0].seg},{prev[0].name})')
-                    continue
-                self.globals.setdefault(n, where)
+                    weak.discard(n)                     # over a weak one
+                elif d & 0x80:
+                    weak.add(n)
+                self.globals[n] = where
         # a GOT entry for every symbol the code loads through one
         for o in self.objs:
             for s in o.sects:
@@ -222,8 +228,8 @@ class Kext:
         def sym_addr(o, idx):
             n, t, sc, d, v = o.syms[idx]
             typ = t & N_TYPE
-            if typ == N_SECT:
-                return self.addr_of(self.place_of(o, sc, v))
+            if typ == N_SECT and not (t & (N_EXT | N_PEXT) and n in self.globals):
+                return self.addr_of(self.place_of(o, sc, v))    # (an external one: the kext's definition, below)
             if typ == N_ABS:
                 return v
             if n in self.globals:
