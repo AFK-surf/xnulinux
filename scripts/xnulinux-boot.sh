@@ -17,6 +17,7 @@
 #   IMAGE (xnu/kc.bin: the kernel collection under /lib/firmware)  GPU (auto|off)  CPUS (1: the hosted system's CPUs, 32 at most)  XNU_ARGS (more xnu.ko parameters)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+[ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf	# for stop as well: the sync is typed into this system's CONSOLE_IN
 if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced first) and remove xnu.ko
   if [ ! -d /sys/module/xnu ]; then
     sudo systemctl stop xnudrmd 2>/dev/null || true
@@ -33,7 +34,6 @@ if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced fi
   exit
 fi
 WAIT=0; [ "${1:-}" = --wait ] && WAIT=1
-[ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf
 MAC_CONF=${MAC_CONF:-/var/tmp/mac.conf}	# the disk's UUIDs: mk-macvm-disk.sh's, or mk-puredarwin-disk.sh's output
 [ -f "$MAC_CONF" ] && . "$MAC_CONF"
 DISK=${DISK:-/var/tmp/mac.img}; RAM_MB=${RAM_MB:-7900}; GPU=${GPU:-auto}; CPUS=${CPUS:-1}
