@@ -202,7 +202,8 @@ static long hc_xlate(struct xnu_hostcall_xlate __user *ua)
 {
 	struct xnu_hostcall_xlate a;
 	struct mm_struct *mm = current->mm;
-	unsigned long i, n;
+	unsigned long i, k, n;
+	u64 pa[64];
 	long err = 0;
 
 	if (copy_from_user(&a, ua, sizeof(a)))
@@ -212,14 +213,18 @@ static long hc_xlate(struct xnu_hostcall_xlate __user *ua)
 	n = a.len >> PAGE_SHIFT;
 	if (n > a.max)
 		return -E2BIG;
-	mmap_read_lock(mm);
-	for (i = 0; i < n && !err; i++) {
-		u64 pa;
-		err = hc_xlate_one(mm, a.va + (i << PAGE_SHIFT), &pa);
-		if (!err && put_user(pa, (u64 __user *)a.out + i))
+	/*
+	 * The answers leave with mmap_lock released: writing one may fault (an output array not in memory yet), the fault
+	 * takes mmap_lock again, and behind another thread that waits to write-lock it (an mmap()) that never returns.
+	 */
+	for (i = 0; i < n && !err; i += k) {
+		mmap_read_lock(mm);
+		for (k = 0; k < ARRAY_SIZE(pa) && i + k < n && !err; k++)
+			err = hc_xlate_one(mm, a.va + ((i + k) << PAGE_SHIFT), &pa[k]);
+		mmap_read_unlock(mm);
+		if (!err && copy_to_user((u64 __user *)a.out + i, pa, k * sizeof(*pa)))
 			err = -EFAULT;
 	}
-	mmap_read_unlock(mm);
 	return err;
 }
 
