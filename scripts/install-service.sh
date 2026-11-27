@@ -21,12 +21,14 @@ GPU=${GPU:-auto}	# auto: the host GPU when the VM has a render node; off: CPU re
 #XNU_ARGS="model=VirtualMac2,1"
 #BOOTARGS="amfi_get_out_of_my_way=1 lp-sip0=2050 bt-transport-override=10"
 CONF
+# Wants=, not Requires=, the unit that loads fki.ko at boot: after a kernel update that load fails (fki.ko is still the old
+# kernel's), and a required unit that failed keeps this one from ever starting. xnulinux-boot.sh builds both modules for
+# the running kernel and loads fki.ko itself when it is not loaded, with that unit's arguments.
 sudo tee /etc/systemd/system/xnulinux.service >/dev/null <<UNIT
 [Unit]
 Description=xnulinux: the hosted macOS
 After=xnulinux-fki.service network-online.target
-Wants=network-online.target
-Requires=xnulinux-fki.service
+Wants=xnulinux-fki.service network-online.target
 StartLimitIntervalSec=600
 StartLimitBurst=5
 

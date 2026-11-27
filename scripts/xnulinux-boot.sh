@@ -65,6 +65,12 @@ sudo dmesg -n "${CONLEVEL:-2}"
 # fki has the hosted kernel's DRAM from its load at boot (scripts/vm-install-fki-service.sh): reload it only when it changed,
 # with the same carve-out
 CARVE="carve_base=$(cat /sys/module/fki/parameters/carve_base 2>/dev/null || echo 0x200000000) carve_mb=$(cat /sys/module/fki/parameters/carve_mb 2>/dev/null || echo 8156)"
+# Not loaded at all: its load at boot failed (after a kernel update fki.ko was still the old kernel's, until the build
+# above). Then with what xnulinux-fki.service loads it with, which is where a host's own carve-out is written down.
+if [ ! -d /sys/module/fki ]; then
+  UNIT_ARGS=$(sed -n 's|^ExecStart=.*/fki-ko/fki\.ko  *||p' /etc/systemd/system/xnulinux-fki.service 2>/dev/null | head -1)
+  [ -z "$UNIT_ARGS" ] || CARVE=$UNIT_ARGS
+fi
 # (an fki.ko from before cpu_list has none: set -e must not stop here)
 CPULIST=$(tr -d '\n' 2>/dev/null < /sys/module/fki/parameters/cpu_list || true); [ -z "$CPULIST" ] || CARVE="$CARVE cpu_list=$CPULIST"
 if [ "$(cat /sys/module/fki/srcversion 2>/dev/null)" != "$(modinfo -F srcversion fki-ko/fki.ko)" ]; then
