@@ -2057,6 +2057,7 @@ static int enter_arm_init(struct boot_args_v2 *ba)
 		u64_t mh_unslid = 0;
 		int segs = macho_slide_header(&img, &mh_unslid);
 		logkv("xnu: load commands slid (segments)", (u64_t)segs);
+		if (segs < 0) return segs;
 	}
 	if (el0_mode)
 		el0_patch_image(&img);
