@@ -1810,6 +1810,12 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
 - (void)setStencilFrontReferenceValue:(uint32_t)f backReferenceValue:(uint32_t)b {
     if (_handle) xm2v_render_encoder_set_stencil_reference_values(_handle, f, b);
 }
+// The store actions a descriptor left MTLStoreActionUnknown: Metal takes them from these, any time before endEncoding.
+- (void)setColorStoreAction:(MTLStoreAction)action atIndex:(NSUInteger)index {
+    if (_handle) xm2v_render_encoder_set_color_store_action(_handle, (uint64_t)action, (uint32_t)index);
+}
+- (void)setDepthStoreAction:(MTLStoreAction)action { if (_handle) xm2v_render_encoder_set_depth_store_action(_handle, (uint64_t)action); }
+- (void)setStencilStoreAction:(MTLStoreAction)action { if (_handle) xm2v_render_encoder_set_stencil_store_action(_handle, (uint64_t)action); }
 - (void)setVisibilityResultMode:(MTLVisibilityResultMode)mode offset:(NSUInteger)offset { (void)mode; (void)offset; }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u stages:(MTLRenderStages)st {
     if (!_handle || !r) return;

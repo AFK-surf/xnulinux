@@ -144,6 +144,8 @@ fn raw_store(v: u64) -> Result<StoreAction, String> {
         1 => Ok(StoreAction::Store),
         2 => Ok(StoreAction::MultisampleResolve),
         3 => Ok(StoreAction::StoreAndMultisampleResolve),
+        4 => Ok(StoreAction::Unknown),
+        5 => Ok(StoreAction::CustomSampleDepthStore),
         _ => Err(format!("invalid store_action: {v}")),
     }
 }
@@ -1952,6 +1954,48 @@ pub extern "C" fn xm2v_render_encoder_set_blend_color(
 ) -> bool {
     guard(false, || {
         get_mut(enc)?.set_blend_color(r, g, b, a);
+        Ok(true)
+    })
+}
+
+// The store action of an attachment whose descriptor left it MTLStoreActionUnknown, set before
+// the encoder ends.
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_set_color_store_action(
+    enc: *mut RenderCommandEncoder,
+    action: u64,
+    index: u32,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .set_color_store_action(raw_store(action)?, index)
+            .map_err(|e| format!("set_color_store_action: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_set_depth_store_action(
+    enc: *mut RenderCommandEncoder,
+    action: u64,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .set_depth_store_action(raw_store(action)?)
+            .map_err(|e| format!("set_depth_store_action: {e:?}"))?;
+        Ok(true)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn xm2v_render_encoder_set_stencil_store_action(
+    enc: *mut RenderCommandEncoder,
+    action: u64,
+) -> bool {
+    guard(false, || {
+        get_mut(enc)?
+            .set_stencil_store_action(raw_store(action)?)
+            .map_err(|e| format!("set_stencil_store_action: {e:?}"))?;
         Ok(true)
     })
 }
