@@ -224,6 +224,7 @@ pub struct Xm2vRenderPassColorAttachment {
     pub texture: *mut Texture,
     pub level: u64,
     pub slice: u64,
+    pub depth_plane: u64,
     pub load_action: u64,
     pub store_action: u64,
     pub clear_r: f64,
@@ -237,10 +238,14 @@ pub struct Xm2vRenderPassDesc {
     pub color_attachment_count: u32,
     pub color_attachments: [Xm2vRenderPassColorAttachment; 8],
     pub depth_texture: *mut Texture,
+    pub depth_level: u64,
+    pub depth_slice: u64,
     pub depth_load_action: u64,
     pub depth_store_action: u64,
     pub clear_depth: f64,
     pub stencil_texture: *mut Texture,
+    pub stencil_level: u64,
+    pub stencil_slice: u64,
     pub stencil_load_action: u64,
     pub stencil_store_action: u64,
     pub clear_stencil: u32,
@@ -1881,6 +1886,7 @@ pub extern "C" fn xm2v_render_encoder_new(
                 att.texture = Some(get(ca.texture)?.clone());
                 att.level = ca.level;
                 att.slice = ca.slice;
+                att.depth_plane = ca.depth_plane;
                 att.load_action = raw_load(ca.load_action)?;
                 att.store_action = raw_store(ca.store_action)?;
                 att.clear_color = ClearColor::new(ca.clear_r, ca.clear_g, ca.clear_b, ca.clear_a);
@@ -1888,12 +1894,16 @@ pub extern "C" fn xm2v_render_encoder_new(
         }
         if !d.depth_texture.is_null() {
             rpd.depth_attachment.texture = Some(get(d.depth_texture)?.clone());
+            rpd.depth_attachment.level = d.depth_level;
+            rpd.depth_attachment.slice = d.depth_slice;
             rpd.depth_attachment.load_action = raw_load(d.depth_load_action)?;
             rpd.depth_attachment.store_action = raw_store(d.depth_store_action)?;
             rpd.depth_attachment.clear_depth = d.clear_depth;
         }
         if !d.stencil_texture.is_null() {
             rpd.stencil_attachment.texture = Some(get(d.stencil_texture)?.clone());
+            rpd.stencil_attachment.level = d.stencil_level;
+            rpd.stencil_attachment.slice = d.stencil_slice;
             rpd.stencil_attachment.load_action = raw_load(d.stencil_load_action)?;
             rpd.stencil_attachment.store_action = raw_store(d.stencil_store_action)?;
             rpd.stencil_attachment.clear_stencil = d.clear_stencil;

@@ -2259,6 +2259,7 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
             rd.color_attachments[i].texture = xt->_handle;
             rd.color_attachments[i].level = ca.level;
             rd.color_attachments[i].slice = ca.slice;
+            rd.color_attachments[i].depth_plane = ca.depthPlane;
             rd.color_attachments[i].load_action = (uint64_t)ca.loadAction;
             rd.color_attachments[i].store_action = (uint64_t)ca.storeAction;
             rd.color_attachments[i].clear_r = ca.clearColor.red;
@@ -2270,6 +2271,8 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     if (desc.depthAttachment.texture && [desc.depthAttachment.texture isKindOfClass:[XcmTexture class]]) {
         [self retainResource:desc.depthAttachment.texture];
         rd.depth_texture = ((XcmTexture *)desc.depthAttachment.texture)->_handle;
+        rd.depth_level = desc.depthAttachment.level;
+        rd.depth_slice = desc.depthAttachment.slice;
         rd.depth_load_action = (uint64_t)desc.depthAttachment.loadAction;
         rd.depth_store_action = (uint64_t)desc.depthAttachment.storeAction;
         rd.clear_depth = desc.depthAttachment.clearDepth;
@@ -2277,6 +2280,8 @@ static void xcmSharedEventNotified(void *context, uint64_t value) {
     if (desc.stencilAttachment.texture && [desc.stencilAttachment.texture isKindOfClass:[XcmTexture class]]) {
         [self retainResource:desc.stencilAttachment.texture];
         rd.stencil_texture = ((XcmTexture *)desc.stencilAttachment.texture)->_handle;
+        rd.stencil_level = desc.stencilAttachment.level;
+        rd.stencil_slice = desc.stencilAttachment.slice;
         rd.stencil_load_action = (uint64_t)desc.stencilAttachment.loadAction;
         rd.stencil_store_action = (uint64_t)desc.stencilAttachment.storeAction;
         rd.clear_stencil = desc.stencilAttachment.clearStencil;

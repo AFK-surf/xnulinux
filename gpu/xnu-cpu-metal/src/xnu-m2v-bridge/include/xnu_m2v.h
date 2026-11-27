@@ -99,6 +99,7 @@ typedef struct Xm2vRenderPassColorAttachment {
     Xm2vTexture *texture;
     uint64_t level;
     uint64_t slice;
+    uint64_t depth_plane;
     uint64_t load_action;
     uint64_t store_action;
     double clear_r, clear_g, clear_b, clear_a;
@@ -108,10 +109,14 @@ typedef struct Xm2vRenderPassDesc {
     uint32_t color_attachment_count;
     Xm2vRenderPassColorAttachment color_attachments[8];
     Xm2vTexture *depth_texture;
+    uint64_t depth_level;
+    uint64_t depth_slice;
     uint64_t depth_load_action;
     uint64_t depth_store_action;
     double clear_depth;
     Xm2vTexture *stencil_texture;
+    uint64_t stencil_level;
+    uint64_t stencil_slice;
     uint64_t stencil_load_action;
     uint64_t stencil_store_action;
     uint32_t clear_stencil;
