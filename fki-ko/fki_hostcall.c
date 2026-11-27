@@ -25,7 +25,7 @@
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 
-#define HC_MAX (8UL << 20)		/* largest request or reply */
+#define HC_MAX ((8UL << 20) + 4096)	/* largest request or reply: the DRM bridge's 8 MiB of payload and its header */
 #define HC_TIMEOUT (120 * HZ)		/* a service that does not answer: the call fails */
 
 struct xnu_hostcall_xlate {
