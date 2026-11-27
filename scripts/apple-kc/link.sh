@@ -17,7 +17,7 @@ POC=$(cd "$(dirname "$0")/../.." && pwd)
 abs() { python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$1"; }
 KIT=$(abs "$1"); OUT=$(abs "${3:-$KIT/kc-apple.bin}")
 INSTALL=; [ $# -lt 3 ] && [ -d /lib/firmware/xnu ] && INSTALL=/lib/firmware/xnu/kc-apple.bin
-W=${APPLE_KC_WORK:-$KIT/.work}; mkdir -p "$W"
+W=$(abs "${APPLE_KC_WORK:-$KIT/.work}"); mkdir -p "$W"	# absolute: kclink runs in the kit
 kit() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1]))
 for k in sys.argv[2].split("."): v=v[k]
 print(" ".join(v) if isinstance(v, list) else v)' "$KIT/kit.json" "$1"; }
