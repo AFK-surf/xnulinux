@@ -275,7 +275,8 @@ static void xr_take_ranges(const uint8_t *d, const uint8_t *end, struct xh *only
     while (d + 24 <= end) {
         uint64_t id, off, len; memcpy(&id, d, 8); memcpy(&off, d + 8, 8); memcpy(&len, d + 16, 8); d += 24;
         struct xh *b = only ? only : id < xr_ntab ? xr_tab[id] : 0;
-        if (b && b->kind == K_Xm2vBuffer && b->mem && off + len <= b->len) {
+        if (len > (uint64_t)(end - d)) break;
+        if (b && b->kind == K_Xm2vBuffer && b->mem && off <= b->len && len <= b->len - off) {
             memcpy(b->mem + off, d, len);
             if (!only) for (uint64_t p = off / XR_PAGE; p * XR_PAGE < off + len; p++) b->hash[p] = xr_hash(b->mem + p * XR_PAGE, xr_page_len(b, p));
         }

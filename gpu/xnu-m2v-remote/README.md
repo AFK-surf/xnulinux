@@ -7,7 +7,8 @@ Vulkan driver, and in the hosted system `libxnu_m2v.dylib` sends each call there
 
 It is an option, chosen on the host: `GPU=remote` and `GPU_REMOTE=host:port` for `scripts/xnulinux-boot.sh` (or in
 `/etc/xnulinux.conf`). The library in the bundle is then one that is either (`switch.c`): without the boot-arg the boot
-script adds (`xm2v-remote=1`) every call goes to the real library beside it, as before.
+script adds (`xm2v-remote=1`) every call goes to the real library beside it, as before. If that library is missing the process
+gets no Metal device (and the reason from `xm2v_last_error`); it never turns to the remote one by itself.
 
 ```
  hosted macOS (arm64 host)                                        the machine with the GPU
@@ -29,7 +30,8 @@ script adds (`xm2v-remote=1`) every call goes to the real library beside it, as 
   itself (tests outside a sandbox, and on Linux).
 - `switch.c`: the library that is either: the real one (`libxnu_m2v_local.dylib`, loaded when it is the choice) or
   `client.c`'s functions. `into-bundle.sh` puts it into a built `XnuCpuMetal.bundle`.
-- `server.c`: `xm2v-server PORT LOADER ICD_JSON`, a process for each connection (one Metal device of one process).
+- `server.c`: `xm2v-server [ADDRESS:]PORT LOADER ICD_JSON`, a process for each connection (one Metal device of one
+  process). It listens on 127.0.0.1 unless given an address.
 - `relay.c`: `xm2v-relay HOST PORT` on the Linux host, as root, in `xnudrmd`'s place on `/dev/xnu-hostcall`.
 - `t2.c`, `t2.metal`: buffers both ways, textures and pipelines, against the real library or the remote one.
   `mt.m`: a triangle through Metal in the hosted system (with `gpu/xnu-cpu-metal/test/tri.metal`'s library).
@@ -40,7 +42,9 @@ On the machine with the GPU (Rust 1.100.0; a checkout of this repository with me
 `gpu/xnu-cpu-metal/scripts/fetch-sources.sh` does):
 
     cargo build --release --manifest-path ../xnu-cpu-metal/src/xnu-m2v-bridge/Cargo.toml
-    ./build.sh server && ./xm2v-server 7001 libvulkan.so.1 /usr/share/vulkan/icd.d/nvidia_icd.json
+    ./build.sh server && ./xm2v-server 10.0.0.2:7001 libvulkan.so.1 /usr/share/vulkan/icd.d/nvidia_icd.json
+
+(the address to listen on: the one the host with the macOS reaches this machine by).
 
 On a Mac, into the bundle that goes on the system disk (the real library becomes `libxnu_m2v_local.dylib`, the one
 that is either takes its name, the bundle is signed again):
@@ -49,16 +53,30 @@ that is either takes its name, the bundle is signed again):
 
 On the Linux host: `GPU=remote GPU_REMOTE=GPU_HOST:7001 scripts/xnulinux-boot.sh` (it builds and starts `xm2v-relay`).
 
+## Only between machines that trust each other
+
+There is no authentication and no encryption. Whoever can connect to `xm2v-server` uses the machine's GPU, and the
+calls carry what is on the screen (window contents, the frames read back) in the clear. The server checks that a
+message holds what it says before it acts on it, but it is not hardened against a hostile client. Give it an address
+of a private network between the two machines, never a public one.
+
 ## Measured (c4a-standard-4 hosting, g2-standard-8 with an NVIDIA L4 in the same zone, 0.4 ms apart)
 
 - A Metal triangle at 1280x800 in the hosted system: 6.1 ms a frame on lavapipe, 0.10 ms here.
 - A window moving on the desktop, a Screen Sharing viewer attached: 6.7 frames a second on lavapipe, 20.4 here.
+  With no viewer: 57 to 59 (the same scene on a DGX Spark's own GPU: 104 to 107). WindowServer's main thread is then
+  idle a third of the time and waits for the renderer's answers 13% of it; the frame's pixels coming back set the pace.
 - 1000 frames of 100 draws that are not waited for: 0.11 ms and 8.5 KB each.
 
 ## Open
 
 - Every display frame's pixels are still read back into the hosted system (4 MB a frame; 6 to 9 ms through the bridge).
-- The library polls for answers (the bridge makes one host call at a time and none may wait).
+- The library polls for answers (the bridge makes one host call at a time and none may wait): every 30 to 200 us while
+  a call waits for one, and every 4 ms otherwise, for a shared event's notification. That is 250 host calls a second
+  for each process with a Metal device that does nothing: about 5000 a second on a desktop of 20 such processes.
+- Buffers a shader writes come back only where the call says so: a blit's destination, everything bound to a compute
+  pass, a render pass's `useResource` with write. A buffer a vertex or fragment function writes through
+  `setVertexBuffer`/`setFragmentBuffer` alone does not come back.
 - A shared event's handle means something only in the server process that made it.
 - A page the GPU wrote replaces the whole page in the process: a CPU write elsewhere on it since the last commit is lost.
 - A failed call that is not answered is only logged by the server.

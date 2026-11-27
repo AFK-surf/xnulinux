@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Buffers both ways, textures and pipelines through libxnu_m2v (the real one or the remote one).
 #include <stdio.h>
 #include <stdlib.h>

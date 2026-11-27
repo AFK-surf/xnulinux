@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #include <metal_stdlib>
 using namespace metal;
 struct VIn { float2 pos [[attribute(0)]]; float3 color [[attribute(1)]]; };

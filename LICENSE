@@ -2,7 +2,7 @@ xnulinux is made of parts under different licenses, kept apart along the line be
 Each source file names its license in an SPDX-License-Identifier line; the full texts are in LICENSES/:
 
   GPL-2.0-only         fki-ko/, linux/, scripts/, tools/, tests/, docs/, gpu/xnu-drm/ (xnudrmd, test/), gpu/venus/
-  GPL-2.0-or-later     gpu/xnu-cpu-metal/
+  GPL-2.0-or-later     gpu/xnu-cpu-metal/, gpu/xnu-m2v-remote/
   APSL-2.0             xnu-ko/, xnu-patches/, kexts/ (kexts/free/compat/ too)
   BSD-2-Clause-Patent  kexts/XnuDisplay/, kexts/XnuEthernet/, kexts/XnuInput/ (from macOS-DroidVM),
                        gpu/xnu-cpu-metal/src/xnu-cpu-metal-bundle/XnuCpuMetalShim.h (from UniXNU/AdrenoMetal)

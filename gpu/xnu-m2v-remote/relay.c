@@ -20,18 +20,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 #include "xnudrm_proto.h"
 #define MAX_CLIENTS 1024
 static int clients[MAX_CLIENTS];	// socket + 1
 static const char *host, *port;
 static int verbose;
+// A connection to the renderer, or -errno. The hosted CPU that opens a Metal device waits in its host call for this, and
+// every other host call behind it: at most CONNECT_MS, and after a failure the next tries within RETRY_MS fail at once.
+enum { CONNECT_MS = 1000, RETRY_MS = 3000 };
+static struct addrinfo *renderer;
 static int dial(void) {
-    struct addrinfo hints = { .ai_socktype = SOCK_STREAM }, *ai = 0;
-    if (getaddrinfo(host, port, &hints, &ai) || !ai) return -EHOSTUNREACH;
-    int fd = socket(ai->ai_family, SOCK_STREAM | SOCK_CLOEXEC, 0), one = 1, sz = 8 << 20;
-    if (fd < 0 || connect(fd, ai->ai_addr, ai->ai_addrlen)) { int e = -errno; if (fd >= 0) close(fd); freeaddrinfo(ai); return e; }
-    freeaddrinfo(ai);
+    static struct timespec failed; static int failure;
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    if (failure && (now.tv_sec - failed.tv_sec) * 1000 + (now.tv_nsec - failed.tv_nsec) / 1000000 < RETRY_MS) return failure;
+    int fd = socket(renderer->ai_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0), one = 1, sz = 8 << 20, e = 0;
+    if (fd < 0) return -errno;
+    if (connect(fd, renderer->ai_addr, renderer->ai_addrlen)) {
+        struct pollfd p = { .fd = fd, .events = POLLOUT }; socklen_t el = sizeof e;
+        if (errno != EINPROGRESS) e = errno;
+        else if (poll(&p, 1, CONNECT_MS) != 1) e = ETIMEDOUT;
+        else getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el);
+    }
+    if (e) { close(fd); failure = -e; failed = now; return -e; }
+    failure = 0;
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz); setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &sz, sizeof sz);
     return fd;
@@ -39,6 +53,11 @@ static int dial(void) {
 int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: %s HOST PORT [-v]\n", argv[0]); return 2; }
     host = argv[1]; port = argv[2]; verbose = argc > 3;
+    struct addrinfo hints = { .ai_socktype = SOCK_STREAM };
+    if (getaddrinfo(host, port, &hints, &renderer) || !renderer) { fprintf(stderr, "xm2v-relay: %s:%s: no such address\n", host, port); return 1; }
+    int probe = dial();	// before any hosted system waits on it
+    if (probe < 0) { fprintf(stderr, "xm2v-relay: renderer %s:%s: %s\n", host, port, strerror(-probe)); return 1; }
+    close(probe);
     int hc = open("/dev/xnu-hostcall", O_RDWR | O_CLOEXEC);
     if (hc < 0) { perror("/dev/xnu-hostcall"); return 1; }
     size_t cap = 8 + XNUDRM_MAX_MSG + sizeof(struct xnudrm_hdr);

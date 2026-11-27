@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // In the hosted macOS: a triangle through Metal itself (the plugin and whatever libxnu_m2v it has).
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>

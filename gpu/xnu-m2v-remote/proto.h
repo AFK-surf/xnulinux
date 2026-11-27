@@ -14,6 +14,7 @@ struct xr_ans { uint64_t req; uint64_t len; };
 #define XR_CALLBACK (~0ull)
 #define XR_PAGE 4096ull	// the unit a buffer's changes are found and sent in
 #define XR_VERSION 2
+#define XR_MAX_MSG ((4ull << 30) + (1 << 20))	// a buffer's first contents are one message, and a buffer is 4 GB at most
 // A page's fingerprint: what changed since it was last sent is found by comparing these.
 static inline uint64_t xr_hash(const uint8_t *p, uint64_t n) {
     uint64_t h0 = 0x9e3779b97f4a7c15ull, h1 = 0xc2b2ae3d27d4eb4full, h2 = 0x165667b19e3779f9ull, h3 = 0x27d4eb2f165667c5ull, v[4];

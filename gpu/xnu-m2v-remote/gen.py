@@ -102,11 +102,12 @@ for ret, name, params in protos:
     if isnew: s.append('    uint64_t nid = sv_u64(&m);')
     for i, (k, base, n) in enumerate(kinds):
         if k == 'h': s.append(f'    uint64_t i{i} = sv_u64(&m); {base} *a{i} = sv_obj(i{i}); if (!a{i}) {{ sv_null(h.op, {i}); {"sv_set(nid, 0); " if isnew else ""}{"sv_answer_u64(h.req, 0); " if sync else ""}break; }}'); args.append(f'a{i}')
-        elif k == 'b': s.append(f'    {base} *a{i} = (void *)m; m += (sizeof({base}) + 7) & ~7ul;'); args.append(f'a{i}')
+        elif k == 'b': s.append(f'    {base} *a{i} = sv_blob(&m, sizeof({base}));'); args.append(f'a{i}')
         elif k == 'z': s.append(f'    const char *a{i} = sv_str(&m);'); args.append(f'a{i}')
         elif base in ('float', 'double'): s.append(f'    double a{i} = sv_f64(&m);'); args.append(f'({base})a{i}')
         else: s.append(f'    uint64_t a{i} = sv_u64(&m);'); args.append(f'({base})a{i}')
     call = f'{name}({", ".join(args)})'
+    s.append(f'    if (sv_bad) {{ sv_short(h.op); {"sv_set(nid, 0); " if isnew else ""}{"sv_answer_u64(h.req, 0); " if sync else ""}break; }}')
     if isnew:
         s.append(f'    void *o = {call}; sv_set(nid, o); if (!o) sv_fail(h.op);')
         if sync: s.append('    sv_answer_u64(h.req, o != 0);')
@@ -129,8 +130,8 @@ for ret, name, params in protos:
     args = ', '.join(n for _, n, _ in ps)
     ptr = f'{ret} (*{name})({params or "void"})'
     ren.append(f'#define {name} xr_{name}')
-    sw.append((ptr, f'{ret} xr_{name}({params or "void"});\n{ret} {name}({params or "void"}) {{ {"" if ret == "void" else "return "}(xs_remote() ? xr_{name} : xs_local.{name})({args}); }}', name))
+    sw.append((ptr, f'{ret} xr_{name}({params or "void"});\n{ret} {name}({params or "void"}) {{ int xs_which = xs_remote(); if (xs_which == 2) {"return" if ret == "void" else "return xs_none_error" if name == "xm2v_last_error" else "return 0"}; {"" if ret == "void" else "return "}(xs_which ? xr_{name} : xs_local.{name})({args}); }}', name))
 open('gen_rename.h', 'w').write('\n'.join(ren) + '\n')
-open('gen_switch.inc', 'w').write('static struct {\n' + ''.join(f'    {p};\n' for p, _, _ in sw) + '} xs_local;\nstatic int xs_remote(void);\n' +
+open('gen_switch.inc', 'w').write('static struct {\n' + ''.join(f'    {p};\n' for p, _, _ in sw) + '} xs_local;\nstatic int xs_remote(void);\nstatic char xs_none_error[1200];\n' +
     '\n'.join(b for _, b, _ in sw) + '\nstatic const char *const xs_names[] = { ' + ', '.join(f'"{n}"' for _, _, n in sw) + ' };\n')
 print(len(ops), 'functions,', len(cl), 'generated,', len(manual), 'by hand:', ' '.join(m[5:] for m in manual))

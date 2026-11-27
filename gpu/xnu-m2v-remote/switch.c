@@ -12,7 +12,7 @@
 #include "xnu_m2v.h"
 #include "gen_switch.inc"
 
-static int xs_mode = -1;	// 1 remote, 0 local
+static int xs_mode = -1;	// 0 local, 1 remote, 2 neither (every function fails)
 static void xs_decide(void) {
     char args[1024] = ""; size_t n = sizeof args - 1;
     int remote = getenv("XM2V_REMOTE") != 0;
@@ -20,16 +20,22 @@ static void xs_decide(void) {
         const char *p = strstr(args, "xm2v-remote=");
         remote = p && (p == args || p[-1] == ' ') && p[12] != '0';
     }
-    if (!remote) {	// the real one's functions, by name; one that is missing leaves the remote one in its place
+    if (!remote) {	// the real one's functions, by name
         Dl_info me; char path[1024] = "libxnu_m2v_local.dylib";
         if (dladdr((void *)xs_decide, &me) && me.dli_fname) {
             const char *slash = strrchr(me.dli_fname, '/');
             if (slash) snprintf(path, sizeof path, "%.*s/libxnu_m2v_local.dylib", (int)(slash - me.dli_fname), me.dli_fname);
         }
         void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        const char *why = lib ? 0 : dlerror();
         void **slot = (void **)&xs_local;
-        for (size_t i = 0; lib && i < sizeof xs_names / sizeof *xs_names; i++) if (!(slot[i] = dlsym(lib, xs_names[i]))) lib = 0;
-        if (!lib) { fprintf(stderr, "libxnu_m2v: %s: %s; no local renderer\n", path, dlerror() ?: "a function is missing"); remote = 1; }
+        for (size_t i = 0; lib && i < sizeof xs_names / sizeof *xs_names; i++) if (!(slot[i] = dlsym(lib, xs_names[i]))) { why = xs_names[i]; lib = 0; }
+        if (!lib) {	// neither: no device, and the reason for whoever asks. Never the remote one unasked: what answers
+            		// the bridge then is xnudrmd, or nothing.
+            snprintf(xs_none_error, sizeof xs_none_error, "libxnu_m2v: no local renderer (%s: %s) and the remote one is not chosen", path, why ? why : "?");
+            fprintf(stderr, "%s\n", xs_none_error);
+            remote = 2;
+        }
     }
     xs_mode = remote;
 }
