@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # scripts/vm-net-up.sh run again and again on one host, as scripts/xnulinux-boot.sh runs it at every start of the hosted
 # system: after each run a dnsmasq has to be serving xnu0. The stand-in dnsmasq holds 192.168.77.1's ports from its start
-# until a moment after it is told to end (a process that is ending still has its sockets), and one started while they are
-# held fails as dnsmasq does. ip, iptables, sysctl and ethtool are stand-ins that only write down how they were called.
+# until a moment after it is told to end, and one started while they are held fails as dnsmasq does. While it is ending
+# it is no longer to be found by its command line, as a real process is not once it has given up its memory and not yet
+# its sockets. ip, iptables, sysctl and ethtool are stand-ins that only write down how they were called.
 . "$(dirname "$0")/lib.sh"
 sandbox_repo
 stub sudo <<'EOF'
@@ -22,7 +23,7 @@ stub ethtool < /dev/null
 stub dnsmasq <<'EOF'
 mkdir "$T/port" 2>/dev/null ||
   { echo "dnsmasq: failed to create listening socket for 192.168.77.1: Address already in use" >&2; exit 2; }
-( trap 'sleep 0.3; rmdir "$T/port"; exit 0' TERM; while :; do sleep 0.1; done ) > /dev/null 2>&1 &
+( trap 'exec /bin/bash -c "sleep 0.3; rmdir \"\$0\"" "$T/port"' TERM; while :; do sleep 0.1; done ) > /dev/null 2>&1 &
 echo $! > "$T/dnsmasq.pid"
 EOF
 echo "default via 10.0.2.2 dev eth0 proto dhcp src 10.0.2.15 metric 100" > "$T/default-route"

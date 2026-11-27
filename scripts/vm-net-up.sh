@@ -32,11 +32,16 @@ fi
 command -v dnsmasq >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q dnsmasq-base >/dev/null 2>&1
 D=no
 if command -v dnsmasq >/dev/null; then
-  sudo pkill -f 'dnsmasq.*xnu0' 2>/dev/null
   # pkill does not wait for the one it ended, which holds 192.168.77.1's ports a moment longer. A dnsmasq started in that
   # moment fails ("Address already in use") and then there is none: every second start of the hosted system had no DHCP
-  # and no DNS.
-  for _ in $(seq 1 50); do pgrep -f 'dnsmasq.*xnu0' >/dev/null || break; sleep 0.1; done
+  # and no DNS. Waited for by process id, taken before the kill: a process that is ending has no command line to be
+  # found by any more while it still has its sockets.
+  OLD=$(pgrep -f 'dnsmasq.*xnu0' || true)
+  sudo pkill -f 'dnsmasq.*xnu0' 2>/dev/null
+  for _ in $(seq 1 50); do
+    left=; for p in $OLD; do ! sudo kill -0 "$p" 2>/dev/null || left=1; done
+    [ -n "$left" ] || break; sleep 0.1
+  done
   if sudo dnsmasq --interface=xnu0 --bind-interfaces --except-interface=lo --dhcp-range=192.168.77.2,192.168.77.50,12h \
     --dhcp-option=3,192.168.77.1 --dhcp-option=6,192.168.77.1 --pid-file=/run/dnsmasq-xnu0.pid
   then D=yes; else D="DID NOT START (the hosted system gets no address and no DNS)"; fi
