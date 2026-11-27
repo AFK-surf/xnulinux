@@ -4,7 +4,7 @@
 # DRM bridge (gpu/xnu-drm: libxnudrm in the driver, kexts/XnuDrm in the hosted kernel, xnudrmd on Linux). Patches as for
 # the Linux guest (patches/), plus libxnudrm copied into the tree. Also builds test/compute.c against it.
 # Output: $OUT/lib/libvulkan_virtio.dylib (universal arm64 + arm64e: the Metal plugin loads it into system processes and
-# into ordinary arm64 ones), $OUT/bin/venus-compute (arm64).
+# into ordinary arm64 ones), $OUT/bin/venus-compute (arm64) and its shader $OUT/bin/compute.spv.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MESA=26.3.1
@@ -48,3 +48,6 @@ lipo -info "$OUT"/lib/libvulkan_virtio.dylib
 mkdir -p "$OUT"/bin
 # the test talks to the driver directly (no loader in the hosted system): vk_icdGetInstanceProcAddr
 /usr/bin/clang -arch arm64 -O2 -I mesa/include "$HERE"/test/compute.c -o "$OUT"/bin/venus-compute
+# and its shader, which it takes as its argument (glslang: brew install glslang)
+if command -v glslangValidator >/dev/null; then glslangValidator -V "$HERE"/test/compute.comp -o "$OUT"/bin/compute.spv >/dev/null
+else echo "no glslangValidator: $OUT/bin/venus-compute needs compute.spv, made from $HERE/test/compute.comp (build-linux.sh makes one too)" >&2; fi
