@@ -44,8 +44,9 @@ BOOTARGS=${BOOTARGS:-amfi_get_out_of_my_way=1 lp-sip0=2050 bt-transport-override
 [ -d /sys/module/xnu ] && { echo "xnu.ko is loaded: a hosted system is running (sudo rmmod xnu first)" >&2; exit 1; }
 
 K=/lib/modules/$(uname -r)/build
-build() {	# a module; its compiler errors on failure
-  local log; log=$(make -s -C "$K" M="$PWD/$1" ${2:-} modules 2>&1) || { echo "$log" | grep -E "error|Error" | head -20 >&2; exit 1; }
+build() {	# a module; on failure its compiler errors, modpost's, and what make said when it stopped (no kernel headers)
+  local log; log=$(make -s -C "$K" M="$PWD/$1" ${2:-} modules 2>&1) ||
+    { { echo "$log" | grep -iE "error|\*\*\*" || echo "$log" | tail -5; } | head -20 >&2; exit 1; }
 }
 build fki-ko
 build xnu-ko "KBUILD_EXTRA_SYMBOLS=$PWD/fki-ko/Module.symvers"
