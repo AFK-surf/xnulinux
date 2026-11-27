@@ -1397,8 +1397,15 @@ static struct boot_args_v2 *build_boot(unsigned char *base_va, u64_t phys, u64_t
 		if (x_strlen(ba->CommandLine) + x_strlen(a) < sizeof(ba->CommandLine))
 			x_memcpy(ba->CommandLine + x_strlen(ba->CommandLine), a, x_strlen(a) + 1);
 	}
-	if (bootargs && x_strlen(ba->CommandLine) + 1 + x_strlen(bootargs) < sizeof(ba->CommandLine)) {
+	if (bootargs) {
 		char *e = ba->CommandLine + x_strlen(ba->CommandLine);
+
+		/* (dropped whole and in silence before: the system came up without any of them and failed somewhere else) */
+		if (x_strlen(ba->CommandLine) + 1 + x_strlen(bootargs) >= sizeof(ba->CommandLine)) {
+			logkv("xnu: bootargs do not fit in XNU's command line; characters it has left",
+			    sizeof(ba->CommandLine) - x_strlen(ba->CommandLine) - 2);
+			return 0;
+		}
 		*e++ = ' ';
 		x_memcpy(e, bootargs, x_strlen(bootargs) + 1);
 	}
