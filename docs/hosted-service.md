@@ -34,7 +34,7 @@ artifact comes with its source.
 
 The host Linux is a stock arm64 distribution kernel (Ubuntu 24.04 is tested) with 4K pages. The CPU needs PAC
 (`FEAT_PAuth`), and Linux must run at EL1, not as a bare-metal VHE kernel at EL2 (`kvm-arm.mode=nvhe` on a DGX Spark).
-Nothing checks either at load: `fki.ko` and `xnu.ko` load on such a host all the same.
+`fki.ko` refuses to load otherwise.
 
 ### 2.2 The kernel kit
 
@@ -98,6 +98,8 @@ We ship these. The user's disk script installs them into their own macOS disk:
    CPUS=2
    RAM_MB=7900
    ```
+   Run it as the user the service is to run as. The service has no terminal, so that user needs sudo without a
+   password (a `NOPASSWD` rule), or run the installer as root.
 5. **Isolation.** The hosted kernel runs at EL1 inside the Linux kernel, so a hosted system that is compromised owns
    that Linux. **The tenant boundary is the VM (or the machine), never the Linux.** Run one Linux VM per tenant, with one
    hosted system in it. Never run two users' hosted systems in one Linux.
