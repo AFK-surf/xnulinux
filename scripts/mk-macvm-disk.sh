@@ -20,11 +20,13 @@ GPU=${GPU:-$PWD/gpu/xnu-cpu-metal/dist/XnuCpuMetal.bundle}
 # bluetoothd: no Bluetooth controller; it fails to boot the chip and exits, and launchd starts it again every few seconds
 DISABLE="com.apple.watchdogd com.apple.iomfb_bics_daemon com.apple.audiomxd com.apple.audio.coreaudiod com.apple.PerfPowerServices
  com.apple.PerfPowerServicesExtended com.apple.oahd com.apple.oahd-root-helper com.apple.bluetoothd ${DISABLE:-}"
-# images of ours left attached by an earlier run
+# images of ours left attached by an earlier run: a clone (mac.img), and the installed disk, which is $SRC and not
+# whatever is called disk.img (every tart VM's disk is: one attached for something else is not ours to detach)
 for d in $(hdiutil info -plist | python3 -c 'import plistlib,sys,os
 for i in plistlib.loads(sys.stdin.buffer.read()).get("images", []):
-    if os.path.basename(i.get("image-path", "")) in ("disk.img", "mac.img"):
-        print(*[e["dev-entry"] for e in i.get("system-entities", []) if "content-hint" in e and e["content-hint"] == "GUID_partition_scheme"])'); do
+    p = i.get("image-path", "")
+    if os.path.basename(p) == "mac.img" or os.path.realpath(p) == os.path.realpath(sys.argv[1]):
+        print(*[e["dev-entry"] for e in i.get("system-entities", []) if "content-hint" in e and e["content-hint"] == "GUID_partition_scheme"])' "$SRC"); do
   hdiutil detach "$d" -force >/dev/null 2>&1 || true
 done
 mkdir -p "$W"; rm -f "$IMG"; cp -c "$SRC" "$IMG"	# an APFS clone of the installed disk: the installed one stays pristine
