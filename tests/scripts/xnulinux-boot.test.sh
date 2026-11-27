@@ -123,8 +123,15 @@ check 'a start whose xnu.ko did not load fails' [ $s = 1 ]
 check '... does not say "booting"' not grep -q '^booting' "$T/out"
 check "... and says why in xnu.ko's own words, under insmod's" \
   [ "$(grep -A2 '^xnu.ko did not load: insmod: ERROR' "$T/out" | tail -1)" = "  fki: xnu: cannot read the trust cache, err 0xfffffffffffffffe" ]
+host noload; boot; s=$?
+check 'a start whose load Linux itself refused (nothing of xnu.ko in the kernel log): status 1, with insmod'"'"'s words' \
+  [ $s = 1 -a "$(grep -c '^xnu.ko did not load: insmod: ERROR' "$T/out")" = 1 ]
+check '... and the last thing it does is stop the GPU bridge (it did not end at the empty search of the kernel log)' \
+  [ "$(tail -1 "$T/calls")" = "systemctl stop xnudrmd" ]
 host noload; boot --wait; s=$?
 check '--wait, the kernel having logged nothing of fki: status 3 and a message with the log' [ $s = 3 -a "$(grep -c "^the run ended: $R/var/log/xnulinux/run-" "$T/out")" != 0 ]
+check '... and it says that xnu.ko did not load, as the plain start does, and not "booting"' \
+  [ "$(grep -c '^xnu.ko did not load: insmod: ERROR' "$T/out")$(grep -c '^booting' "$T/out")" = 10 ]
 
 # ---- --wait: how the run ended
 host 'panic 1'; boot --wait; s=$?

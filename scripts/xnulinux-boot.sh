@@ -179,17 +179,23 @@ for try in 1 2 3 4 5 6 7 8 9; do
   fi
   echo "no contiguous memory for XNU yet: trying again in 20 s"; sleep 20
 done
-# insmod gone and no xnu.ko: it did not load (no disk or collection, a parameter out of range). --wait keeps that in the run's log.
-if [ $WAIT = 0 ] && ! pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null && [ ! -d /sys/module/xnu ]; then
+# insmod gone and no xnu.ko: it did not load (no disk or collection, a parameter out of range)
+if ! pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null && [ ! -d /sys/module/xnu ]; then
   # with what xnu.ko itself said last: insmod only has the error number's words, and for a file xnu.ko did not find (the
   # collection, the trust cache, the disk: -2) those are "Unknown symbol in module"
   echo "xnu.ko did not load: $(cat /var/tmp/xnu-insmod.log)" >&2
-  sudo dmesg | grep -a "fki: xnu: " | tail -3 | sed 's/^\[[^]]*\] */  /' >&2
-  sudo systemctl stop xnudrmd 2>/dev/null || true
-  exit 1
+  # (xnu.ko said nothing when Linux itself refused the load, as for a parameter longer than it takes: grep's status
+  # must not end the script here, before the GPU bridge is stopped)
+  { sudo dmesg | grep -a "fki: xnu: " | tail -3 | sed 's/^\[[^]]*\] */  /' >&2; } || true
+  if [ $WAIT = 0 ]; then
+    sudo systemctl stop xnudrmd 2>/dev/null || true
+    exit 1
+  fi
+  # --wait has said why as well, and goes on to keep the run's log and to end with 3, as for any run that ended
+else
+  echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB_DUMP"
+  [ $WAIT = 1 ] || exit 0
 fi
-echo "booting: console scripts/xnu-console.sh, screen tools/hosted/fb2png.py $FB_DUMP"
-[ $WAIT = 1 ] || exit 0
 
 # --wait: until the run ends (insmod returns), then keep its kernel log and say how it ended: 0 a halt (from inside, or
 # a stop asked for), 2 an XNU panic, 4 a restart the hosted system asked for, 3 the run ended otherwise
