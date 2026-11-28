@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-2.0-only
+# SPDX-License-Identifier: APSL-2.0
 # Build xnu.ko's loader (xnu_main.c, macho.c, adt.c) for user space with AddressSanitizer and
 # UndefinedBehaviorSanitizer and run test.c, which loads images it makes itself and reads back what XNU is handed
 # with reader.c (XNU's side of it, in a file of its own). Any host, gcc or clang (CC).
