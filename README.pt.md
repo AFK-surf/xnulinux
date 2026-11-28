@@ -36,11 +36,11 @@ Com um kernel stock do Ubuntu, o comando `insmod xnu.ko` inicializa um disco do 
 
 ```
  Processos do macOS (launchd, WindowServer, Safari...)  Processos do Linux (systemd, sshd, xnudrmd...)
- ──────────────────────────────────────────────────    ────────────────────────────────────────────
-XNU (compilado do código-fonte, camada LINUX64, kexts) │
-   ↕ chamadas ao host linux64 (xnu-patches/include/linux64_abi.h)
+ ────────────────────────────────────────────────────  ───────────────────────────────────────────
+ XNU (compilado do código-fonte, camada LINUX64, kexts) │
+    ↕ chamadas ao host linux64 (xnu-patches/include/linux64_abi.h)
  xnu.ko   (lado APSL: carrega e executa a kernel collection)
-   ↕ FKI, a foreign kernel interface (fki_*)
+    ↕ FKI, a foreign kernel interface (fki_*)
  fki.ko   (lado GPL: CPUs, memória, faults, IPIs, arquivos, rede, host calls)
  Kernel Linux (kernel stock da distro, páginas 4K, PAC)
 ```
