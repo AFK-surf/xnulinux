@@ -3,7 +3,7 @@
 # On the macOS host: the hosted system's disk from a macOS VM disk installed by Apple's own installer, then sent to
 # the xnupoc VM as /var/tmp/mac.img (xnu.ko disk=, kexts/XnuDisk; boot-arg rd=<its system volume>).
 #
-# `tart create NAME --from-ipsw latest` installs macOS with Virtualization.framework, as Apple's own VMs are installed: the
+# `tart create xnumac --from-ipsw latest` installs macOS with Virtualization.framework, as Apple's own VMs are installed: the
 # whole Apple Silicon layout (iBootSystemContainer with xART and Hardware, the main container with the System and Data
 # volume group and Preboot with the cryptexes, the Recovery container). The sealed System volume stays as installed; what the
 # hosted system needs is added to the Data volume only:
@@ -13,6 +13,7 @@
 #  - a root shell on /dev/console (xnulinux.shell), the hosted system's console
 #  - launchd's disabled list for daemons of hardware the hosted system has not (watchdog, audio, ...) and Rosetta's
 # and the static trust cache of that macOS build, for xnu.ko trustcache=. Apple's files stay on this host and in the VM.
+# SRC: the installed disk (default ~/.tart/vms/xnumac/disk.img: a VM of another NAME needs SRC=~/.tart/vms/NAME/disk.img).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 V="bash scripts/vm.sh"

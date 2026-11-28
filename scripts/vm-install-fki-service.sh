@@ -11,6 +11,9 @@
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 LINUX_MEM=${LINUX_MEM:-7G}; CARVE_BASE=${CARVE_BASE:-0x200000000}; CARVE_MB=${CARVE_MB:-8156}
+# the unit loads fki-ko/fki.ko at every boot, before anything else builds it (xnulinux-boot.sh, which runs from xnulinux.service,
+# and that requires this unit): build it now
+make -s -C /lib/modules/$(uname -r)/build M="$P/fki-ko" modules
 G=/etc/default/grub.d/99-xnulinux.cfg
 if [ "${1:-}" = remove ]; then
   [ ! -d /sys/module/xnu ] || { echo "a hosted system is running: scripts/install-service.sh remove (or scripts/xnulinux-boot.sh stop) first" >&2; exit 1; }
