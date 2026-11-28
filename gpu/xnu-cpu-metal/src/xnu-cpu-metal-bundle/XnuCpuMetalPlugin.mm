@@ -3846,6 +3846,21 @@ extern "C" id xnu_cpu_metal_open_device(const char *loader, const char *icd_json
         }
     };
 
+    // Diagnostics (XNU_CPU_METAL_TRACE, metal2vulkan's METAL2VULKAN_* logs, Mesa's) go to stderr, which launchd gives a
+    // daemon as /dev/null: XNU_CPU_METAL_STDERR=<path> appends them to <path>.<pid> instead.
+    if (const char *path = xcmEnv("XNU_CPU_METAL_STDERR"); path && path[0]) {
+        char file[600];
+        int n = snprintf(file, sizeof(file), "%s.%d", path, (int)getpid());
+        if (n > 0 && (size_t)n < sizeof(file)) {
+            int fd = open(file, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+            if (fd >= 0) {
+                fflush(stderr);
+                if (dup2(fd, STDERR_FILENO) >= 0) setvbuf(stderr, nullptr, _IOLBF, 0);
+                if (fd != STDERR_FILENO) close(fd);
+            }
+        }
+    }
+
     if (!customDriver && !useVenus) configureLavapipeEnv();
 
     void *directPfn = directDylib.empty() ? nullptr : xcmLoadDirectDriver(directDylib);
