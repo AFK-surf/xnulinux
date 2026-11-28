@@ -54,18 +54,14 @@ Com um kernel stock do Ubuntu, o comando `insmod xnu.ko` inicializa um disco do 
 
 Funcionando em dois setups Linux arm64:
 
-**Mac com Apple Silicon em uma VM Linux arm64 (`krunkit`, de 1 a 6 CPUs hospedadas)**:
-
-- O macOS 27.2.1 inicializa até a área de trabalho com login automático em 31–48 s (uma VM macOS usando Apple Virtualization no mesmo Mac: 49 s).
-- Os aplicativos abrem e fecham, o Spotlight e o sistema de arquivos funcionam; um teste de estresse de 30 minutos (40 rodadas de Safari, Notes, Calculator, TextEdit, System Settings, Spotlight e uma varredura de disco) termina sem nenhum panic e sem nenhum crash report.
-- Roda como um serviço systemd: iniciado no boot, encerrado de forma limpa junto com a VM, reiniciado após um panic do kernel hospedado, com o log de cada execução mantido em `/var/log/xnulinux/`.
-- A GPU bridge fornece aos aplicativos hospedados a GPU do host (`Virtio-GPU Venus (Apple M5 Max)`) e vem ativada por padrão (`GPU=auto`) quando um render node virtio-gpu está presente, fazendo fallback para renderização via CPU (`GPU=off`) caso contrário.
-
-**NVIDIA DGX Spark no modo bare-metal (Ubuntu 24.04.5 LTS aarch64, Linux `7.0.0-1025-nvidia`)**:
-
-- Inicializa até a área de trabalho completa do macOS (Screen Sharing e SSH funcionando) diretamente no Linux arm64 no modo bare-metal com `CPUS=4` e 8 GiB de RAM reservados para o XNU.
-- Atualmente faz a renderização na CPU (Mesa lavapipe, `GPU=off`): hoje o `xnudrmd` encaminha apenas ioctls do `virtio-gpu` (Venus), portanto o pass-through de GPU por hardware na GPU GB10 exige um novo backend da DRM bridge.
- 
+- **Mac com Apple Silicon em uma VM Linux arm64 (`krunkit`, de 1 a 6 CPUs hospedadas)**:
+  - O macOS 27.2.1 inicializa até a área de trabalho com login automático em 31–48 s (uma VM macOS usando Apple Virtualization no mesmo Mac: 49 s).
+  - Os aplicativos abrem e fecham, o Spotlight e o sistema de arquivos funcionam; um teste de estresse de 30 minutos (40 rodadas de Safari, Notes, Calculator, TextEdit, System Settings, Spotlight e uma varredura de disco) termina sem nenhum panic e sem nenhum crash report.
+  - Roda como um serviço systemd: iniciado no boot, encerrado de forma limpa junto com a VM, reiniciado após um panic do kernel hospedado, com o log de cada execução mantido em `/var/log/xnulinux/`.
+  - A GPU bridge fornece aos aplicativos hospedados a GPU do host (`Virtio-GPU Venus (Apple M5 Max)`) e vem ativada por padrão (`GPU=auto`) quando um render node virtio-gpu está presente, fazendo fallback para renderização via CPU (`GPU=off`) caso contrário.
+- **NVIDIA DGX Spark no modo bare-metal (Ubuntu 24.04.5 LTS aarch64, Linux `7.0.0-1025-nvidia`)**:
+  - Inicializa até a área de trabalho completa do macOS (Screen Sharing e SSH funcionando) diretamente no Linux arm64 no modo bare-metal com `CPUS=4` e 8 GiB de RAM reservados para o XNU.
+  - Atualmente faz a renderização na CPU (Mesa lavapipe, `GPU=off`): hoje o `xnudrmd` encaminha apenas ioctls do `virtio-gpu` (Venus), portanto o pass-through de GPU por hardware na GPU GB10 exige um novo backend da DRM bridge.
 A entrega como um serviço hospedado (o que é distribuído e o que o usuário instala para executar o macOS da Apple) está documentada em [`docs/hosted-service.md`](docs/hosted-service.md).
 
 O que ainda é uma solução provisória está listado em [`docs/production.md`](docs/production.md). Em destaque: o cryptex do sistema operacional é mesclado ao volume do sistema, o AMFI recebe patches e o SIP é flexibilizado, além de o acesso à memória ser mais lento do que em uma VM nativa (páginas de 4K contra 16K).
