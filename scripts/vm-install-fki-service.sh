@@ -11,9 +11,6 @@
 set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 LINUX_MEM=${LINUX_MEM:-7G}; CARVE_BASE=${CARVE_BASE:-0x200000000}; CARVE_MB=${CARVE_MB:-8156}
-# the unit loads fki-ko/fki.ko at every boot, before anything else builds it (xnulinux-boot.sh, which runs from xnulinux.service,
-# and that requires this unit): build it now
-make -s -C /lib/modules/$(uname -r)/build M="$P/fki-ko" modules
 G=/etc/default/grub.d/99-xnulinux.cfg
 if [ "${1:-}" = remove ]; then
   [ ! -d /sys/module/xnu ] || { echo "a hosted system is running: scripts/install-service.sh remove (or scripts/xnulinux-boot.sh stop) first" >&2; exit 1; }
@@ -25,6 +22,9 @@ if [ "${1:-}" = remove ]; then
   echo "removed: xnulinux-fki.service and the mem= command line ($G); fki.ko is unloaded, and after a reboot Linux has all of the machine's memory again"
   exit 0
 fi
+# the unit loads fki-ko/fki.ko at every boot, before anything else builds it (xnulinux-boot.sh, which runs from
+# xnulinux.service after this unit): build it now
+make -s -C /lib/modules/$(uname -r)/build M="$P/fki-ko" modules
 # nokaslr: arm64's EFI stub randomises the Linux kernel's physical load address across all EFI memory before mem=
 # takes effect, which otherwise places the kernel image inside the carve-out on some boots (fki then refuses to map it).
 echo "GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX mem=$LINUX_MEM nokaslr log_buf_len=128M\"" | sudo tee $G >/dev/null

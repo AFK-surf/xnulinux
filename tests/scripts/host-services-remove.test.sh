@@ -22,6 +22,9 @@ stub systemctl <<'EOF'
 case "$1 $2" in "disable --now") [ "$3" != xnulinux.service ] || rm -rf "$R/sys/module/xnu";; esac	# its ExecStop ends the system
 EOF
 stub update-grub < /dev/null
+stub make <<'EOF'
+echo "$*" >> "$T/make"
+EOF
 stub rmmod <<'EOF'
 [ -d "$R/sys/module/$1" ] || { echo "rmmod: ERROR: Module $1 is not currently loaded" >&2; exit 1; }
 rm -rf "$R/sys/module/$1"
