@@ -84,6 +84,8 @@ while :; do
     case $how in
     halt) klog "fki: xnu: the hosted system halted: run ended";;
     panic) klog "fki: xnu: XNU panic:"; klog "fki: panic(cpu 0 caller 0xfffffe0000000000): stand-in";;
+    longpanic) klog "fki: xnu: XNU panic:"	# and a long log after it
+      seq 1 50000 | sed 's/^/[0.000000] host kernel: fki: xnu: monitor line /' >> "$T/klog";;
     esac
     exit 0	# the module stays loaded after a run that ended by itself
   fi
@@ -138,6 +140,8 @@ host 'panic 1'; boot --wait; s=$?
 check '--wait, an XNU panic: status 2, "panicked"' [ $s = 2 -a "$(grep -c '^the hosted system panicked: ' "$T/out")" != 0 ]
 check "... the run's log is kept, with the panic" grep -q 'fki: xnu: XNU panic:' "$(log)"
 check '... xnu.ko is unloaded and the interrupts are back (a run that ended by itself)' [ ! -d "$R/sys/module/xnu" -a "$(cat "$R/proc/irq/default_smp_affinity")" = f ]
+host 'longpanic 1'; boot --wait; s=$?
+check '--wait, an XNU panic with a long log after it: status 2, "panicked"' [ $s = 2 -a "$(grep -c '^the hosted system panicked: ' "$T/out")" != 0 ]
 host 'halt 2'; /bin/bash "$P/scripts/xnulinux-boot.sh" --wait > "$T/out" 2>&1 & w=$!
 wait_for 10 grep -q '^booting' "$T/out"
 klog "fki: darwin console: # grep -c 'XNU panic' /var/log/notes"; klog "fki: darwin console: XNU panic: 3 lines"

@@ -219,7 +219,8 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   ls -1t "$LOGDIR"/run-*.log | tail -n +21 | xargs -r sudo rm -f	# the last 20 runs
   # how it ended is in xnu.ko's own lines, not in what the hosted console printed (the log has those too: a console that
   # showed the words "XNU panic" turned a clean shutdown into a panic, and systemd started the system again)
-  said() { grep -av "fki: darwin console: " "$LOG" | grep -aq "$1"; }
+  # (grep -c, not -q: under pipefail the first grep, cut off by an early -q, fails with SIGPIPE on a long log)
+  said() { grep -av "fki: darwin console: " "$LOG" | grep -ac "$1" >/dev/null; }
   if said "XNU panic"; then echo "the hosted system panicked: $LOG" >&2; return 2; fi
   # shut down from inside (shutdown -h, the Apple menu): a halt is a clean end; a restart ends with 4 for systemd to start it again
   # (checked before the stop: the other CPUs log "run stopped by the host" as they leave after it)
